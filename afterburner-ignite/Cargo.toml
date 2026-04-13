@@ -1,0 +1,16 @@
+[package]
+name = "afterburner-ignite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Afterburner native engine — rquickjs FFI path for trusted JS code"
+
+[dependencies]
+afterburner-core.workspace = true
+rquickjs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+kovan-map.workspace = true
+fastrace.workspace = true

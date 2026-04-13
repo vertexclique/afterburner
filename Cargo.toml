@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "afterburner-core",
+    "afterburner-wasi",
+    "afterburner-ignite",
+    "afterburner-flow",
+    "afterburner-adaptive",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+authors = ["Theo Bulut <vertexclique@gmail.com>"]
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+afterburner-core = { path = "afterburner-core" }
+afterburner-wasi = { path = "afterburner-wasi" }
+afterburner-ignite = { path = "afterburner-ignite" }
+afterburner-flow = { path = "afterburner-flow" }
+afterburner-adaptive = { path = "afterburner-adaptive" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+kovan-map = "0.1"
+kovan-channel = "0.1"
+
+wasmtime = { version = "28", features = ["cranelift", "cache"] }
+wasmtime-wasi = "28"
+anyhow = "1"
+
+rquickjs = { version = "0.11", features = ["bindgen"] }
+
+fastrace = { version = "0.7", features = ["enable"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[profile.bench]
+inherits = "release"

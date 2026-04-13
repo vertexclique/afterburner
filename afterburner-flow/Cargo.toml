@@ -1,0 +1,15 @@
+[package]
+name = "afterburner-flow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Afterburner flow engine — load/execute/unload JS modules with chained input"
+
+[dependencies]
+afterburner-core.workspace = true
+afterburner-wasi.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+fastrace.workspace = true

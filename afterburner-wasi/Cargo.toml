@@ -1,0 +1,26 @@
+[package]
+name = "afterburner-wasi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Afterburner WASM sandbox engine — Wasmtime + QuickJS-in-WASM for untrusted JS code"
+
+[features]
+default = []
+# Expose HostFunction::HttpRequest to JS scripts. Off by default so flow
+# scripts don't get ambient network access. Forwards to afterburner-core's
+# feature of the same name.
+host-http = ["afterburner-core/host-http"]
+
+[dependencies]
+afterburner-core.workspace = true
+wasmtime.workspace = true
+wasmtime-wasi = { workspace = true, features = ["preview1"] }
+serde.workspace = true
+serde_json.workspace = true
+kovan-map.workspace = true
+anyhow.workspace = true
+tempfile = "3"
+fastrace.workspace = true

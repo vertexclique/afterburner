@@ -1,0 +1,22 @@
+[package]
+name = "afterburner-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Afterburner core — Combustor trait, types, and cache registry for the JS to WASM execution engine"
+
+[features]
+default = []
+# Expose HostFunction::HttpRequest / HostContext::http_request. Off by
+# default so hosts that only need Log/GetEnv don't carry HTTP types.
+host-http = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+kovan-map.workspace = true
+fastrace.workspace = true
