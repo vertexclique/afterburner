@@ -37,6 +37,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_crypto_kdfs(linker)?;
     wrap_crypto_signing(linker)?;
     wrap_crypto_signing_streaming(linker)?;
+    wrap_crypto_hash_streaming(linker)?;
     wrap_os(linker)?;
     wrap_http(linker)?;
     wrap_dns(linker)?;
@@ -1088,6 +1089,162 @@ fn wrap_crypto_signing_streaming(
             },
         )
         .map_err(link_err)?;
+    Ok(())
+}
+
+/// Streaming `createHash` / `createHmac`. `hash_open` is for plain
+/// digests; `hmac_open` takes the key at open time (MAC is constructed
+/// once — HMAC doesn't accept a key change mid-stream). Both share the
+/// same handle id space, update, and finalize path.
+fn wrap_crypto_hash_streaming(
+    linker: &mut Linker<HostState>,
+) -> Result<(), AfterburnerError> {
+    linker
+        .func_wrap(
+            NS,
+            "host_crypto_hash_open",
+            |mut caller: Caller<'_, HostState>,
+             algo_ptr: i32,
+             algo_len: i32|
+             -> i64 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return 0;
+                };
+                let algo = match read_str(&memory, &caller, algo_ptr, algo_len) {
+                    Some(s) => s,
+                    None => return 0,
+                };
+                if !caller.data().manifold.crypto {
+                    record(&mut caller, "crypto.createHash: permission denied");
+                    return 0;
+                }
+                match caller.data().hash_handles.open_digest(&algo) {
+                    Ok(id) => id as i64,
+                    Err(e) => {
+                        record(&mut caller, &e.to_string());
+                        0
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_crypto_hmac_open",
+            |mut caller: Caller<'_, HostState>,
+             algo_ptr: i32,
+             algo_len: i32,
+             key_ptr: i32,
+             key_len: i32|
+             -> i64 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return 0;
+                };
+                let algo = match read_str(&memory, &caller, algo_ptr, algo_len) {
+                    Some(s) => s,
+                    None => return 0,
+                };
+                let key_b64 = match read_str(&memory, &caller, key_ptr, key_len) {
+                    Some(s) => s,
+                    None => return 0,
+                };
+                let key = match B64.decode(key_b64.as_bytes()) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        record(&mut caller, "hmac key: invalid base64");
+                        return 0;
+                    }
+                };
+                if !caller.data().manifold.crypto {
+                    record(&mut caller, "crypto.createHmac: permission denied");
+                    return 0;
+                }
+                match caller.data().hash_handles.open_hmac(&algo, &key) {
+                    Ok(id) => id as i64,
+                    Err(e) => {
+                        record(&mut caller, &e.to_string());
+                        0
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_crypto_hash_update",
+            |mut caller: Caller<'_, HostState>,
+             handle: i64,
+             data_ptr: i32,
+             data_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let data_b64 = match read_str(&memory, &caller, data_ptr, data_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let data = match B64.decode(data_b64.as_bytes()) {
+                    Ok(v) => v,
+                    Err(_) => return E_OTHER,
+                };
+                match caller.data().hash_handles.update(handle as u64, &data) {
+                    Ok(()) => 0,
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_crypto_hash_digest",
+            |mut caller: Caller<'_, HostState>,
+             handle: i64,
+             enc_ptr: i32,
+             enc_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                // Empty encoding means default — hex. Matches the
+                // one-shot host_crypto_hash which always emits hex.
+                let enc = if enc_len == 0 {
+                    "hex".to_string()
+                } else {
+                    match read_str(&memory, &caller, enc_ptr, enc_len) {
+                        Some(s) => s,
+                        None => return E_OTHER,
+                    }
+                };
+                let bytes = match caller.data().hash_handles.finalize(handle as u64) {
+                    Ok(b) => b,
+                    Err(e) => return map_err(&mut caller, e),
+                };
+                let encoded: String = match enc.as_str() {
+                    "hex" => hex::encode(&bytes),
+                    "base64" => B64.encode(&bytes),
+                    "binary" | "latin1" => bytes.iter().map(|b| *b as char).collect(),
+                    other => {
+                        record(
+                            &mut caller,
+                            &format!("hash.digest: unsupported encoding '{other}'"),
+                        );
+                        return E_OTHER;
+                    }
+                };
+                write_out(&mut caller, &memory, out_ptr, out_cap, encoded.as_bytes())
+            },
+        )
+        .map_err(link_err)?;
+
     Ok(())
 }
 

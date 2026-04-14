@@ -291,6 +291,94 @@ fn fresh_p256_keypair() -> (String, String) {
 }
 
 #[test]
+fn streaming_hash_matches_one_shot() {
+    // Chunked createHash('sha256') produces the same hex digest as
+    // one-shot crypto.hash on the concatenated payload. Covers all four
+    // supported algorithms (sha256/384/512/md5) so we don't regress any.
+    let src = r#"
+        module.exports = () => {
+            try {
+                const crypto = require('crypto');
+                const parts = [];
+                // ~10 KB payload split across 100 chunks
+                for (let i = 0; i < 100; i++) parts.push('chunk-' + i + '-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx');
+                const joined = parts.join('');
+
+                const algos = ['sha256', 'sha384', 'sha512', 'md5'];
+                const out = {};
+                for (const algo of algos) {
+                    const streamed = (function () {
+                        const h = crypto.createHash(algo);
+                        for (const p of parts) h.update(p);
+                        return h.digest('hex');
+                    })();
+                    const oneShot = crypto.createHash(algo).update(joined).digest('hex');
+                    out[algo] = { equal: streamed === oneShot, digestLen: streamed.length };
+                }
+                return out;
+            } catch (e) { return { err: e.message }; }
+        };
+    "#;
+    let mut m = Manifold::sealed();
+    m.crypto = true;
+    let out = run(src, m);
+    assert_eq!(out["sha256"], json!({ "equal": true, "digestLen": 64 }));
+    assert_eq!(out["sha384"], json!({ "equal": true, "digestLen": 96 }));
+    assert_eq!(out["sha512"], json!({ "equal": true, "digestLen": 128 }));
+    assert_eq!(out["md5"], json!({ "equal": true, "digestLen": 32 }));
+}
+
+#[test]
+fn streaming_hmac_matches_one_shot() {
+    let src = r#"
+        module.exports = () => {
+            try {
+                const crypto = require('crypto');
+                const parts = [];
+                for (let i = 0; i < 100; i++) parts.push('row-' + i + '-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx');
+                const joined = parts.join('');
+                const key = 'super-secret-key';
+                const algos = ['sha256', 'sha384', 'sha512'];
+                const out = {};
+                for (const algo of algos) {
+                    const streamed = (function () {
+                        const h = crypto.createHmac(algo, key);
+                        for (const p of parts) h.update(p);
+                        return h.digest('hex');
+                    })();
+                    const oneShot = crypto.createHmac(algo, key).update(joined).digest('hex');
+                    out[algo] = { equal: streamed === oneShot };
+                }
+                return out;
+            } catch (e) { return { err: e.message }; }
+        };
+    "#;
+    let mut m = Manifold::sealed();
+    m.crypto = true;
+    let out = run(src, m);
+    assert_eq!(out["sha256"], json!({ "equal": true }));
+    assert_eq!(out["sha384"], json!({ "equal": true }));
+    assert_eq!(out["sha512"], json!({ "equal": true }));
+}
+
+#[test]
+fn hash_digest_called_twice_throws() {
+    let src = r#"
+        module.exports = () => {
+            const crypto = require('crypto');
+            const h = crypto.createHash('sha256').update('abc');
+            h.digest('hex');
+            try { h.digest('hex'); return 'unexpected'; }
+            catch (e) { return e.message; }
+        };
+    "#;
+    let mut m = Manifold::sealed();
+    m.crypto = true;
+    let out = run(src, m).as_str().unwrap().to_lowercase();
+    assert!(out.contains("already called"), "got {out}");
+}
+
+#[test]
 fn rsa_sign_verify_roundtrip() {
     let (priv_pem, pub_pem) = fresh_rsa_keypair();
     let src = format!(

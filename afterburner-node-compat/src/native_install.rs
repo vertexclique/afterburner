@@ -7,16 +7,20 @@
 //! to the corresponding Rust `*_host` module, and translates errors
 //! into JS exceptions via `Exception::throw_message`.
 
+use crate::hash_handles::HashHandleStore;
 use crate::sign_handles::SignHandleStore;
 use crate::{
     active_manifold, child_process_host, crypto_host, dns_host, fs_host, http_host, os_host,
     state_active, zlib_host,
 };
 
-// Thread-local sign/verify handle store. Each thread-local
-// `ThreadRuntime` owns its own — handles never cross thread boundaries.
+// Thread-local handle stores. Each thread-local `ThreadRuntime` owns
+// its own — handles never cross thread boundaries. `SIGN_HANDLES` is
+// for streaming sign/verify; `HASH_HANDLES` is for streaming
+// createHash/createHmac.
 thread_local! {
     static SIGN_HANDLES: SignHandleStore = SignHandleStore::new();
+    static HASH_HANDLES: HashHandleStore = HashHandleStore::new();
 }
 use afterburner_core::AfterburnerError;
 use base64::Engine as _;
@@ -472,6 +476,91 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
                 })
                 .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
                 Ok(if ok { 1 } else { 0 })
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    // ---- crypto streaming hash / hmac -----------------------------------
+    // Permission-gated at open time: if the manifold denies crypto, the
+    // `open` call throws and no handle is allocated. No need to re-check
+    // on every update/finalize.
+    g.set(
+        "__host_crypto_hash_open",
+        Function::new(ctx.clone(), |ctx: Ctx<'_>, algo: String| {
+            active_manifold::with(|m| {
+                if !m.crypto {
+                    return Err(AfterburnerError::PermissionDenied(
+                        "crypto.createHash".into(),
+                    ));
+                }
+                Ok(())
+            })
+            .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+            let id = HASH_HANDLES
+                .with(|s| s.open_digest(&algo))
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+            Ok::<_, rquickjs::Error>(id as f64)
+        })
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_crypto_hmac_open",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, algo: String, key_b64: String| {
+                active_manifold::with(|m| {
+                    if !m.crypto {
+                        return Err(AfterburnerError::PermissionDenied(
+                            "crypto.createHmac".into(),
+                        ));
+                    }
+                    Ok(())
+                })
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                let key = B64
+                    .decode(key_b64.as_bytes())
+                    .map_err(|e| Exception::throw_message(&ctx, &format!("hmac key b64: {e}")))?;
+                let id = HASH_HANDLES
+                    .with(|s| s.open_hmac(&algo, &key))
+                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                Ok::<_, rquickjs::Error>(id as f64)
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_crypto_hash_update",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, handle: f64, data_b64: String| {
+                let data = B64
+                    .decode(data_b64.as_bytes())
+                    .map_err(|e| Exception::throw_message(&ctx, &format!("data b64: {e}")))?;
+                HASH_HANDLES
+                    .with(|s| s.update(handle as u64, &data))
+                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                Ok::<_, rquickjs::Error>(())
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_crypto_hash_digest",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, handle: f64, enc: Option<String>| {
+                let bytes = HASH_HANDLES
+                    .with(|s| s.finalize(handle as u64))
+                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                encode_bytes(&ctx, &bytes, enc.as_deref())
             },
         )
         .map_err(err_to_ab)?,

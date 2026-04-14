@@ -17,27 +17,31 @@ type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
 type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 
-/// Incremental digest state for streaming sign / verify. `Clone`
-/// because the host exposes an `update` primitive that takes the
-/// current state, feeds the new chunk, and stores the new state back —
-/// cloning is how we avoid interior-mutability + sync primitives.
+/// Incremental digest state for streaming sign / verify and hash.
+/// `Clone` because the host exposes an `update` primitive that takes
+/// the current state, feeds the new chunk, and stores the new state
+/// back — cloning is how we avoid interior-mutability + sync primitives.
 #[derive(Clone)]
 pub enum DigestState {
     Sha256(Sha256),
     Sha384(Sha384),
     Sha512(Sha512),
+    Md5(Md5),
 }
 
 impl DigestState {
-    /// Build a fresh digest state for `algorithm`. `RS256`/`ES256`
-    /// share Sha-256; RSA also supports Sha-384/512.
+    /// Build a fresh digest state for `algorithm`. Accepts:
+    /// - sign algorithm codes: `RS256` (sha-256), `ES256` (sha-256),
+    ///   `RS384` (sha-384), `RS512` (sha-512).
+    /// - hash names (lowercase): `sha256`, `sha384`, `sha512`, `md5`.
     pub fn new(algorithm: &str) -> Result<Self> {
         match algorithm {
-            "RS256" | "ES256" => Ok(DigestState::Sha256(Sha256::new())),
-            "RS384" => Ok(DigestState::Sha384(Sha384::new())),
-            "RS512" => Ok(DigestState::Sha512(Sha512::new())),
+            "RS256" | "ES256" | "sha256" => Ok(DigestState::Sha256(Sha256::new())),
+            "RS384" | "sha384" => Ok(DigestState::Sha384(Sha384::new())),
+            "RS512" | "sha512" => Ok(DigestState::Sha512(Sha512::new())),
+            "md5" => Ok(DigestState::Md5(Md5::new())),
             other => Err(AfterburnerError::Host(format!(
-                "sign/verify: unsupported algorithm '{other}'"
+                "digest: unsupported algorithm '{other}'"
             ))),
         }
     }
@@ -47,6 +51,65 @@ impl DigestState {
             DigestState::Sha256(h) => h.update(data),
             DigestState::Sha384(h) => h.update(data),
             DigestState::Sha512(h) => h.update(data),
+            DigestState::Md5(h) => h.update(data),
+        }
+    }
+
+    /// Consume the state and return the raw digest bytes.
+    pub fn finalize_bytes(self) -> Vec<u8> {
+        match self {
+            DigestState::Sha256(h) => h.finalize().to_vec(),
+            DigestState::Sha384(h) => h.finalize().to_vec(),
+            DigestState::Sha512(h) => h.finalize().to_vec(),
+            DigestState::Md5(h) => h.finalize().to_vec(),
+        }
+    }
+}
+
+/// Incremental HMAC state for streaming `createHmac`. Same
+/// `Clone`-on-update pattern as [`DigestState`]. The key is embedded
+/// at construction time — HMAC doesn't accept a key change mid-stream.
+#[derive(Clone)]
+pub enum HmacState {
+    Sha256(Hmac<Sha256>),
+    Sha384(Hmac<Sha384>),
+    Sha512(Hmac<Sha512>),
+}
+
+impl HmacState {
+    pub fn new(algorithm: &str, key: &[u8]) -> Result<Self> {
+        match algorithm {
+            "sha256" => Ok(HmacState::Sha256(
+                <Hmac<Sha256> as Mac>::new_from_slice(key)
+                    .map_err(|e| AfterburnerError::Host(format!("hmac key: {e}")))?,
+            )),
+            "sha384" => Ok(HmacState::Sha384(
+                <Hmac<Sha384> as Mac>::new_from_slice(key)
+                    .map_err(|e| AfterburnerError::Host(format!("hmac key: {e}")))?,
+            )),
+            "sha512" => Ok(HmacState::Sha512(
+                <Hmac<Sha512> as Mac>::new_from_slice(key)
+                    .map_err(|e| AfterburnerError::Host(format!("hmac key: {e}")))?,
+            )),
+            other => Err(AfterburnerError::Host(format!(
+                "hmac: unsupported algorithm '{other}'"
+            ))),
+        }
+    }
+
+    pub fn update(&mut self, data: &[u8]) {
+        match self {
+            HmacState::Sha256(m) => m.update(data),
+            HmacState::Sha384(m) => m.update(data),
+            HmacState::Sha512(m) => m.update(data),
+        }
+    }
+
+    pub fn finalize_bytes(self) -> Vec<u8> {
+        match self {
+            HmacState::Sha256(m) => m.finalize().into_bytes().to_vec(),
+            HmacState::Sha384(m) => m.finalize().into_bytes().to_vec(),
+            HmacState::Sha512(m) => m.finalize().into_bytes().to_vec(),
         }
     }
 }

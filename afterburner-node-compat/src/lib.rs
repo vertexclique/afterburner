@@ -16,6 +16,7 @@ pub mod child_process_host;
 pub mod crypto_host;
 pub mod dns_host;
 pub mod fs_host;
+pub mod hash_handles;
 pub mod http_host;
 pub mod native_install;
 pub mod os_host;

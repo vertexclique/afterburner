@@ -4,6 +4,7 @@
 //! last-error slot consulted by `afterburner:host` imports.
 
 use afterburner_core::{Manifold, SharedStateStore};
+use afterburner_node_compat::hash_handles::HashHandleStore;
 use afterburner_node_compat::sign_handles::SignHandleStore;
 use wasmtime::{ResourceLimiter, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
@@ -25,6 +26,9 @@ pub struct HostState {
     /// Per-store streaming sign/verify handle store. Lives for the
     /// thrust's duration and is dropped with the `Store`.
     pub sign_handles: SignHandleStore,
+    /// Per-store streaming createHash / createHmac handle store. Same
+    /// lifetime as `sign_handles`.
+    pub hash_handles: HashHandleStore,
     /// Detailed message for the last failed host call. The plugin reads
     /// this via the `host_last_error` import when a syscall returned a
     /// negative error code, and the JS glue surfaces it to the user.
@@ -67,6 +71,7 @@ impl HostState {
             manifold,
             state_store,
             sign_handles: SignHandleStore::new(),
+            hash_handles: HashHandleStore::new(),
             last_error: String::new(),
         }
     }

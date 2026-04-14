@@ -166,6 +166,28 @@ unsafe extern "C" {
         sig_len: u32,
     ) -> i32;
 
+    // Streaming createHash / createHmac. `hash_open` is for unkeyed
+    // digests; `hmac_open` takes the MAC key at open time.
+    fn host_crypto_hash_open(algo_ptr: *const u8, algo_len: u32) -> i64;
+    fn host_crypto_hmac_open(
+        algo_ptr: *const u8,
+        algo_len: u32,
+        key_ptr: *const u8,
+        key_len: u32,
+    ) -> i64;
+    fn host_crypto_hash_update(
+        handle: i64,
+        data_ptr: *const u8,
+        data_len: u32,
+    ) -> i32;
+    fn host_crypto_hash_digest(
+        handle: i64,
+        enc_ptr: *const u8,
+        enc_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+
     // State store (afterburner:state).
     fn host_state_get(key_ptr: *const u8, key_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
     fn host_state_set(
@@ -328,6 +350,25 @@ fn read_last_error(code: i32) -> String {
 fn modify_runtime(runtime: Runtime) -> Runtime {
     runtime.context().with(|ctx| {
         let globals = ctx.globals();
+
+        // Expose the host's `last_error` slot as a JS-callable global.
+        // Useful when a host call returns a sentinel (0 handle, -N code)
+        // and the polyfill needs the detailed message — e.g. to
+        // distinguish "permission denied" from "algorithm not supported"
+        // on a failed `createHash` open.
+        let _ = globals.set(
+            "__host_last_error",
+            Func::from(|| -> String {
+                let mut buf = vec![0u8; 4096];
+                let n = unsafe { host_last_error(buf.as_mut_ptr(), buf.len() as u32) };
+                if n >= 0 {
+                    buf.truncate(n as usize);
+                    String::from_utf8_lossy(&buf).into_owned()
+                } else {
+                    String::new()
+                }
+            }),
+        );
 
         let _ = globals.set(
             "__host_fs_exists_sync",
@@ -802,6 +843,64 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
                     }
                 },
             ),
+        );
+
+        // Streaming createHash / createHmac.
+        let _ = globals.set(
+            "__host_crypto_hash_open",
+            Func::from(|algo: String| -> f64 {
+                let ab = algo.as_bytes();
+                let h = unsafe { host_crypto_hash_open(ab.as_ptr(), ab.len() as u32) };
+                if h <= 0 { 0.0 } else { h as f64 }
+            }),
+        );
+
+        let _ = globals.set(
+            "__host_crypto_hmac_open",
+            Func::from(|algo: String, key_b64: String| -> f64 {
+                let ab = algo.as_bytes();
+                let kb = key_b64.as_bytes();
+                let h = unsafe {
+                    host_crypto_hmac_open(
+                        ab.as_ptr(),
+                        ab.len() as u32,
+                        kb.as_ptr(),
+                        kb.len() as u32,
+                    )
+                };
+                if h <= 0 { 0.0 } else { h as f64 }
+            }),
+        );
+
+        let _ = globals.set(
+            "__host_crypto_hash_update",
+            Func::from(|handle: f64, data_b64: String| -> String {
+                let h = handle as i64;
+                let db = data_b64.as_bytes();
+                let code = unsafe {
+                    host_crypto_hash_update(h, db.as_ptr(), db.len() as u32)
+                };
+                if code >= 0 {
+                    String::new()
+                } else {
+                    format!("__HOST_ERR__:{}", read_last_error(code))
+                }
+            }),
+        );
+
+        let _ = globals.set(
+            "__host_crypto_hash_digest",
+            Func::from(|handle: f64, enc: Option<String>| -> String {
+                let h = handle as i64;
+                let enc_s = enc.unwrap_or_default();
+                let eb = enc_s.as_bytes();
+                match call_read(|out, cap| unsafe {
+                    host_crypto_hash_digest(h, eb.as_ptr(), eb.len() as u32, out, cap)
+                }) {
+                    Ok(s) => s,
+                    Err(e) => format!("__HOST_ERR__:{e}"),
+                }
+            }),
         );
 
         // State store (afterburner:state).

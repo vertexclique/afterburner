@@ -14,14 +14,6 @@ __register_module('crypto', function(module, exports, require) {
         return fn;
     }
 
-    function Hash(algorithm) {
-        this._algo = String(algorithm).toLowerCase();
-        this._chunks = [];
-    }
-    Hash.prototype.update = function(data) {
-        this._chunks.push(typeof data === 'string' ? data : String(data));
-        return this;
-    };
     function checkErr(result, op) {
         if (typeof result === 'string' && result.indexOf('__HOST_ERR__:') === 0) {
             var msg = result.slice('__HOST_ERR__:'.length);
@@ -32,25 +24,124 @@ __register_module('crypto', function(module, exports, require) {
         return result;
     }
 
+    function streamingHashPresent() {
+        return typeof globalThis.__host_crypto_hash_open === 'function'
+            && typeof globalThis.__host_crypto_hash_update === 'function'
+            && typeof globalThis.__host_crypto_hash_digest === 'function';
+    }
+
+    // Encode whatever the user handed us as a base64 string for the
+    // streaming host wire. String inputs go through UTF-8 to match
+    // Node's default. Buffer / Uint8Array pass through as their raw
+    // bytes, so binary data roundtrips cleanly.
+    function toUpdateB64(data) {
+        if (data == null) return '';
+        var B = require('buffer').Buffer;
+        if (typeof data === 'string') {
+            return B.from(data, 'utf8').toString('base64');
+        }
+        if (B.isBuffer(data)) return data.toString('base64');
+        if (data instanceof Uint8Array) return B.from(data).toString('base64');
+        // Fall back to String() coercion — matches old behavior for
+        // weird input types.
+        return B.from(String(data), 'utf8').toString('base64');
+    }
+
+    // When a host `open` returns the 0-sentinel, the detailed reason
+    // is in `__host_last_error` on WASM. Native throws the exception
+    // inline, so this path only fires in the WASM sandbox.
+    function throwOpenErr(op, algo) {
+        var msg = '';
+        if (typeof globalThis.__host_last_error === 'function') {
+            msg = String(globalThis.__host_last_error() || '');
+        }
+        if (!msg) msg = "'" + algo + "' not supported";
+        var err = new Error('crypto.' + op + ': ' + msg);
+        if (msg.toLowerCase().indexOf('permission denied') !== -1) err.code = 'EACCES';
+        throw err;
+    }
+
+    function Hash(algorithm) {
+        this._algo = String(algorithm).toLowerCase();
+        this._finalized = false;
+        this._streaming = streamingHashPresent();
+        if (this._streaming) {
+            this._handle = globalThis.__host_crypto_hash_open(this._algo);
+            if (!this._handle) throwOpenErr('createHash', this._algo);
+        } else {
+            this._chunks = [];
+        }
+    }
+    Hash.prototype.update = function(data) {
+        if (this._finalized) throw new Error('Digest already called');
+        if (this._streaming) {
+            var r = globalThis.__host_crypto_hash_update(this._handle, toUpdateB64(data));
+            if (typeof r === 'string' && r.indexOf('__HOST_ERR__:') === 0) {
+                throw new Error('crypto.hash.update: ' + r.slice('__HOST_ERR__:'.length));
+            }
+        } else {
+            this._chunks.push(typeof data === 'string' ? data : String(data));
+        }
+        return this;
+    };
     Hash.prototype.digest = function(encoding) {
+        if (this._finalized) throw new Error('Digest already called');
+        this._finalized = true;
+        var enc = encoding || 'hex';
+        if (this._streaming) {
+            return checkErr(
+                globalThis.__host_crypto_hash_digest(this._handle, enc),
+                'hash'
+            );
+        }
         return checkErr(
-            ensureHost('hash')(this._algo, this._chunks.join(''), encoding || 'hex'),
+            ensureHost('hash')(this._algo, this._chunks.join(''), enc),
             'hash'
         );
     };
 
     function Hmac(algorithm, key) {
         this._algo = String(algorithm).toLowerCase();
-        this._key  = typeof key === 'string' ? key : String(key);
-        this._chunks = [];
+        this._finalized = false;
+        this._streaming = streamingHashPresent()
+            && typeof globalThis.__host_crypto_hmac_open === 'function';
+        if (this._streaming) {
+            var B = require('buffer').Buffer;
+            var keyB64 = typeof key === 'string'
+                ? B.from(key, 'utf8').toString('base64')
+                : (B.isBuffer(key) ? key.toString('base64')
+                   : B.from(String(key), 'utf8').toString('base64'));
+            this._handle = globalThis.__host_crypto_hmac_open(this._algo, keyB64);
+            if (!this._handle) throwOpenErr('createHmac', this._algo);
+        } else {
+            this._key = typeof key === 'string' ? key : String(key);
+            this._chunks = [];
+        }
     }
     Hmac.prototype.update = function(data) {
-        this._chunks.push(typeof data === 'string' ? data : String(data));
+        if (this._finalized) throw new Error('Digest already called');
+        if (this._streaming) {
+            var r = globalThis.__host_crypto_hash_update(this._handle, toUpdateB64(data));
+            if (typeof r === 'string' && r.indexOf('__HOST_ERR__:') === 0) {
+                throw new Error('crypto.hmac.update: ' + r.slice('__HOST_ERR__:'.length));
+            }
+        } else {
+            this._chunks.push(typeof data === 'string' ? data : String(data));
+        }
         return this;
     };
     Hmac.prototype.digest = function(encoding) {
+        if (this._finalized) throw new Error('Digest already called');
+        this._finalized = true;
+        var enc = encoding || 'hex';
+        if (this._streaming) {
+            return checkErr(
+                globalThis.__host_crypto_hash_digest(this._handle, enc),
+                'hmac'
+            );
+        }
         return checkErr(
-            ensureHost('hmac')(this._algo, this._key, this._chunks.join(''), encoding || 'hex'),
+            ensureHost('hmac')(this._algo, this._key, this._chunks.join(''), enc),
             'hmac'
         );
     };

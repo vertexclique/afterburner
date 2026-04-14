@@ -116,6 +116,89 @@ fn fresh_p256_keypair() -> (String, String) {
 }
 
 #[test]
+fn wasm_streaming_hash_matches_one_shot() {
+    let src = r#"
+        module.exports = () => {
+            try {
+                const crypto = require('crypto');
+                const parts = [];
+                for (let i = 0; i < 100; i++) parts.push('chunk-' + i + '-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx');
+                const joined = parts.join('');
+                const algos = ['sha256', 'sha384', 'sha512', 'md5'];
+                const out = {};
+                for (const algo of algos) {
+                    const streamed = (function () {
+                        const h = crypto.createHash(algo);
+                        for (const p of parts) h.update(p);
+                        return h.digest('hex');
+                    })();
+                    const oneShot = crypto.createHash(algo).update(joined).digest('hex');
+                    out[algo] = { equal: streamed === oneShot, digestLen: streamed.length };
+                }
+                return out;
+            } catch (e) { return { err: e.message }; }
+        };
+    "#;
+    let mut m = Manifold::sealed();
+    m.crypto = true;
+    let out = run(src, m);
+    assert_eq!(out["sha256"], json!({ "equal": true, "digestLen": 64 }));
+    assert_eq!(out["sha384"], json!({ "equal": true, "digestLen": 96 }));
+    assert_eq!(out["sha512"], json!({ "equal": true, "digestLen": 128 }));
+    assert_eq!(out["md5"], json!({ "equal": true, "digestLen": 32 }));
+}
+
+#[test]
+fn wasm_streaming_hmac_matches_one_shot() {
+    let src = r#"
+        module.exports = () => {
+            try {
+                const crypto = require('crypto');
+                const parts = [];
+                for (let i = 0; i < 100; i++) parts.push('row-' + i + '-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx');
+                const joined = parts.join('');
+                const key = 'super-secret-key';
+                const algos = ['sha256', 'sha384', 'sha512'];
+                const out = {};
+                for (const algo of algos) {
+                    const streamed = (function () {
+                        const h = crypto.createHmac(algo, key);
+                        for (const p of parts) h.update(p);
+                        return h.digest('hex');
+                    })();
+                    const oneShot = crypto.createHmac(algo, key).update(joined).digest('hex');
+                    out[algo] = { equal: streamed === oneShot };
+                }
+                return out;
+            } catch (e) { return { err: e.message }; }
+        };
+    "#;
+    let mut m = Manifold::sealed();
+    m.crypto = true;
+    let out = run(src, m);
+    assert_eq!(out["sha256"], json!({ "equal": true }));
+    assert_eq!(out["sha384"], json!({ "equal": true }));
+    assert_eq!(out["sha512"], json!({ "equal": true }));
+}
+
+#[test]
+fn wasm_hash_streaming_surfaces_permission_denied() {
+    // Under sealed manifold, createHash must fail with an EACCES-coded
+    // permission-denied error. Regresses if the polyfill stops reading
+    // __host_last_error on a failed streaming open.
+    let src = r#"
+        module.exports = () => {
+            try { require('crypto').createHash('sha256'); return 'unexpected'; }
+            catch (e) { return { msg: e.message, code: e.code }; }
+        };
+    "#;
+    let out = run(src, Manifold::sealed());
+    let msg = out["msg"].as_str().unwrap().to_lowercase();
+    assert!(msg.contains("permission denied"), "expected denial; got {msg}");
+    assert_eq!(out["code"], json!("EACCES"));
+}
+
+#[test]
 fn wasm_rsa_streaming_sign_matches_one_shot() {
     // End-to-end proof of Pitfall #12 fix: streaming `createSign` must
     // produce the same PKCS#1 v1.5 signature as the one-shot path when
