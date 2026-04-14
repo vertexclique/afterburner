@@ -10,8 +10,8 @@
 use crate::hash_handles::HashHandleStore;
 use crate::sign_handles::SignHandleStore;
 use crate::{
-    active_manifold, child_process_host, crypto_host, dns_host, fs_host, http_host, os_host,
-    state_active, zlib_host,
+    active_manifold, child_process_host, crypto_host, dns_host, fs_host, host_context_active,
+    http_host, os_host, state_active, zlib_host,
 };
 
 // Thread-local handle stores. Each thread-local `ThreadRuntime` owns
@@ -813,6 +813,51 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
             let ip = active_manifold::with(|m| dns_host::lookup(&hostname, m))
                 .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
             Ok::<_, rquickjs::Error>(ip)
+        })
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    // ---- host context (ScramDB-facing hooks) ---------------------------
+    // Scripts call these via require('afterburner:host') — the host
+    // wires a HostContext implementation; default NullHost returns
+    // empty column / ignores emitted rows.
+    g.set(
+        "__host_read_column",
+        Function::new(ctx.clone(), |name: String| -> String {
+            let rows = host_context_active::with(|ctx| match ctx {
+                Some(c) => c.read_column(&name),
+                None => Vec::new(),
+            });
+            serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
+        })
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_emit_row",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, row_json: String| -> rquickjs::Result<()> {
+                let row: serde_json::Value = serde_json::from_str(&row_json)
+                    .map_err(|e| Exception::throw_message(&ctx, &format!("emit_row json: {e}")))?;
+                host_context_active::with(|c| {
+                    if let Some(ctx) = c {
+                        ctx.emit_row(row);
+                    }
+                });
+                Ok(())
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_get_env",
+        Function::new(ctx.clone(), |key: String| -> Option<String> {
+            host_context_active::with(|c| c.and_then(|ctx| ctx.get_env(&key)))
         })
         .map_err(err_to_ab)?,
     )

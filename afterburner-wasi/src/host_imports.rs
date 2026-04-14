@@ -43,6 +43,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_dns(linker)?;
     wrap_zlib(linker)?;
     wrap_state(linker)?;
+    wrap_host_context(linker)?;
     wrap_last_error(linker)?;
     Ok(())
 }
@@ -1413,6 +1414,103 @@ enum ZlibOp {
     Inflate,
     Gzip,
     Gunzip,
+}
+
+// ---- host context (ScramDB-facing) ---------------------------------------
+
+fn wrap_host_context(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    // __host_read_column(name) -> JSON-serialized Vec<Value> (string).
+    linker
+        .func_wrap(
+            NS,
+            "host_read_column",
+            |mut caller: Caller<'_, HostState>,
+             name_ptr: i32,
+             name_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let name = match read_str(&memory, &caller, name_ptr, name_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let rows = match caller.data().host_context.as_ref() {
+                    Some(ctx) => ctx.read_column(&name),
+                    None => Vec::new(),
+                };
+                let json = serde_json::to_string(&rows)
+                    .unwrap_or_else(|_| "[]".to_string());
+                write_out(&mut caller, &memory, out_ptr, out_cap, json.as_bytes())
+            },
+        )
+        .map_err(link_err)?;
+
+    // __host_emit_row(row_json) -> 0 on success.
+    linker
+        .func_wrap(
+            NS,
+            "host_emit_row",
+            |mut caller: Caller<'_, HostState>,
+             row_ptr: i32,
+             row_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let row_json = match read_str(&memory, &caller, row_ptr, row_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let row: serde_json::Value = match serde_json::from_str(&row_json) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        record(&mut caller, &format!("emit_row: {e}"));
+                        return E_OTHER;
+                    }
+                };
+                if let Some(ctx) = caller.data().host_context.as_ref() {
+                    ctx.emit_row(row);
+                }
+                0
+            },
+        )
+        .map_err(link_err)?;
+
+    // __host_get_env(key) -> option<string>. Empty means None.
+    linker
+        .func_wrap(
+            NS,
+            "host_get_env",
+            |mut caller: Caller<'_, HostState>,
+             key_ptr: i32,
+             key_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let key = match read_str(&memory, &caller, key_ptr, key_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let val = caller
+                    .data()
+                    .host_context
+                    .as_ref()
+                    .and_then(|ctx| ctx.get_env(&key));
+                match val {
+                    Some(v) => write_out(&mut caller, &memory, out_ptr, out_cap, v.as_bytes()),
+                    None => E_NOT_FOUND,
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    Ok(())
 }
 
 // ---- last_error slot -----------------------------------------------------

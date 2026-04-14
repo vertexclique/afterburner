@@ -3,9 +3,10 @@
 //! per-store memory limiter, and the active [`Manifold`] plus a
 //! last-error slot consulted by `afterburner:host` imports.
 
-use afterburner_core::{Manifold, SharedStateStore};
+use afterburner_core::{HostContext, Manifold, SharedStateStore};
 use afterburner_node_compat::hash_handles::HashHandleStore;
 use afterburner_node_compat::sign_handles::SignHandleStore;
+use std::sync::Arc;
 use wasmtime::{ResourceLimiter, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::preview1::WasiP1Ctx;
@@ -23,6 +24,8 @@ pub struct HostState {
     pub manifold: Manifold,
     /// Cross-invocation key/value store, read by `afterburner:state`.
     pub state_store: SharedStateStore,
+    /// Optional embedder-provided host context for read_column / emit_row.
+    pub host_context: Option<Arc<dyn HostContext>>,
     /// Per-store streaming sign/verify handle store. Lives for the
     /// thrust's duration and is dropped with the `Store`.
     pub sign_handles: SignHandleStore,
@@ -44,6 +47,7 @@ impl HostState {
         stdout_capacity: usize,
         manifold: Manifold,
         state_store: SharedStateStore,
+        host_context: Option<Arc<dyn HostContext>>,
     ) -> Self {
         let stdin = MemoryInputPipe::new(input.to_vec());
         let stdout = MemoryOutputPipe::new(stdout_capacity);
@@ -70,6 +74,7 @@ impl HostState {
             limits,
             manifold,
             state_store,
+            host_context,
             sign_handles: SignHandleStore::new(),
             hash_handles: HashHandleStore::new(),
             last_error: String::new(),

@@ -57,6 +57,11 @@ pub struct WasmConfig {
     /// `require('afterburner:state')`. `None` falls back to a fresh
     /// in-memory store created at `WasmCombustor::new`.
     pub state_store: Option<SharedStateStore>,
+    /// Optional embedder-provided host context. Scripts that call
+    /// `require('afterburner:host').readColumn` / `emitRow` dispatch
+    /// through this context; unset means `readColumn` returns `[]` and
+    /// `emitRow` is a no-op.
+    pub host_context: Option<Arc<dyn afterburner_core::HostContext>>,
 }
 
 pub struct WasmCombustor {
@@ -69,6 +74,8 @@ pub struct WasmCombustor {
     plugin_module: Module,
     /// Cross-invocation state store passed to every thrust.
     state_store: SharedStateStore,
+    /// Optional host context — ScramDB-facing read_column/emit_row hooks.
+    host_context: Option<Arc<dyn afterburner_core::HostContext>>,
     /// Long-lived epoch ticker; one per `WasmCombustor`.
     ticker_shutdown: Arc<AtomicBool>,
     ticker: Option<JoinHandle<()>>,
@@ -109,6 +116,7 @@ impl WasmCombustor {
             source_store: HopscotchMap::new(),
             plugin_module,
             state_store,
+            host_context: config.host_context,
             ticker_shutdown,
             ticker: Some(ticker),
         })
@@ -167,6 +175,7 @@ impl Combustor for WasmCombustor {
             STDOUT_CAPACITY,
             limits.manifold.clone(),
             self.state_store.clone(),
+            self.host_context.clone(),
         );
         let mut store = Store::new(&self.engine, state);
         store.limiter(|s| &mut s.limits);

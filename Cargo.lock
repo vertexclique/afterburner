@@ -125,6 +125,7 @@ dependencies = [
  "rquickjs",
  "rsa",
  "scrypt",
+ "serde_json",
  "sha2",
  "spki",
  "ureq",

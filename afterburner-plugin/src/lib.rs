@@ -188,6 +188,21 @@ unsafe extern "C" {
         out_cap: u32,
     ) -> i32;
 
+    // Host context (ScramDB-facing hooks).
+    fn host_read_column(
+        name_ptr: *const u8,
+        name_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    fn host_emit_row(row_ptr: *const u8, row_len: u32) -> i32;
+    fn host_get_env(
+        key_ptr: *const u8,
+        key_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+
     // State store (afterburner:state).
     fn host_state_get(key_ptr: *const u8, key_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
     fn host_state_set(
@@ -899,6 +914,41 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
                 }) {
                     Ok(s) => s,
                     Err(e) => format!("__HOST_ERR__:{e}"),
+                }
+            }),
+        );
+
+        // Host context (ScramDB-facing hooks).
+        let _ = globals.set(
+            "__host_read_column",
+            Func::from(|name: String| -> String {
+                let nb = name.as_bytes();
+                match call_read(|out, cap| unsafe {
+                    host_read_column(nb.as_ptr(), nb.len() as u32, out, cap)
+                }) {
+                    Ok(s) => s,
+                    Err(_) => "[]".to_string(),
+                }
+            }),
+        );
+
+        let _ = globals.set(
+            "__host_emit_row",
+            Func::from(|row_json: String| -> i32 {
+                let rb = row_json.as_bytes();
+                unsafe { host_emit_row(rb.as_ptr(), rb.len() as u32) }
+            }),
+        );
+
+        let _ = globals.set(
+            "__host_get_env",
+            Func::from(|key: String| -> Option<String> {
+                let kb = key.as_bytes();
+                match call_read(|out, cap| unsafe {
+                    host_get_env(kb.as_ptr(), kb.len() as u32, out, cap)
+                }) {
+                    Ok(s) => Some(s),
+                    Err(_) => None,
                 }
             }),
         );

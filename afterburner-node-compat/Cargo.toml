@@ -11,6 +11,7 @@ description = "Afterburner Node.js compatibility layer — polyfill bundle (plen
 afterburner-core.workspace = true
 kovan-map.workspace = true
 rquickjs.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 hmac.workspace = true
 md-5.workspace = true

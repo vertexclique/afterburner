@@ -323,6 +323,7 @@ fn wasm_state_store_persists_across_thrusts() {
     let store = InMemoryStateStore::shared();
     let cfg = WasmConfig {
         state_store: Some(store.clone()),
+        ..WasmConfig::default()
     };
     let c = WasmCombustor::new(cfg).unwrap();
     let id = c

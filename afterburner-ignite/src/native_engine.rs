@@ -121,6 +121,7 @@ fn with_thread_rt<R>(f: impl FnOnce(&ThreadRuntime) -> Result<R>) -> Result<R> {
 pub struct NativeCombustor {
     source_store: HopscotchMap<[u8; 32], String>,
     state_store: SharedStateStore,
+    host_context: Option<Arc<dyn afterburner_core::HostContext>>,
 }
 
 impl NativeCombustor {
@@ -134,7 +135,20 @@ impl NativeCombustor {
         Ok(Self {
             source_store: HopscotchMap::new(),
             state_store,
+            host_context: None,
         })
+    }
+
+    /// Attach an embedder-provided [`HostContext`]. Scripts that call
+    /// `require('afterburner:host').readColumn` or `emitRow` dispatch
+    /// through this context. Default (no context) returns empty
+    /// column / swallows emitted rows.
+    pub fn with_host_context(
+        mut self,
+        ctx: Arc<dyn afterburner_core::HostContext>,
+    ) -> Self {
+        self.host_context = Some(ctx);
+        self
     }
 
     pub fn state_store(&self) -> &SharedStateStore {
@@ -181,8 +195,12 @@ impl Combustor for NativeCombustor {
             .ok_or(AfterburnerError::ScriptNotFound)?;
         let input_json = serde_json::to_string(input)?;
         let output_json = with_thread_rt(|rt| {
-            // Thread the engine's state store into the per-thrust slot.
+            // Thread the engine's state store + optional host context
+            // into the per-thrust slots.
             let _g = afterburner_node_compat::state_active::activate(self.state_store.clone());
+            let _hg = self.host_context.as_ref().map(|c| {
+                afterburner_node_compat::host_context_active::activate(c.clone())
+            });
             do_thrust(rt, &source, &input_json, limits)
         })?;
         Ok(serde_json::from_str(&output_json)?)
