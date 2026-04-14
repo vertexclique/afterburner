@@ -84,7 +84,11 @@ fn extract_host(url: &str) -> Option<String> {
     let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
     let host_end = rest.find(['/', '?', '#', ':']).unwrap_or(rest.len());
     let host = &rest[..host_end];
-    if host.is_empty() { None } else { Some(host.to_string()) }
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
 }
 
 fn host_matches(host: &str, pattern: &str) -> bool {

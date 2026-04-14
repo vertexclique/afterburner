@@ -106,7 +106,11 @@ impl AdaptiveCombustor {
         let step = Duration::from_millis(10);
         let deadline = Instant::now() + Duration::from_millis(max_wait_ms);
         loop {
-            match self.state.get(&id.hash).map(|s| s.state.load(Ordering::Acquire)) {
+            match self
+                .state
+                .get(&id.hash)
+                .map(|s| s.state.load(Ordering::Acquire))
+            {
                 Some(READY) => return CompileOutcome::Ready,
                 Some(FAILED) => return CompileOutcome::Failed,
                 Some(CANCELLED) | None => return CompileOutcome::Cancelled,
@@ -122,7 +126,11 @@ impl AdaptiveCombustor {
     /// Test/diagnostic accessor — which tier would service the next thrust?
     #[cfg(test)]
     pub fn current_tier(&self, id: &ScriptId) -> &'static str {
-        match self.state.get(&id.hash).map(|s| s.state.load(Ordering::Acquire)) {
+        match self
+            .state
+            .get(&id.hash)
+            .map(|s| s.state.load(Ordering::Acquire))
+        {
             Some(READY) => "wasm",
             Some(FAILED) => "native-sticky",
             Some(CANCELLED) => "native-cancelled",
@@ -136,7 +144,11 @@ impl AdaptiveCombustor {
             state: AtomicU8::new(COMPILING),
         });
         // Common path: no slot present → install ours and enqueue.
-        if self.state.insert_if_absent(hash, new_slot.clone()).is_none() {
+        if self
+            .state
+            .insert_if_absent(hash, new_slot.clone())
+            .is_none()
+        {
             self.tx.send(WorkerMsg::Compile {
                 hash,
                 source: source.to_string(),
@@ -218,7 +230,11 @@ impl Combustor for AdaptiveCombustor {
 
     #[fastrace::trace(name = "AdaptiveCombustor::thrust")]
     fn thrust(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<Value> {
-        match self.state.get(&id.hash).map(|s| s.state.load(Ordering::Acquire)) {
+        match self
+            .state
+            .get(&id.hash)
+            .map(|s| s.state.load(Ordering::Acquire))
+        {
             Some(READY) => {
                 let wasm_id = ScriptId {
                     hash: id.hash,

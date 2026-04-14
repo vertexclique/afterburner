@@ -25,7 +25,8 @@
 
 use afterburner_core::log::Level;
 use afterburner_core::{
-    AfterburnerError, Combustor, EngineMode, FuelGauge, Result, ScriptId, ab_event, sha256,
+    AfterburnerError, Combustor, EngineMode, FuelGauge, InMemoryStateStore, Result, ScriptId,
+    SharedStateStore, ab_event, sha256,
 };
 use kovan_map::HopscotchMap;
 use rquickjs::{Context, Ctx, Error as RquickjsError, Runtime, Value as RqValue};
@@ -60,16 +61,13 @@ impl ThreadRuntime {
         // (`fs`, `crypto`, `os`, `http`) are wired here too — the
         // per-thrust Manifold is read via a thread-local slot that
         // `do_thrust` populates for the duration of each call.
-        context
-            .with(|ctx| -> std::result::Result<(), AfterburnerError> {
-                install_host_globals(&ctx)?;
-                afterburner_node_compat::register_native_builtins(&ctx)?;
-                ctx.eval::<(), _>(afterburner_node_compat::PLENUM_BUNDLE.as_bytes())
-                    .map_err(|e| {
-                        AfterburnerError::Engine(format!("plenum bundle eval: {e}"))
-                    })?;
-                Ok(())
-            })?;
+        context.with(|ctx| -> std::result::Result<(), AfterburnerError> {
+            install_host_globals(&ctx)?;
+            afterburner_node_compat::register_native_builtins(&ctx)?;
+            ctx.eval::<(), _>(afterburner_node_compat::PLENUM_BUNDLE.as_bytes())
+                .map_err(|e| AfterburnerError::Engine(format!("plenum bundle eval: {e}")))?;
+            Ok(())
+        })?;
 
         Ok(Self { runtime, context })
     }
@@ -94,8 +92,8 @@ fn install_host_globals(ctx: &Ctx<'_>) -> std::result::Result<(), AfterburnerErr
 }
 
 fn host_log(level: &str, msg: &str) {
-    use afterburner_core::log::Level;
     use afterburner_core::ab_event;
+    use afterburner_core::log::Level;
     let level = match level {
         "error" => Level::Error,
         "warn" => Level::Warn,
@@ -122,18 +120,25 @@ fn with_thread_rt<R>(f: impl FnOnce(&ThreadRuntime) -> Result<R>) -> Result<R> {
 
 pub struct NativeCombustor {
     source_store: HopscotchMap<[u8; 32], String>,
+    state_store: SharedStateStore,
 }
 
 impl NativeCombustor {
     pub fn new() -> Result<Self> {
-        // Eagerly create a runtime on the constructing thread to surface
-        // any environmental issues immediately rather than deferring to
-        // the first `ignite` call. Subsequent threads lazy-init on first
-        // use.
+        Self::with_state_store(InMemoryStateStore::shared())
+    }
+
+    /// Construct a combustor backed by an explicit state store.
+    pub fn with_state_store(state_store: SharedStateStore) -> Result<Self> {
         with_thread_rt(|_rt| Ok(()))?;
         Ok(Self {
             source_store: HopscotchMap::new(),
+            state_store,
         })
+    }
+
+    pub fn state_store(&self) -> &SharedStateStore {
+        &self.state_store
     }
 }
 
@@ -175,7 +180,11 @@ impl Combustor for NativeCombustor {
             .get(&id.hash)
             .ok_or(AfterburnerError::ScriptNotFound)?;
         let input_json = serde_json::to_string(input)?;
-        let output_json = with_thread_rt(|rt| do_thrust(rt, &source, &input_json, limits))?;
+        let output_json = with_thread_rt(|rt| {
+            // Thread the engine's state store into the per-thrust slot.
+            let _g = afterburner_node_compat::state_active::activate(self.state_store.clone());
+            do_thrust(rt, &source, &input_json, limits)
+        })?;
         Ok(serde_json::from_str(&output_json)?)
     }
 
@@ -195,9 +204,11 @@ fn do_thrust(
 ) -> Result<String> {
     // Activate the per-thrust manifold so host globals can read it. The
     // guard restores the previous value when `do_thrust` returns.
-    let _manifold_guard = afterburner_node_compat::active_manifold::activate(limits.manifold.clone());
+    let _manifold_guard =
+        afterburner_node_compat::active_manifold::activate(limits.manifold.clone());
 
-    rt.runtime.set_memory_limit(limits.memory_bytes.unwrap_or(0));
+    rt.runtime
+        .set_memory_limit(limits.memory_bytes.unwrap_or(0));
 
     let fuel_budget = limits.fuel;
     let counter = Arc::new(AtomicU64::new(0));
@@ -445,7 +456,9 @@ mod tests {
     #[test]
     fn fuel_exhaustion_returns_typed_error() {
         let c = NativeCombustor::new().unwrap();
-        let id = c.ignite("module.exports = () => { while (true) {} }").unwrap();
+        let id = c
+            .ignite("module.exports = () => { while (true) {} }")
+            .unwrap();
         let limits = FuelGauge {
             fuel: Some(1_000),
             ..FuelGauge::default()

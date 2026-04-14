@@ -9,11 +9,11 @@
 
 use crate::{
     active_manifold, child_process_host, crypto_host, dns_host, fs_host, http_host, os_host,
-    zlib_host,
+    state_active, zlib_host,
 };
+use afterburner_core::AfterburnerError;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
-use afterburner_core::AfterburnerError;
 use rquickjs::{Ctx, Exception, Function};
 
 /// Install every `__host_*` global onto `ctx`.
@@ -23,17 +23,31 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
     // ---- fs ---------------------------------------------------------------
     g.set(
         "__host_fs_read_file_sync",
-        Function::new(ctx.clone(), |ctx: Ctx<'_>, path: String, encoding: Option<String>| {
-            let bytes = active_manifold::with(|m| fs_host::read_file_sync(&path, m))
-                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
-            match encoding.as_deref().unwrap_or("utf8").to_ascii_lowercase().as_str() {
-                "utf8" | "utf-8" => Ok(String::from_utf8_lossy(&bytes).into_owned()),
-                "base64" => Ok(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes)),
-                "hex" => Ok(hex::encode(&bytes)),
-                "binary" | "latin1" => Ok(bytes.iter().map(|b| *b as char).collect()),
-                other => Err(Exception::throw_message(&ctx, &format!("unsupported encoding '{other}'"))),
-            }
-        })
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, path: String, encoding: Option<String>| {
+                let bytes = active_manifold::with(|m| fs_host::read_file_sync(&path, m))
+                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                match encoding
+                    .as_deref()
+                    .unwrap_or("utf8")
+                    .to_ascii_lowercase()
+                    .as_str()
+                {
+                    "utf8" | "utf-8" => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+                    "base64" => Ok(base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &bytes,
+                    )),
+                    "hex" => Ok(hex::encode(&bytes)),
+                    "binary" | "latin1" => Ok(bytes.iter().map(|b| *b as char).collect()),
+                    other => Err(Exception::throw_message(
+                        &ctx,
+                        &format!("unsupported encoding '{other}'"),
+                    )),
+                }
+            },
+        )
         .map_err(err_to_ab)?,
     )
     .map_err(err_to_ab)?;
@@ -43,13 +57,26 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
         Function::new(
             ctx.clone(),
             |ctx: Ctx<'_>, path: String, data: String, encoding: Option<String>| {
-                let bytes = match encoding.as_deref().unwrap_or("utf8").to_ascii_lowercase().as_str() {
+                let bytes = match encoding
+                    .as_deref()
+                    .unwrap_or("utf8")
+                    .to_ascii_lowercase()
+                    .as_str()
+                {
                     "utf8" | "utf-8" => data.into_bytes(),
-                    "base64" => base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data.as_bytes())
-                        .map_err(|e| Exception::throw_message(&ctx, &format!("base64: {e}")))?,
+                    "base64" => base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        data.as_bytes(),
+                    )
+                    .map_err(|e| Exception::throw_message(&ctx, &format!("base64: {e}")))?,
                     "hex" => hex::decode(data.as_bytes())
                         .map_err(|e| Exception::throw_message(&ctx, &format!("hex: {e}")))?,
-                    other => return Err(Exception::throw_message(&ctx, &format!("unsupported encoding '{other}'"))),
+                    other => {
+                        return Err(Exception::throw_message(
+                            &ctx,
+                            &format!("unsupported encoding '{other}'"),
+                        ));
+                    }
                 };
                 active_manifold::with(|m| fs_host::write_file_sync(&path, &bytes, m))
                     .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
@@ -99,11 +126,16 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
 
     g.set(
         "__host_fs_mkdir_sync",
-        Function::new(ctx.clone(), |ctx: Ctx<'_>, path: String, recursive: Option<bool>| {
-            active_manifold::with(|m| fs_host::mkdir_sync(&path, recursive.unwrap_or(false), m))
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, path: String, recursive: Option<bool>| {
+                active_manifold::with(|m| {
+                    fs_host::mkdir_sync(&path, recursive.unwrap_or(false), m)
+                })
                 .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
-            Ok::<_, rquickjs::Error>(())
-        })
+                Ok::<_, rquickjs::Error>(())
+            },
+        )
         .map_err(err_to_ab)?,
     )
     .map_err(err_to_ab)?;
@@ -133,35 +165,44 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
     // ---- crypto ----------------------------------------------------------
     g.set(
         "__host_crypto_hash",
-        Function::new(ctx.clone(), |ctx: Ctx<'_>, algo: String, data: String, enc: Option<String>| {
-            let bytes = active_manifold::with(|m| crypto_host::hash(&algo, data.as_bytes(), m))
-                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
-            encode_bytes(&ctx, &bytes, enc.as_deref())
-        })
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, algo: String, data: String, enc: Option<String>| {
+                let bytes = active_manifold::with(|m| crypto_host::hash(&algo, data.as_bytes(), m))
+                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                encode_bytes(&ctx, &bytes, enc.as_deref())
+            },
+        )
         .map_err(err_to_ab)?,
     )
     .map_err(err_to_ab)?;
 
     g.set(
         "__host_crypto_hmac",
-        Function::new(ctx.clone(), |ctx: Ctx<'_>, algo: String, key: String, data: String, enc: Option<String>| {
-            let bytes = active_manifold::with(|m| {
-                crypto_host::hmac(&algo, key.as_bytes(), data.as_bytes(), m)
-            })
-            .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
-            encode_bytes(&ctx, &bytes, enc.as_deref())
-        })
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, algo: String, key: String, data: String, enc: Option<String>| {
+                let bytes = active_manifold::with(|m| {
+                    crypto_host::hmac(&algo, key.as_bytes(), data.as_bytes(), m)
+                })
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                encode_bytes(&ctx, &bytes, enc.as_deref())
+            },
+        )
         .map_err(err_to_ab)?,
     )
     .map_err(err_to_ab)?;
 
     g.set(
         "__host_crypto_random_bytes",
-        Function::new(ctx.clone(), |ctx: Ctx<'_>, len: usize, enc: Option<String>| {
-            let bytes = active_manifold::with(|m| crypto_host::random_bytes(len, m))
-                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
-            encode_bytes(&ctx, &bytes, enc.as_deref())
-        })
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, len: usize, enc: Option<String>| {
+                let bytes = active_manifold::with(|m| crypto_host::random_bytes(len, m))
+                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                encode_bytes(&ctx, &bytes, enc.as_deref())
+            },
+        )
         .map_err(err_to_ab)?,
     )
     .map_err(err_to_ab)?;
@@ -227,16 +268,320 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
                     .as_ref()
                     .map(|v| v.iter().map(String::as_str).collect())
                     .unwrap_or_default();
-                let result = active_manifold::with(|m| {
-                    child_process_host::exec_sync(&command, &argv, m)
-                })
-                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                let result =
+                    active_manifold::with(|m| child_process_host::exec_sync(&command, &argv, m))
+                        .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
                 Ok::<_, rquickjs::Error>(format!(
                     r#"{{"status":{},"stdout":{},"stderr":{}}}"#,
                     result.status,
                     js_string_literal(&result.stdout),
                     js_string_literal(&result.stderr)
                 ))
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    // ---- crypto (ciphers, KDFs) -----------------------------------------
+    g.set(
+        "__host_crypto_aes_gcm_encrypt",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>,
+             algo: String,
+             key_b64: String,
+             nonce_b64: String,
+             data_b64: String,
+             aad_b64: Option<String>| {
+                let key = B64
+                    .decode(key_b64.as_bytes())
+                    .map_err(|e| Exception::throw_message(&ctx, &format!("key b64: {e}")))?;
+                let nonce = B64
+                    .decode(nonce_b64.as_bytes())
+                    .map_err(|e| Exception::throw_message(&ctx, &format!("nonce b64: {e}")))?;
+                let data = B64
+                    .decode(data_b64.as_bytes())
+                    .map_err(|e| Exception::throw_message(&ctx, &format!("data b64: {e}")))?;
+                let aad = match aad_b64 {
+                    Some(s) => B64
+                        .decode(s.as_bytes())
+                        .map_err(|e| Exception::throw_message(&ctx, &format!("aad b64: {e}")))?,
+                    None => Vec::new(),
+                };
+                let out = active_manifold::with(|m| {
+                    crypto_host::aes_gcm_encrypt(&algo, &key, &nonce, &data, &aad, m)
+                })
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                Ok::<_, rquickjs::Error>(B64.encode(&out))
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_crypto_aes_gcm_decrypt",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>,
+             algo: String,
+             key_b64: String,
+             nonce_b64: String,
+             data_b64: String,
+             aad_b64: Option<String>| {
+                let key = B64
+                    .decode(key_b64.as_bytes())
+                    .map_err(|e| Exception::throw_message(&ctx, &format!("key b64: {e}")))?;
+                let nonce = B64
+                    .decode(nonce_b64.as_bytes())
+                    .map_err(|e| Exception::throw_message(&ctx, &format!("nonce b64: {e}")))?;
+                let data = B64
+                    .decode(data_b64.as_bytes())
+                    .map_err(|e| Exception::throw_message(&ctx, &format!("data b64: {e}")))?;
+                let aad = match aad_b64 {
+                    Some(s) => B64
+                        .decode(s.as_bytes())
+                        .map_err(|e| Exception::throw_message(&ctx, &format!("aad b64: {e}")))?,
+                    None => Vec::new(),
+                };
+                let out = active_manifold::with(|m| {
+                    crypto_host::aes_gcm_decrypt(&algo, &key, &nonce, &data, &aad, m)
+                })
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                Ok::<_, rquickjs::Error>(B64.encode(&out))
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    for (name, encrypt) in [
+        ("__host_crypto_aes_cbc_encrypt", true),
+        ("__host_crypto_aes_cbc_decrypt", false),
+    ] {
+        g.set(
+            name,
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'_>,
+                      algo: String,
+                      key_b64: String,
+                      iv_b64: String,
+                      data_b64: String| {
+                    let key = B64
+                        .decode(key_b64.as_bytes())
+                        .map_err(|e| Exception::throw_message(&ctx, &format!("key b64: {e}")))?;
+                    let iv = B64
+                        .decode(iv_b64.as_bytes())
+                        .map_err(|e| Exception::throw_message(&ctx, &format!("iv b64: {e}")))?;
+                    let data = B64
+                        .decode(data_b64.as_bytes())
+                        .map_err(|e| Exception::throw_message(&ctx, &format!("data b64: {e}")))?;
+                    let out = active_manifold::with(|m| {
+                        if encrypt {
+                            crypto_host::aes_cbc_encrypt(&algo, &key, &iv, &data, m)
+                        } else {
+                            crypto_host::aes_cbc_decrypt(&algo, &key, &iv, &data, m)
+                        }
+                    })
+                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                    Ok::<_, rquickjs::Error>(B64.encode(&out))
+                },
+            )
+            .map_err(err_to_ab)?,
+        )
+        .map_err(err_to_ab)?;
+    }
+
+    // ---- crypto sign / verify (RSA + ECDSA) -----------------------------
+    g.set(
+        "__host_crypto_sign",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, algo: String, key_pem: String, data_b64: String| {
+                let data = B64
+                    .decode(data_b64.as_bytes())
+                    .map_err(|e| Exception::throw_message(&ctx, &format!("data b64: {e}")))?;
+                let sig = active_manifold::with(|m| crypto_host::sign(&algo, &key_pem, &data, m))
+                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                Ok::<_, rquickjs::Error>(B64.encode(&sig))
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_crypto_verify",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, algo: String, key_pem: String, data_b64: String, sig_b64: String| {
+                let data = B64
+                    .decode(data_b64.as_bytes())
+                    .map_err(|e| Exception::throw_message(&ctx, &format!("data b64: {e}")))?;
+                let sig = B64
+                    .decode(sig_b64.as_bytes())
+                    .map_err(|e| Exception::throw_message(&ctx, &format!("sig b64: {e}")))?;
+                let ok =
+                    active_manifold::with(|m| crypto_host::verify(&algo, &key_pem, &data, &sig, m))
+                        .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                Ok::<_, rquickjs::Error>(ok)
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    // ---- state store ----------------------------------------------------
+    g.set(
+        "__host_state_get",
+        Function::new(ctx.clone(), |ctx: Ctx<'_>, key: String| {
+            let value = state_active::with(|store| Ok(store.get(&key)))
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+            Ok::<_, rquickjs::Error>(value.map(|bs| B64.encode(&bs)))
+        })
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_state_set",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, key: String, value_b64: String| {
+                let value = B64
+                    .decode(value_b64.as_bytes())
+                    .map_err(|e| Exception::throw_message(&ctx, &format!("value b64: {e}")))?;
+                state_active::with(|store| {
+                    store.set(&key, value);
+                    Ok(())
+                })
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                Ok::<_, rquickjs::Error>(())
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_state_delete",
+        Function::new(ctx.clone(), |ctx: Ctx<'_>, key: String| {
+            state_active::with(|store| {
+                store.delete(&key);
+                Ok(())
+            })
+            .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+            Ok::<_, rquickjs::Error>(())
+        })
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    // ---- chunked fs (stream support) ------------------------------------
+    g.set(
+        "__host_fs_read_chunk",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, path: String, offset: f64, len: f64| {
+                let bytes = active_manifold::with(|m| {
+                    fs_host::read_chunk(&path, offset as u64, len as usize, m)
+                })
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                Ok::<_, rquickjs::Error>(B64.encode(&bytes))
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_fs_write_chunk",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, path: String, offset: f64, data_b64: String| {
+                let data = B64
+                    .decode(data_b64.as_bytes())
+                    .map_err(|e| Exception::throw_message(&ctx, &format!("b64: {e}")))?;
+                active_manifold::with(|m| fs_host::write_chunk(&path, offset as u64, &data, m))
+                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                Ok::<_, rquickjs::Error>(())
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_fs_size",
+        Function::new(ctx.clone(), |ctx: Ctx<'_>, path: String| {
+            let size = active_manifold::with(|m| fs_host::file_size(&path, m))
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+            Ok::<_, rquickjs::Error>(size as f64)
+        })
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_crypto_pbkdf2_sync",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>,
+             digest: String,
+             password: String,
+             salt_b64: String,
+             iters: u32,
+             key_len: u32| {
+                let salt = B64
+                    .decode(salt_b64.as_bytes())
+                    .map_err(|e| Exception::throw_message(&ctx, &format!("salt b64: {e}")))?;
+                let out = active_manifold::with(|m| {
+                    crypto_host::pbkdf2_sync(
+                        &digest,
+                        password.as_bytes(),
+                        &salt,
+                        iters,
+                        key_len as usize,
+                        m,
+                    )
+                })
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                Ok::<_, rquickjs::Error>(B64.encode(&out))
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_crypto_scrypt_sync",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>,
+             password: String,
+             salt_b64: String,
+             n: u32,
+             r: u32,
+             p: u32,
+             key_len: u32| {
+                let salt = B64
+                    .decode(salt_b64.as_bytes())
+                    .map_err(|e| Exception::throw_message(&ctx, &format!("salt b64: {e}")))?;
+                let out = active_manifold::with(|m| {
+                    crypto_host::scrypt_sync(
+                        password.as_bytes(),
+                        &salt,
+                        n,
+                        r,
+                        p,
+                        key_len as usize,
+                        m,
+                    )
+                })
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                Ok::<_, rquickjs::Error>(B64.encode(&out))
             },
         )
         .map_err(err_to_ab)?,

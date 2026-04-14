@@ -3,10 +3,19 @@
 //! Gated behind `Manifold::crypto`; a disabled manifold returns
 //! `PermissionDenied` for every operation.
 
+use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes128Gcm, Aes256Gcm, Nonce};
 use afterburner_core::{AfterburnerError, Manifold, Result};
 use hmac::{Hmac, Mac};
 use md5::Md5;
+use pbkdf2::pbkdf2_hmac;
 use sha2::{Digest, Sha256, Sha384, Sha512};
+
+type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
+type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
+type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
+type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 
 /// Hash `data` with the named algorithm. Supported: `md5`, `sha1` (no —
 /// too weak, rejected), `sha256`, `sha384`, `sha512`.
@@ -36,19 +45,19 @@ pub fn hmac(algorithm: &str, key: &[u8], data: &[u8], m: &Manifold) -> Result<Ve
     }
     match algorithm.to_ascii_lowercase().as_str() {
         "sha256" => {
-            let mut mac = Hmac::<Sha256>::new_from_slice(key)
+            let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key)
                 .map_err(|e| AfterburnerError::Host(format!("hmac key: {e}")))?;
             mac.update(data);
             Ok(mac.finalize().into_bytes().to_vec())
         }
         "sha384" => {
-            let mut mac = Hmac::<Sha384>::new_from_slice(key)
+            let mut mac = <Hmac<Sha384> as Mac>::new_from_slice(key)
                 .map_err(|e| AfterburnerError::Host(format!("hmac key: {e}")))?;
             mac.update(data);
             Ok(mac.finalize().into_bytes().to_vec())
         }
         "sha512" => {
-            let mut mac = Hmac::<Sha512>::new_from_slice(key)
+            let mut mac = <Hmac<Sha512> as Mac>::new_from_slice(key)
                 .map_err(|e| AfterburnerError::Host(format!("hmac key: {e}")))?;
             mac.update(data);
             Ok(mac.finalize().into_bytes().to_vec())
@@ -80,6 +89,324 @@ pub fn random_uuid(m: &Manifold) -> Result<String> {
         ));
     }
     Ok(uuid::Uuid::new_v4().to_string())
+}
+
+/// AES-GCM encrypt. `algo` is `aes-128-gcm` or `aes-256-gcm`. The nonce
+/// must be 12 bytes. Returns `ciphertext || 16-byte-tag`.
+pub fn aes_gcm_encrypt(
+    algo: &str,
+    key: &[u8],
+    nonce: &[u8],
+    data: &[u8],
+    aad: &[u8],
+    m: &Manifold,
+) -> Result<Vec<u8>> {
+    if !m.crypto {
+        return Err(AfterburnerError::PermissionDenied(format!(
+            "crypto.{algo}.encrypt"
+        )));
+    }
+    if nonce.len() != 12 {
+        return Err(AfterburnerError::Host(format!(
+            "{algo}: nonce must be 12 bytes, got {}",
+            nonce.len()
+        )));
+    }
+    let nonce = Nonce::from_slice(nonce);
+    let payload = aes_gcm::aead::Payload { msg: data, aad };
+    match algo {
+        "aes-128-gcm" => {
+            let cipher = Aes128Gcm::new_from_slice(key)
+                .map_err(|e| AfterburnerError::Host(format!("{algo}: key: {e}")))?;
+            cipher
+                .encrypt(nonce, payload)
+                .map_err(|e| AfterburnerError::Host(format!("{algo}: encrypt: {e}")))
+        }
+        "aes-256-gcm" => {
+            let cipher = Aes256Gcm::new_from_slice(key)
+                .map_err(|e| AfterburnerError::Host(format!("{algo}: key: {e}")))?;
+            cipher
+                .encrypt(nonce, payload)
+                .map_err(|e| AfterburnerError::Host(format!("{algo}: encrypt: {e}")))
+        }
+        other => Err(AfterburnerError::Host(format!(
+            "unsupported cipher '{other}'"
+        ))),
+    }
+}
+
+pub fn aes_gcm_decrypt(
+    algo: &str,
+    key: &[u8],
+    nonce: &[u8],
+    data: &[u8],
+    aad: &[u8],
+    m: &Manifold,
+) -> Result<Vec<u8>> {
+    if !m.crypto {
+        return Err(AfterburnerError::PermissionDenied(format!(
+            "crypto.{algo}.decrypt"
+        )));
+    }
+    if nonce.len() != 12 {
+        return Err(AfterburnerError::Host(format!(
+            "{algo}: nonce must be 12 bytes, got {}",
+            nonce.len()
+        )));
+    }
+    let nonce = Nonce::from_slice(nonce);
+    let payload = aes_gcm::aead::Payload { msg: data, aad };
+    match algo {
+        "aes-128-gcm" => {
+            let cipher = Aes128Gcm::new_from_slice(key)
+                .map_err(|e| AfterburnerError::Host(format!("{algo}: key: {e}")))?;
+            cipher
+                .decrypt(nonce, payload)
+                .map_err(|e| AfterburnerError::Host(format!("{algo}: decrypt: {e}")))
+        }
+        "aes-256-gcm" => {
+            let cipher = Aes256Gcm::new_from_slice(key)
+                .map_err(|e| AfterburnerError::Host(format!("{algo}: key: {e}")))?;
+            cipher
+                .decrypt(nonce, payload)
+                .map_err(|e| AfterburnerError::Host(format!("{algo}: decrypt: {e}")))
+        }
+        other => Err(AfterburnerError::Host(format!(
+            "unsupported cipher '{other}'"
+        ))),
+    }
+}
+
+/// AES-CBC with PKCS#7 padding. `algo` is `aes-128-cbc` or `aes-256-cbc`.
+pub fn aes_cbc_encrypt(
+    algo: &str,
+    key: &[u8],
+    iv: &[u8],
+    data: &[u8],
+    m: &Manifold,
+) -> Result<Vec<u8>> {
+    if !m.crypto {
+        return Err(AfterburnerError::PermissionDenied(format!(
+            "crypto.{algo}.encrypt"
+        )));
+    }
+    use aes::cipher::block_padding::Pkcs7;
+    if iv.len() != 16 {
+        return Err(AfterburnerError::Host(format!(
+            "{algo}: iv must be 16 bytes, got {}",
+            iv.len()
+        )));
+    }
+    match algo {
+        "aes-128-cbc" => {
+            let enc = Aes128CbcEnc::new_from_slices(key, iv)
+                .map_err(|e| AfterburnerError::Host(format!("{algo}: key/iv: {e}")))?;
+            Ok(enc.encrypt_padded_vec_mut::<Pkcs7>(data))
+        }
+        "aes-256-cbc" => {
+            let enc = Aes256CbcEnc::new_from_slices(key, iv)
+                .map_err(|e| AfterburnerError::Host(format!("{algo}: key/iv: {e}")))?;
+            Ok(enc.encrypt_padded_vec_mut::<Pkcs7>(data))
+        }
+        other => Err(AfterburnerError::Host(format!(
+            "unsupported cipher '{other}'"
+        ))),
+    }
+}
+
+pub fn aes_cbc_decrypt(
+    algo: &str,
+    key: &[u8],
+    iv: &[u8],
+    data: &[u8],
+    m: &Manifold,
+) -> Result<Vec<u8>> {
+    if !m.crypto {
+        return Err(AfterburnerError::PermissionDenied(format!(
+            "crypto.{algo}.decrypt"
+        )));
+    }
+    use aes::cipher::block_padding::Pkcs7;
+    if iv.len() != 16 {
+        return Err(AfterburnerError::Host(format!(
+            "{algo}: iv must be 16 bytes, got {}",
+            iv.len()
+        )));
+    }
+    match algo {
+        "aes-128-cbc" => {
+            let dec = Aes128CbcDec::new_from_slices(key, iv)
+                .map_err(|e| AfterburnerError::Host(format!("{algo}: key/iv: {e}")))?;
+            dec.decrypt_padded_vec_mut::<Pkcs7>(data)
+                .map_err(|e| AfterburnerError::Host(format!("{algo}: decrypt: {e}")))
+        }
+        "aes-256-cbc" => {
+            let dec = Aes256CbcDec::new_from_slices(key, iv)
+                .map_err(|e| AfterburnerError::Host(format!("{algo}: key/iv: {e}")))?;
+            dec.decrypt_padded_vec_mut::<Pkcs7>(data)
+                .map_err(|e| AfterburnerError::Host(format!("{algo}: decrypt: {e}")))
+        }
+        other => Err(AfterburnerError::Host(format!(
+            "unsupported cipher '{other}'"
+        ))),
+    }
+}
+
+/// PBKDF2-HMAC-SHA variants.
+pub fn pbkdf2_sync(
+    digest: &str,
+    password: &[u8],
+    salt: &[u8],
+    iters: u32,
+    key_len: usize,
+    m: &Manifold,
+) -> Result<Vec<u8>> {
+    if !m.crypto {
+        return Err(AfterburnerError::PermissionDenied(
+            "crypto.pbkdf2Sync".into(),
+        ));
+    }
+    let mut out = vec![0u8; key_len];
+    match digest.to_ascii_lowercase().as_str() {
+        "sha256" => pbkdf2_hmac::<Sha256>(password, salt, iters, &mut out),
+        "sha384" => pbkdf2_hmac::<Sha384>(password, salt, iters, &mut out),
+        "sha512" => pbkdf2_hmac::<Sha512>(password, salt, iters, &mut out),
+        other => {
+            return Err(AfterburnerError::Host(format!(
+                "pbkdf2: unsupported digest '{other}'"
+            )));
+        }
+    }
+    Ok(out)
+}
+
+/// `scrypt` KDF with RFC 7914 parameters.
+pub fn scrypt_sync(
+    password: &[u8],
+    salt: &[u8],
+    n: u32,
+    r: u32,
+    p: u32,
+    key_len: usize,
+    m: &Manifold,
+) -> Result<Vec<u8>> {
+    if !m.crypto {
+        return Err(AfterburnerError::PermissionDenied(
+            "crypto.scryptSync".into(),
+        ));
+    }
+    let log_n = (n as f64).log2().round() as u8;
+    let params = scrypt::Params::new(log_n, r, p, key_len)
+        .map_err(|e| AfterburnerError::Host(format!("scrypt params: {e}")))?;
+    let mut out = vec![0u8; key_len];
+    scrypt::scrypt(password, salt, &params, &mut out)
+        .map_err(|e| AfterburnerError::Host(format!("scrypt: {e}")))?;
+    Ok(out)
+}
+
+/// Sign `data` with the private key. `algorithm` selects the algorithm:
+/// `RS256`/`RS384`/`RS512` (RSA-PKCS#1 v1.5 over SHA-2),
+/// `ES256` (ECDSA P-256 with SHA-256). Returns the raw signature bytes.
+pub fn sign(algorithm: &str, key_pem: &str, data: &[u8], m: &Manifold) -> Result<Vec<u8>> {
+    if !m.crypto {
+        return Err(AfterburnerError::PermissionDenied(format!(
+            "crypto.sign({algorithm})"
+        )));
+    }
+    use rsa::pkcs1v15::SigningKey;
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::signature::{RandomizedSigner, SignatureEncoding};
+    let mut rng = rsa::rand_core::OsRng;
+    match algorithm {
+        "RS256" => {
+            let key = rsa::RsaPrivateKey::from_pkcs8_pem(key_pem)
+                .map_err(|e| AfterburnerError::Host(format!("RS256: parse pem: {e}")))?;
+            let signer: SigningKey<Sha256> = SigningKey::<Sha256>::new(key);
+            let sig = signer.sign_with_rng(&mut rng, data);
+            Ok(sig.to_bytes().to_vec())
+        }
+        "RS384" => {
+            let key = rsa::RsaPrivateKey::from_pkcs8_pem(key_pem)
+                .map_err(|e| AfterburnerError::Host(format!("RS384: parse pem: {e}")))?;
+            let signer: SigningKey<Sha384> = SigningKey::<Sha384>::new(key);
+            let sig = signer.sign_with_rng(&mut rng, data);
+            Ok(sig.to_bytes().to_vec())
+        }
+        "RS512" => {
+            let key = rsa::RsaPrivateKey::from_pkcs8_pem(key_pem)
+                .map_err(|e| AfterburnerError::Host(format!("RS512: parse pem: {e}")))?;
+            let signer: SigningKey<Sha512> = SigningKey::<Sha512>::new(key);
+            let sig = signer.sign_with_rng(&mut rng, data);
+            Ok(sig.to_bytes().to_vec())
+        }
+        "ES256" => {
+            use p256::ecdsa::{Signature, SigningKey as EcdsaSigningKey, signature::Signer};
+            use p256::pkcs8::DecodePrivateKey as _;
+            let key = EcdsaSigningKey::from_pkcs8_pem(key_pem)
+                .map_err(|e| AfterburnerError::Host(format!("ES256: parse pem: {e}")))?;
+            let sig: Signature = key.sign(data);
+            Ok(sig.to_bytes().to_vec())
+        }
+        other => Err(AfterburnerError::Host(format!(
+            "sign: unsupported algorithm '{other}'"
+        ))),
+    }
+}
+
+/// Verify a signature.
+pub fn verify(
+    algorithm: &str,
+    key_pem: &str,
+    data: &[u8],
+    sig_bytes: &[u8],
+    m: &Manifold,
+) -> Result<bool> {
+    if !m.crypto {
+        return Err(AfterburnerError::PermissionDenied(format!(
+            "crypto.verify({algorithm})"
+        )));
+    }
+    use rsa::pkcs1v15::{Signature as RsaSig, VerifyingKey};
+    use rsa::pkcs8::DecodePublicKey;
+    use rsa::signature::Verifier;
+    match algorithm {
+        "RS256" => {
+            let key = rsa::RsaPublicKey::from_public_key_pem(key_pem)
+                .map_err(|e| AfterburnerError::Host(format!("RS256: parse pem: {e}")))?;
+            let verifier: VerifyingKey<Sha256> = VerifyingKey::<Sha256>::new(key);
+            let sig = RsaSig::try_from(sig_bytes)
+                .map_err(|e| AfterburnerError::Host(format!("RS256: bad sig: {e}")))?;
+            Ok(verifier.verify(data, &sig).is_ok())
+        }
+        "RS384" => {
+            let key = rsa::RsaPublicKey::from_public_key_pem(key_pem)
+                .map_err(|e| AfterburnerError::Host(format!("RS384: parse pem: {e}")))?;
+            let verifier: VerifyingKey<Sha384> = VerifyingKey::<Sha384>::new(key);
+            let sig = RsaSig::try_from(sig_bytes)
+                .map_err(|e| AfterburnerError::Host(format!("RS384: bad sig: {e}")))?;
+            Ok(verifier.verify(data, &sig).is_ok())
+        }
+        "RS512" => {
+            let key = rsa::RsaPublicKey::from_public_key_pem(key_pem)
+                .map_err(|e| AfterburnerError::Host(format!("RS512: parse pem: {e}")))?;
+            let verifier: VerifyingKey<Sha512> = VerifyingKey::<Sha512>::new(key);
+            let sig = RsaSig::try_from(sig_bytes)
+                .map_err(|e| AfterburnerError::Host(format!("RS512: bad sig: {e}")))?;
+            Ok(verifier.verify(data, &sig).is_ok())
+        }
+        "ES256" => {
+            use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
+            use p256::pkcs8::DecodePublicKey as _;
+            let key = VerifyingKey::from_public_key_pem(key_pem)
+                .map_err(|e| AfterburnerError::Host(format!("ES256: parse pem: {e}")))?;
+            let sig = Signature::from_slice(sig_bytes)
+                .map_err(|e| AfterburnerError::Host(format!("ES256: bad sig: {e}")))?;
+            Ok(key.verify(data, &sig).is_ok())
+        }
+        other => Err(AfterburnerError::Host(format!(
+            "verify: unsupported algorithm '{other}'"
+        ))),
+    }
 }
 
 /// Constant-time byte comparison.

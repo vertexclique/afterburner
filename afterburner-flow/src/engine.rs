@@ -9,6 +9,46 @@ use afterburner_core::{BurnCache, FuelGauge, Result, ScriptId};
 use afterburner_wasi::{WasmCombustor, WasmConfig};
 use serde_json::Value;
 
+/// Build a single source string from an entry script and a list of
+/// named helper modules. Each module is wrapped in a
+/// `__register_module('name', function(module, exports, require) { ... })`
+/// call so the existing plenum resolver picks it up. `require('./foo')`
+/// inside the entry then resolves to the registered factory.
+fn compose_bundle(entry: &str, modules: &[(String, String)]) -> String {
+    let mut out = String::with_capacity(
+        entry.len() + modules.iter().map(|(_, s)| s.len()).sum::<usize>() + 256,
+    );
+    for (name, body) in modules {
+        out.push_str("__register_module(");
+        out.push_str(&js_string_literal(name));
+        out.push_str(", function(module, exports, require) {\n");
+        out.push_str(body);
+        out.push_str("\n});\n");
+    }
+    out.push_str(entry);
+    out
+}
+
+fn js_string_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000C}' => out.push_str("\\f"),
+            ch if (ch as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Conservative defaults for an interactive flow step: 1 B fuel
 /// (≈10 s of compute on typical scripts), 64 MiB max memory, 30 s wall.
 pub fn default_fuel_gauge() -> FuelGauge {
@@ -52,6 +92,23 @@ impl FlowEngine {
     #[fastrace::trace(name = "FlowEngine::load")]
     pub fn load(&self, source: &str) -> Result<ScriptId> {
         self.cache.register(source)
+    }
+
+    /// Compile a bundle: an `entry` script plus a set of named helper
+    /// modules that the entry can `require()`. Names are matched
+    /// verbatim — `require('./foo')` resolves to the entry with key
+    /// `"./foo"`. The whole bundle is hashed as one unit, so the same
+    /// (entry, modules) inputs produce the same `ScriptId`.
+    ///
+    /// ```ignore
+    /// engine.load_bundle(
+    ///     "module.exports = (input) => require('./util').double(input.n);",
+    ///     &[("./util".into(), "module.exports = { double: (n) => n * 2 };".into())],
+    /// )?;
+    /// ```
+    #[fastrace::trace(name = "FlowEngine::load_bundle")]
+    pub fn load_bundle(&self, entry: &str, modules: &[(String, String)]) -> Result<ScriptId> {
+        self.cache.register(&compose_bundle(entry, modules))
     }
 
     /// Run a previously loaded module against a JSON input. Each call gets

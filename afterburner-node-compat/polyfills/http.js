@@ -17,6 +17,11 @@ function __plenum_install_http(moduleName) {
 
             var resultRaw = globalThis.__host_http_request(method, url, body || null);
             var result = JSON.parse(resultRaw);
+            if (typeof result.body === 'string' && result.body.indexOf('__HOST_ERR__:') === 0) {
+                var err = new Error("http: " + result.body.slice('__HOST_ERR__:'.length));
+                if (err.message.toLowerCase().indexOf('permission denied') !== -1) err.code = 'EACCES';
+                throw err;
+            }
 
             // Shape the response like a minimal IncomingMessage.
             var resp = {

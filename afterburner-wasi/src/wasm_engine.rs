@@ -24,7 +24,8 @@ use crate::host_imports;
 use crate::nozzle::parse_output;
 use afterburner_core::log::Level;
 use afterburner_core::{
-    AfterburnerError, Combustor, EngineMode, FuelGauge, Result, ScriptId, ab_event, sha256,
+    AfterburnerError, Combustor, EngineMode, FuelGauge, InMemoryStateStore, Result, ScriptId,
+    SharedStateStore, ab_event, sha256,
 };
 use kovan_map::HopscotchMap;
 use serde_json::Value;
@@ -38,8 +39,7 @@ use wasmtime_wasi::preview1::add_to_linker_sync;
 
 /// The custom plugin binary (Wizer-preinitialized), committed to the
 /// repo and baked into the host crate at compile time.
-const PLUGIN_BYTES: &[u8] =
-    include_bytes!("../../quickjs-provider/afterburner_plugin.wasm");
+const PLUGIN_BYTES: &[u8] = include_bytes!("../../quickjs-provider/afterburner_plugin.wasm");
 
 /// Epoch ticker period. Minimum timeout granularity = one tick.
 const TICK_PERIOD_MS: u64 = 10;
@@ -51,10 +51,12 @@ const STDERR_DIAGNOSIS_CAP: usize = 4 * 1024;
 /// `AfterburnerError::OutputTooLarge`.
 const STDOUT_CAPACITY: usize = 1024 * 1024;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Default, Clone)]
 pub struct WasmConfig {
-    // Reserved for future knobs (e.g. Cranelift opt-level override).
-    // Currently empty — no `javy` CLI, no alternate plugin paths.
+    /// Cross-invocation key/value store visible to scripts via
+    /// `require('afterburner:state')`. `None` falls back to a fresh
+    /// in-memory store created at `WasmCombustor::new`.
+    pub state_store: Option<SharedStateStore>,
 }
 
 pub struct WasmCombustor {
@@ -65,13 +67,15 @@ pub struct WasmCombustor {
     /// Pre-compiled plugin `Module`. Instantiated into every thrust's
     /// fresh `Store`.
     plugin_module: Module,
+    /// Cross-invocation state store passed to every thrust.
+    state_store: SharedStateStore,
     /// Long-lived epoch ticker; one per `WasmCombustor`.
     ticker_shutdown: Arc<AtomicBool>,
     ticker: Option<JoinHandle<()>>,
 }
 
 impl WasmCombustor {
-    pub fn new(_config: WasmConfig) -> Result<Self> {
+    pub fn new(config: WasmConfig) -> Result<Self> {
         let mut engine_config = Config::new();
         engine_config
             .consume_fuel(true)
@@ -96,13 +100,24 @@ impl WasmCombustor {
             })
         };
 
+        let state_store = config
+            .state_store
+            .unwrap_or_else(InMemoryStateStore::shared);
+
         Ok(Self {
             engine,
             source_store: HopscotchMap::new(),
             plugin_module,
+            state_store,
             ticker_shutdown,
             ticker: Some(ticker),
         })
+    }
+
+    /// Hand-out the active `StateStore` so embedders can inspect /
+    /// pre-populate it from outside the script.
+    pub fn state_store(&self) -> &SharedStateStore {
+        &self.state_store
     }
 }
 
@@ -151,6 +166,7 @@ impl Combustor for WasmCombustor {
             limits.memory_bytes,
             STDOUT_CAPACITY,
             limits.manifold.clone(),
+            self.state_store.clone(),
         );
         let mut store = Store::new(&self.engine, state);
         store.limiter(|s| &mut s.limits);
@@ -413,9 +429,6 @@ mod tests {
         let out = cache
             .execute_batch(&id, &input, &FuelGauge::unlimited())
             .unwrap();
-        assert_eq!(
-            out,
-            json!([{"doubled": 2}, {"doubled": 4}, {"doubled": 6}])
-        );
+        assert_eq!(out, json!([{"doubled": 2}, {"doubled": 4}, {"doubled": 6}]));
     }
 }

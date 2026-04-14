@@ -15,3 +15,8 @@ serde_json.workspace = true
 kovan-map.workspace = true
 fastrace.workspace = true
 afterburner-node-compat.workspace = true
+
+[dev-dependencies]
+rsa.workspace = true
+p256.workspace = true
+rand = "0.8"

@@ -140,6 +140,83 @@ __register_module('buffer', function(module, exports, require) {
             for (var i = 0; i < u8.length; i++) if (u8[i] !== other[i]) return false;
             return true;
         };
+        u8.compare = function(other, targetStart, targetEnd, sourceStart, sourceEnd) {
+            var a = u8.subarray(sourceStart || 0, sourceEnd !== undefined ? sourceEnd : u8.length);
+            var b = other.subarray(targetStart || 0, targetEnd !== undefined ? targetEnd : other.length);
+            var len = Math.min(a.length, b.length);
+            for (var i = 0; i < len; i++) {
+                if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+            }
+            return a.length === b.length ? 0 : a.length < b.length ? -1 : 1;
+        };
+        u8.indexOf = function(value, byteOffset, encoding) {
+            var needle;
+            if (typeof value === 'number') {
+                for (var i = byteOffset || 0; i < u8.length; i++) if (u8[i] === (value & 0xff)) return i;
+                return -1;
+            }
+            if (typeof value === 'string') needle = Buffer.from(value, encoding || 'utf8');
+            else if (value instanceof Uint8Array) needle = value;
+            else throw new TypeError('Buffer.indexOf: unsupported value');
+            outer: for (var j = byteOffset || 0; j <= u8.length - needle.length; j++) {
+                for (var k = 0; k < needle.length; k++) if (u8[j + k] !== needle[k]) continue outer;
+                return j;
+            }
+            return -1;
+        };
+        u8.includes = function(value, byteOffset, encoding) {
+            return u8.indexOf(value, byteOffset, encoding) !== -1;
+        };
+        u8.copy = function(target, targetStart, sourceStart, sourceEnd) {
+            targetStart = targetStart || 0;
+            sourceStart = sourceStart || 0;
+            sourceEnd = sourceEnd !== undefined ? sourceEnd : u8.length;
+            var n = Math.min(sourceEnd - sourceStart, target.length - targetStart);
+            for (var i = 0; i < n; i++) target[targetStart + i] = u8[sourceStart + i];
+            return n;
+        };
+        u8.write = function(str, offset, length, encoding) {
+            offset = offset || 0;
+            if (typeof length === 'string') { encoding = length; length = undefined; }
+            var bytes = Buffer.from(str, encoding || 'utf8');
+            var n = Math.min(length !== undefined ? length : bytes.length, u8.length - offset);
+            for (var i = 0; i < n; i++) u8[offset + i] = bytes[i];
+            return n;
+        };
+        // Numeric readers (little-endian + big-endian, unsigned + signed).
+        u8.readUInt8 = function(o) { return u8[o || 0]; };
+        u8.readInt8  = function(o) { var v = u8[o || 0]; return v > 127 ? v - 256 : v; };
+        u8.readUInt16LE = function(o) { o = o || 0; return u8[o] | (u8[o + 1] << 8); };
+        u8.readUInt16BE = function(o) { o = o || 0; return (u8[o] << 8) | u8[o + 1]; };
+        u8.readInt16LE  = function(o) { var v = u8.readUInt16LE(o); return v > 32767 ? v - 65536 : v; };
+        u8.readInt16BE  = function(o) { var v = u8.readUInt16BE(o); return v > 32767 ? v - 65536 : v; };
+        u8.readUInt32LE = function(o) { o = o || 0;
+            return (u8[o] | (u8[o + 1] << 8) | (u8[o + 2] << 16)) + (u8[o + 3] * 0x1000000); };
+        u8.readUInt32BE = function(o) { o = o || 0;
+            return (u8[o] * 0x1000000) + ((u8[o + 1] << 16) | (u8[o + 2] << 8) | u8[o + 3]); };
+        u8.readInt32LE  = function(o) { o = o || 0;
+            return u8[o] | (u8[o + 1] << 8) | (u8[o + 2] << 16) | (u8[o + 3] << 24); };
+        u8.readInt32BE  = function(o) { o = o || 0;
+            return (u8[o] << 24) | (u8[o + 1] << 16) | (u8[o + 2] << 8) | u8[o + 3]; };
+
+        u8.writeUInt8 = function(v, o) { u8[o || 0] = v & 0xff; return (o || 0) + 1; };
+        u8.writeInt8  = u8.writeUInt8;
+        u8.writeUInt16LE = function(v, o) { o = o || 0; u8[o] = v & 0xff; u8[o + 1] = (v >>> 8) & 0xff; return o + 2; };
+        u8.writeUInt16BE = function(v, o) { o = o || 0; u8[o] = (v >>> 8) & 0xff; u8[o + 1] = v & 0xff; return o + 2; };
+        u8.writeInt16LE  = u8.writeUInt16LE;
+        u8.writeInt16BE  = u8.writeUInt16BE;
+        u8.writeUInt32LE = function(v, o) { o = o || 0;
+            u8[o] = v & 0xff; u8[o + 1] = (v >>> 8) & 0xff;
+            u8[o + 2] = (v >>> 16) & 0xff; u8[o + 3] = (v >>> 24) & 0xff;
+            return o + 4;
+        };
+        u8.writeUInt32BE = function(v, o) { o = o || 0;
+            u8[o] = (v >>> 24) & 0xff; u8[o + 1] = (v >>> 16) & 0xff;
+            u8[o + 2] = (v >>> 8) & 0xff; u8[o + 3] = v & 0xff;
+            return o + 4;
+        };
+        u8.writeInt32LE = u8.writeUInt32LE;
+        u8.writeInt32BE = u8.writeUInt32BE;
         return u8;
     }
 

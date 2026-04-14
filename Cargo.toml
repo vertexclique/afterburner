@@ -44,6 +44,15 @@ thiserror = "2"
 hmac = "0.12"
 md-5 = "0.10"
 getrandom = "0.2"
+aes-gcm = "0.10"
+aes = "0.8"
+cbc = { version = "0.1", features = ["std"] }
+pbkdf2 = "0.12"
+scrypt = "0.11"
+rsa = { version = "0.9", features = ["sha2"] }
+p256 = { version = "0.13", features = ["ecdsa", "pem"] }
+spki = { version = "0.7", features = ["pem"] }
+pkcs8 = { version = "0.10", features = ["pem"] }
 base64 = "0.22"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }

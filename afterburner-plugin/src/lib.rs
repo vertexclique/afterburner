@@ -60,12 +60,8 @@ unsafe extern "C" {
         data_len: u32,
     ) -> i32;
     fn host_fs_exists_sync(path_ptr: *const u8, path_len: u32) -> i32;
-    fn host_fs_stat_sync(
-        path_ptr: *const u8,
-        path_len: u32,
-        out_ptr: *mut u8,
-        out_cap: u32,
-    ) -> i32;
+    fn host_fs_stat_sync(path_ptr: *const u8, path_len: u32, out_ptr: *mut u8, out_cap: u32)
+    -> i32;
 
     fn host_crypto_hash(
         algo_ptr: *const u8,
@@ -91,12 +87,7 @@ unsafe extern "C" {
         out_cap: u32,
     ) -> i32;
 
-    fn host_dns_lookup(
-        name_ptr: *const u8,
-        name_len: u32,
-        out_ptr: *mut u8,
-        out_cap: u32,
-    ) -> i32;
+    fn host_dns_lookup(name_ptr: *const u8, name_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
 
     fn host_zlib_deflate_sync(
         in_ptr: *const u8,
@@ -110,15 +101,138 @@ unsafe extern "C" {
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
-    fn host_zlib_gzip_sync(
-        in_ptr: *const u8,
-        in_len: u32,
+    fn host_zlib_gzip_sync(in_ptr: *const u8, in_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
+    fn host_zlib_gunzip_sync(in_ptr: *const u8, in_len: u32, out_ptr: *mut u8, out_cap: u32)
+    -> i32;
+
+    // Sign / verify (RSA + ECDSA). Key passed as PEM string; data + sig
+    // base64 over the wire to keep the i32-only ABI uniform.
+    fn host_crypto_sign(
+        algo_ptr: *const u8,
+        algo_len: u32,
+        key_ptr: *const u8,
+        key_len: u32,
+        data_ptr: *const u8,
+        data_len: u32,
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
-    fn host_zlib_gunzip_sync(
-        in_ptr: *const u8,
-        in_len: u32,
+    fn host_crypto_verify(
+        algo_ptr: *const u8,
+        algo_len: u32,
+        key_ptr: *const u8,
+        key_len: u32,
+        data_ptr: *const u8,
+        data_len: u32,
+        sig_ptr: *const u8,
+        sig_len: u32,
+    ) -> i32;
+
+    // State store (afterburner:state).
+    fn host_state_get(key_ptr: *const u8, key_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
+    fn host_state_set(
+        key_ptr: *const u8,
+        key_len: u32,
+        value_ptr: *const u8,
+        value_len: u32,
+    ) -> i32;
+    fn host_state_delete(key_ptr: *const u8, key_len: u32) -> i32;
+
+    // Chunked fs (createReadStream / createWriteStream backing).
+    fn host_fs_read_chunk(
+        path_ptr: *const u8,
+        path_len: u32,
+        offset_lo: u32,
+        offset_hi: u32,
+        chunk_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    fn host_fs_write_chunk(
+        path_ptr: *const u8,
+        path_len: u32,
+        offset_lo: u32,
+        offset_hi: u32,
+        data_ptr: *const u8,
+        data_len: u32,
+    ) -> i32;
+    fn host_fs_size(path_ptr: *const u8, path_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
+
+    // Ciphers + KDFs. Arguments are base64-encoded strings (same wire
+    // format as zlib); the host decodes before calling the impl.
+    fn host_crypto_aes_gcm_encrypt(
+        algo_ptr: *const u8,
+        algo_len: u32,
+        key_ptr: *const u8,
+        key_len: u32,
+        nonce_ptr: *const u8,
+        nonce_len: u32,
+        data_ptr: *const u8,
+        data_len: u32,
+        aad_ptr: *const u8,
+        aad_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    fn host_crypto_aes_gcm_decrypt(
+        algo_ptr: *const u8,
+        algo_len: u32,
+        key_ptr: *const u8,
+        key_len: u32,
+        nonce_ptr: *const u8,
+        nonce_len: u32,
+        data_ptr: *const u8,
+        data_len: u32,
+        aad_ptr: *const u8,
+        aad_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    fn host_crypto_aes_cbc_encrypt(
+        algo_ptr: *const u8,
+        algo_len: u32,
+        key_ptr: *const u8,
+        key_len: u32,
+        iv_ptr: *const u8,
+        iv_len: u32,
+        data_ptr: *const u8,
+        data_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    fn host_crypto_aes_cbc_decrypt(
+        algo_ptr: *const u8,
+        algo_len: u32,
+        key_ptr: *const u8,
+        key_len: u32,
+        iv_ptr: *const u8,
+        iv_len: u32,
+        data_ptr: *const u8,
+        data_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    fn host_crypto_pbkdf2_sync(
+        digest_ptr: *const u8,
+        digest_len: u32,
+        password_ptr: *const u8,
+        password_len: u32,
+        salt_ptr: *const u8,
+        salt_len: u32,
+        iters: u32,
+        key_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    fn host_crypto_scrypt_sync(
+        password_ptr: *const u8,
+        password_len: u32,
+        salt_ptr: *const u8,
+        salt_len: u32,
+        n: u32,
+        r: u32,
+        p: u32,
+        key_len: u32,
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
@@ -199,23 +313,25 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
 
         let _ = globals.set(
             "__host_fs_write_file_sync",
-            Func::from(|path: String, data: String, _enc: Option<String>| -> String {
-                let pb = path.as_bytes();
-                let db = data.as_bytes();
-                let code = unsafe {
-                    host_fs_write_file_sync(
-                        pb.as_ptr(),
-                        pb.len() as u32,
-                        db.as_ptr(),
-                        db.len() as u32,
-                    )
-                };
-                if code >= 0 {
-                    String::new()
-                } else {
-                    format!("__HOST_ERR__:{}", read_last_error(code))
-                }
-            }),
+            Func::from(
+                |path: String, data: String, _enc: Option<String>| -> String {
+                    let pb = path.as_bytes();
+                    let db = data.as_bytes();
+                    let code = unsafe {
+                        host_fs_write_file_sync(
+                            pb.as_ptr(),
+                            pb.len() as u32,
+                            db.as_ptr(),
+                            db.len() as u32,
+                        )
+                    };
+                    if code >= 0 {
+                        String::new()
+                    } else {
+                        format!("__HOST_ERR__:{}", read_last_error(code))
+                    }
+                },
+            ),
         );
 
         let _ = globals.set(
@@ -233,23 +349,25 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
 
         let _ = globals.set(
             "__host_crypto_hash",
-            Func::from(|algo: String, data: String, _enc: Option<String>| -> String {
-                let ab = algo.as_bytes();
-                let db = data.as_bytes();
-                match call_read(|out, cap| unsafe {
-                    host_crypto_hash(
-                        ab.as_ptr(),
-                        ab.len() as u32,
-                        db.as_ptr(),
-                        db.len() as u32,
-                        out,
-                        cap,
-                    )
-                }) {
-                    Ok(s) => s,
-                    Err(e) => format!("__HOST_ERR__:{e}"),
-                }
-            }),
+            Func::from(
+                |algo: String, data: String, _enc: Option<String>| -> String {
+                    let ab = algo.as_bytes();
+                    let db = data.as_bytes();
+                    match call_read(|out, cap| unsafe {
+                        host_crypto_hash(
+                            ab.as_ptr(),
+                            ab.len() as u32,
+                            db.as_ptr(),
+                            db.len() as u32,
+                            out,
+                            cap,
+                        )
+                    }) {
+                        Ok(s) => s,
+                        Err(e) => format!("__HOST_ERR__:{e}"),
+                    }
+                },
+            ),
         );
 
         let _ = globals.set(
@@ -342,6 +460,297 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
         bind_zlib!("__host_zlib_gzip_sync", host_zlib_gzip_sync);
         bind_zlib!("__host_zlib_gunzip_sync", host_zlib_gunzip_sync);
 
+        // AES-GCM (supports optional AAD).
+        macro_rules! bind_gcm {
+            ($name:literal, $fn:ident) => {
+                let _ = globals.set(
+                    $name,
+                    Func::from(
+                        |algo: String,
+                         key_b64: String,
+                         nonce_b64: String,
+                         data_b64: String,
+                         aad_b64: Option<String>|
+                         -> String {
+                            let ab = algo.as_bytes();
+                            let kb = key_b64.as_bytes();
+                            let nb = nonce_b64.as_bytes();
+                            let db = data_b64.as_bytes();
+                            let aad = aad_b64.unwrap_or_default();
+                            let aadb = aad.as_bytes();
+                            match call_read(|out, cap| unsafe {
+                                $fn(
+                                    ab.as_ptr(),
+                                    ab.len() as u32,
+                                    kb.as_ptr(),
+                                    kb.len() as u32,
+                                    nb.as_ptr(),
+                                    nb.len() as u32,
+                                    db.as_ptr(),
+                                    db.len() as u32,
+                                    aadb.as_ptr(),
+                                    aadb.len() as u32,
+                                    out,
+                                    cap,
+                                )
+                            }) {
+                                Ok(s) => s,
+                                Err(e) => format!("__HOST_ERR__:{e}"),
+                            }
+                        },
+                    ),
+                );
+            };
+        }
+        bind_gcm!("__host_crypto_aes_gcm_encrypt", host_crypto_aes_gcm_encrypt);
+        bind_gcm!("__host_crypto_aes_gcm_decrypt", host_crypto_aes_gcm_decrypt);
+
+        // AES-CBC.
+        macro_rules! bind_cbc {
+            ($name:literal, $fn:ident) => {
+                let _ = globals.set(
+                    $name,
+                    Func::from(
+                        |algo: String,
+                         key_b64: String,
+                         iv_b64: String,
+                         data_b64: String|
+                         -> String {
+                            let ab = algo.as_bytes();
+                            let kb = key_b64.as_bytes();
+                            let ib = iv_b64.as_bytes();
+                            let db = data_b64.as_bytes();
+                            match call_read(|out, cap| unsafe {
+                                $fn(
+                                    ab.as_ptr(),
+                                    ab.len() as u32,
+                                    kb.as_ptr(),
+                                    kb.len() as u32,
+                                    ib.as_ptr(),
+                                    ib.len() as u32,
+                                    db.as_ptr(),
+                                    db.len() as u32,
+                                    out,
+                                    cap,
+                                )
+                            }) {
+                                Ok(s) => s,
+                                Err(e) => format!("__HOST_ERR__:{e}"),
+                            }
+                        },
+                    ),
+                );
+            };
+        }
+        bind_cbc!("__host_crypto_aes_cbc_encrypt", host_crypto_aes_cbc_encrypt);
+        bind_cbc!("__host_crypto_aes_cbc_decrypt", host_crypto_aes_cbc_decrypt);
+
+        let _ = globals.set(
+            "__host_crypto_pbkdf2_sync",
+            Func::from(
+                |digest: String,
+                 password: String,
+                 salt_b64: String,
+                 iters: u32,
+                 key_len: u32|
+                 -> String {
+                    let db = digest.as_bytes();
+                    let pb = password.as_bytes();
+                    let sb = salt_b64.as_bytes();
+                    match call_read(|out, cap| unsafe {
+                        host_crypto_pbkdf2_sync(
+                            db.as_ptr(),
+                            db.len() as u32,
+                            pb.as_ptr(),
+                            pb.len() as u32,
+                            sb.as_ptr(),
+                            sb.len() as u32,
+                            iters,
+                            key_len,
+                            out,
+                            cap,
+                        )
+                    }) {
+                        Ok(s) => s,
+                        Err(e) => format!("__HOST_ERR__:{e}"),
+                    }
+                },
+            ),
+        );
+
+        // Sign / verify (RSA + ECDSA).
+        let _ = globals.set(
+            "__host_crypto_sign",
+            Func::from(
+                |algo: String, key_pem: String, data_b64: String| -> String {
+                    let ab = algo.as_bytes();
+                    let kb = key_pem.as_bytes();
+                    let db = data_b64.as_bytes();
+                    match call_read(|out, cap| unsafe {
+                        host_crypto_sign(
+                            ab.as_ptr(),
+                            ab.len() as u32,
+                            kb.as_ptr(),
+                            kb.len() as u32,
+                            db.as_ptr(),
+                            db.len() as u32,
+                            out,
+                            cap,
+                        )
+                    }) {
+                        Ok(s) => s,
+                        Err(e) => format!("__HOST_ERR__:{e}"),
+                    }
+                },
+            ),
+        );
+
+        let _ = globals.set(
+            "__host_crypto_verify",
+            Func::from(
+                |algo: String, key_pem: String, data_b64: String, sig_b64: String| -> i32 {
+                    let ab = algo.as_bytes();
+                    let kb = key_pem.as_bytes();
+                    let db = data_b64.as_bytes();
+                    let sb = sig_b64.as_bytes();
+                    unsafe {
+                        host_crypto_verify(
+                            ab.as_ptr(),
+                            ab.len() as u32,
+                            kb.as_ptr(),
+                            kb.len() as u32,
+                            db.as_ptr(),
+                            db.len() as u32,
+                            sb.as_ptr(),
+                            sb.len() as u32,
+                        )
+                    }
+                },
+            ),
+        );
+
+        // State store (afterburner:state).
+        let _ = globals.set(
+            "__host_state_get",
+            Func::from(|key: String| -> Option<String> {
+                let kb = key.as_bytes();
+                match call_read(|out, cap| unsafe {
+                    host_state_get(kb.as_ptr(), kb.len() as u32, out, cap)
+                }) {
+                    Ok(s) => Some(s),
+                    Err(_) => None, // -2 NotFound or other -> undefined
+                }
+            }),
+        );
+
+        let _ = globals.set(
+            "__host_state_set",
+            Func::from(|key: String, value_b64: String| -> i32 {
+                let kb = key.as_bytes();
+                let vb = value_b64.as_bytes();
+                unsafe {
+                    host_state_set(kb.as_ptr(), kb.len() as u32, vb.as_ptr(), vb.len() as u32)
+                }
+            }),
+        );
+
+        let _ = globals.set(
+            "__host_state_delete",
+            Func::from(|key: String| -> i32 {
+                let kb = key.as_bytes();
+                unsafe { host_state_delete(kb.as_ptr(), kb.len() as u32) }
+            }),
+        );
+
+        // Chunked fs (createReadStream / createWriteStream backing).
+        let _ = globals.set(
+            "__host_fs_read_chunk",
+            Func::from(|path: String, offset: f64, len: u32| -> String {
+                let pb = path.as_bytes();
+                let off = offset as u64;
+                let lo = (off & 0xFFFF_FFFF) as u32;
+                let hi = (off >> 32) as u32;
+                match call_read(|out, cap| unsafe {
+                    host_fs_read_chunk(pb.as_ptr(), pb.len() as u32, lo, hi, len, out, cap)
+                }) {
+                    Ok(s) => s,
+                    Err(e) => format!("__HOST_ERR__:{e}"),
+                }
+            }),
+        );
+
+        let _ = globals.set(
+            "__host_fs_write_chunk",
+            Func::from(|path: String, offset: f64, data_b64: String| -> String {
+                let pb = path.as_bytes();
+                let db = data_b64.as_bytes();
+                let off = offset as u64;
+                let lo = (off & 0xFFFF_FFFF) as u32;
+                let hi = (off >> 32) as u32;
+                let code = unsafe {
+                    host_fs_write_chunk(
+                        pb.as_ptr(),
+                        pb.len() as u32,
+                        lo,
+                        hi,
+                        db.as_ptr(),
+                        db.len() as u32,
+                    )
+                };
+                if code >= 0 {
+                    String::new()
+                } else {
+                    format!("__HOST_ERR__:{}", read_last_error(code))
+                }
+            }),
+        );
+
+        let _ = globals.set(
+            "__host_fs_size",
+            Func::from(|path: String| -> String {
+                let pb = path.as_bytes();
+                match call_read(|out, cap| unsafe {
+                    host_fs_size(pb.as_ptr(), pb.len() as u32, out, cap)
+                }) {
+                    Ok(s) => s,
+                    Err(e) => format!("__HOST_ERR__:{e}"),
+                }
+            }),
+        );
+
+        let _ = globals.set(
+            "__host_crypto_scrypt_sync",
+            Func::from(
+                |password: String,
+                 salt_b64: String,
+                 n: u32,
+                 r: u32,
+                 p: u32,
+                 key_len: u32|
+                 -> String {
+                    let pb = password.as_bytes();
+                    let sb = salt_b64.as_bytes();
+                    match call_read(|out, cap| unsafe {
+                        host_crypto_scrypt_sync(
+                            pb.as_ptr(),
+                            pb.len() as u32,
+                            sb.as_ptr(),
+                            sb.len() as u32,
+                            n,
+                            r,
+                            p,
+                            key_len,
+                            out,
+                            cap,
+                        )
+                    }) {
+                        Ok(s) => s,
+                        Err(e) => format!("__HOST_ERR__:{e}"),
+                    }
+                },
+            ),
+        );
+
         // Eval the plenum bundle so Wizer preinit captures `require()`
         // and every Tier-1 polyfill into the snapshot.
         let _ = ctx.eval::<(), _>(PLENUM_BUNDLE);
@@ -418,9 +827,8 @@ fn read_stdin() -> Result<Vec<u8>, ()> {
         };
         let iov_arr = [iov];
         let mut nread: usize = 0;
-        let res = unsafe {
-            wasi::fd_read_raw(0, iov_arr.as_ptr() as *const wasi::Iovec, 1, &mut nread)
-        };
+        let res =
+            unsafe { wasi::fd_read_raw(0, iov_arr.as_ptr() as *const wasi::Iovec, 1, &mut nread) };
         if res != 0 {
             return Err(());
         }
@@ -438,9 +846,7 @@ fn write_stderr(bytes: &[u8]) {
     };
     let iov_arr = [iov];
     let mut nwritten: usize = 0;
-    let _ = unsafe {
-        wasi::fd_write_raw(2, iov_arr.as_ptr(), 1, &mut nwritten)
-    };
+    let _ = unsafe { wasi::fd_write_raw(2, iov_arr.as_ptr(), 1, &mut nwritten) };
 }
 
 fn wrap_user_source(user: &str, input_json: &str) -> String {
@@ -500,6 +906,11 @@ mod wasi {
         #[link_name = "fd_read"]
         pub fn fd_read_raw(fd: u32, iovs: *const Iovec, iovs_len: u32, nread: *mut usize) -> u32;
         #[link_name = "fd_write"]
-        pub fn fd_write_raw(fd: u32, iovs: *const Ciovec, iovs_len: u32, nwritten: *mut usize) -> u32;
+        pub fn fd_write_raw(
+            fd: u32,
+            iovs: *const Ciovec,
+            iovs_len: u32,
+            nwritten: *mut usize,
+        ) -> u32;
     }
 }

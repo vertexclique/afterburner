@@ -109,16 +109,29 @@ fn no_fs_access() {
 #[test]
 fn no_network_access_by_default() {
     let c = combustor_or_skip!();
-    // No `fetch`, no `http.request`, no sockets. Any attempt traps.
+    // Under sealed Manifold (default), `fetch()` / `http.request()` /
+    // the plugin's host import all surface a permission error. The
+    // polyfill catches the host failure and throws with `EACCES`-style
+    // semantics; the script captures it and returns the message.
     let id = c
-        .ignite("module.exports = () => fetch('http://example.com/')")
+        .ignite(
+            r#"
+            module.exports = () => {
+                try {
+                    require('http').get('http://example.com/', () => {});
+                    return 'unexpected';
+                } catch (e) { return e.message; }
+            };
+            "#,
+        )
         .unwrap();
-    let err = c
+    let out = c
         .thrust(&id, &json!(null), &FuelGauge::unlimited())
-        .unwrap_err();
+        .unwrap();
+    let msg = out.as_str().unwrap().to_lowercase();
     assert!(
-        matches!(err, AfterburnerError::WasmTrap(_)),
-        "expected trap on fetch(); got {err:?}"
+        msg.contains("permission denied") || msg.contains("not available"),
+        "expected permission denial; got {msg}"
     );
 }
 
@@ -175,11 +188,7 @@ fn concurrent_invocations_isolated() {
         let c = c.clone();
         handles.push(thread::spawn(move || {
             let out = c
-                .thrust(
-                    &id,
-                    &json!({ "n": n }),
-                    &FuelGauge::unlimited(),
-                )
+                .thrust(&id, &json!({ "n": n }), &FuelGauge::unlimited())
                 .unwrap();
             // Sum of 0..n-1 = n*(n-1)/2
             let expected = n * (n - 1) / 2;
@@ -204,9 +213,7 @@ fn concurrent_thrusts_do_not_steal_each_others_timeouts() {
     use std::thread;
 
     let c = Arc::new(combustor_or_skip!());
-    let trivial = c
-        .ignite("module.exports = (d) => d.n + 1")
-        .unwrap();
+    let trivial = c.ignite("module.exports = (d) => d.n + 1").unwrap();
     let infinite = c
         .ignite("module.exports = () => { while (true) {} }")
         .unwrap();

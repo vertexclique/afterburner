@@ -113,14 +113,16 @@ afterburner_core::log::init();  // reads AFTERBURNER_LOG + AFTERBURNER_LOG_FORMA
 
 | Group      | Modules                                                                                      | Gate                                                |
 |------------|----------------------------------------------------------------------------------------------|-----------------------------------------------------|
-| Pure JS    | `path`, `url`, `querystring`, `events`, `assert`, `buffer`, `util`, `string_decoder`, `punycode`, `timers`, `process`, `console`, `stream` | none — always available           |
-| Host-backed| `fs`                                                                                         | `Manifold::fs` (`None` / `ReadOnly(roots)` / `ReadWrite(roots)`) |
-|            | `crypto`                                                                                     | `Manifold::crypto`                                  |
+| Pure JS    | `path`, `url`, `querystring`, `events`, `assert`, `buffer`, `util`, `string_decoder`, `punycode`, `timers`, `process` (EventEmitter), `console`, `stream` | none — always available           |
+| Web globals| `fetch`, `Request`, `Response`, `Headers`, `AbortController`, `AbortSignal`, `URL`, `URLSearchParams`, `TextEncoder`, `TextDecoder`, `btoa`/`atob`, `queueMicrotask`, `performance.now`, `structuredClone` | none |
+| Host-backed| `fs` (incl. `createReadStream` / `createWriteStream`, `fs.promises`)                         | `Manifold::fs` (`None` / `ReadOnly(roots)` / `ReadWrite(roots)`) |
+|            | `crypto` (hash, hmac, AES-GCM/CBC, PBKDF2, scrypt, RSA & ECDSA sign/verify, randomBytes/UUID)| `Manifold::crypto`                                  |
 |            | `http` / `https`                                                                             | `Manifold::net` (outbound only)                     |
 |            | `dns`                                                                                        | `Manifold::net`                                     |
 |            | `os`                                                                                         | always on (non-sensitive)                           |
-|            | `zlib`                                                                                       | always on (pure compute)                            |
+|            | `zlib` (deflate/inflate/gzip/gunzip via Rust `flate2`)                                       | always on (pure compute)                            |
 |            | `child_process`                                                                              | `Manifold::child_process` — **native path only**    |
+| Custom     | `afterburner:state` — cross-invocation key/value store                                       | implicit — host installs the `StateStore`           |
 
 Default manifold is `Manifold::sealed()` — safe to hand untrusted user
 scripts. `Manifold::open()` exists for trusted admin contexts.
@@ -154,6 +156,44 @@ outputs a flattened core module even when given a component input, so
 the component-model host-side linker does not meaningfully simplify
 things today. The WIT file stays as source-of-truth for future
 migration.
+
+### How do I bundle multiple JS files together?
+
+`FlowEngine::load_bundle(entry, modules)` accepts an entry script plus
+a list of `(name, source)` helper modules. Inside the entry,
+`require('./util')` resolves to the helper registered under `"./util"`.
+Helpers can `require` each other.
+
+```rust
+let id = engine.load_bundle(
+    "module.exports = (i) => require('./lib').double(i.n);",
+    &[("./lib".into(), "module.exports = { double: (n) => n*2 };".into())],
+)?;
+```
+
+### Cross-invocation state
+
+Pass a `SharedStateStore` to the engine. The default `InMemoryStateStore`
+(lock-free, in-process) ships with the workspace; embedders can plug in
+their own (Redis, SQLite, …) by implementing the `StateStore` trait.
+
+```rust
+use afterburner_core::InMemoryStateStore;
+use afterburner_wasi::WasmConfig;
+
+let store = InMemoryStateStore::shared();
+let combustor = WasmCombustor::new(WasmConfig {
+    state_store: Some(store.clone()),
+})?;
+```
+
+Inside JS:
+
+```js
+const state = require('afterburner:state');
+state.setJSON('lastSeen', Date.now());
+const n = state.increment('hits');
+```
 
 ## License
 

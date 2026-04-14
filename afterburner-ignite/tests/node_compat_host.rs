@@ -34,7 +34,10 @@ fn sealed_manifold_denies_fs_read() {
             catch (e) { return e.message; }
         };
     "#;
-    let msg = run(src, Manifold::sealed()).as_str().unwrap().to_lowercase();
+    let msg = run(src, Manifold::sealed())
+        .as_str()
+        .unwrap()
+        .to_lowercase();
     assert!(
         msg.contains("permission denied") || msg.contains("not available"),
         "expected permission denial; got {msg}"
@@ -163,7 +166,10 @@ fn crypto_denied_when_manifold_crypto_false() {
             catch (e) { return e.message; }
         };
     "#;
-    let msg = run(src, Manifold::sealed()).as_str().unwrap().to_lowercase();
+    let msg = run(src, Manifold::sealed())
+        .as_str()
+        .unwrap()
+        .to_lowercase();
     assert!(
         msg.contains("permission denied"),
         "expected crypto permission denial; got {msg}"
@@ -186,7 +192,10 @@ fn child_process_denied_when_manifold_disabled() {
             catch (e) { return e.message; }
         };
     "#;
-    let msg = run(src, Manifold::sealed()).as_str().unwrap().to_lowercase();
+    let msg = run(src, Manifold::sealed())
+        .as_str()
+        .unwrap()
+        .to_lowercase();
     assert!(
         msg.contains("permission denied"),
         "expected child_process denial; got {msg}"
@@ -212,11 +221,358 @@ fn dns_denied_when_manifold_net_none() {
             catch (e) { return e.message; }
         };
     "#;
-    let msg = run(src, Manifold::sealed()).as_str().unwrap().to_lowercase();
+    let msg = run(src, Manifold::sealed())
+        .as_str()
+        .unwrap()
+        .to_lowercase();
     assert!(
         msg.contains("permission denied"),
         "expected dns denial; got {msg}"
     );
+}
+
+#[test]
+fn state_store_persists_across_thrusts() {
+    use afterburner_core::{Combustor, InMemoryStateStore};
+    use afterburner_ignite::NativeCombustor;
+    use serde_json::json;
+    let store = InMemoryStateStore::shared();
+    let c = NativeCombustor::with_state_store(store.clone()).unwrap();
+
+    let inc = c
+        .ignite("module.exports = () => require('afterburner:state').increment('hits')")
+        .unwrap();
+    let limits = FuelGauge {
+        manifold: Manifold::sealed(),
+        ..FuelGauge::default()
+    };
+    assert_eq!(c.thrust(&inc, &json!(null), &limits).unwrap(), json!(1));
+    assert_eq!(c.thrust(&inc, &json!(null), &limits).unwrap(), json!(2));
+    assert_eq!(c.thrust(&inc, &json!(null), &limits).unwrap(), json!(3));
+
+    // Direct host-side observation.
+    let raw = store.get("hits").unwrap();
+    assert_eq!(String::from_utf8(raw).unwrap(), "3");
+}
+
+#[test]
+fn state_store_set_get_json() {
+    let src = r#"
+        module.exports = () => {
+            const s = require('afterburner:state');
+            s.setJSON('user', { id: 42, tags: ['a','b'] });
+            return s.getJSON('user');
+        };
+    "#;
+    let out = run(src, Manifold::sealed());
+    assert_eq!(out, json!({ "id": 42, "tags": ["a", "b"] }));
+}
+
+fn fresh_rsa_keypair() -> (String, String) {
+    use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
+    use rsa::{RsaPrivateKey, RsaPublicKey};
+    let mut rng = rand::thread_rng();
+    let priv_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+    let pub_key = RsaPublicKey::from(&priv_key);
+    let priv_pem = priv_key.to_pkcs8_pem(LineEnding::LF).unwrap().to_string();
+    let pub_pem = pub_key.to_public_key_pem(LineEnding::LF).unwrap();
+    (priv_pem, pub_pem)
+}
+
+fn fresh_p256_keypair() -> (String, String) {
+    use p256::ecdsa::{SigningKey, VerifyingKey};
+    use p256::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
+    use rand::rngs::OsRng;
+    let priv_key = SigningKey::random(&mut OsRng);
+    let pub_key = VerifyingKey::from(&priv_key);
+    let priv_pem = priv_key.to_pkcs8_pem(LineEnding::LF).unwrap().to_string();
+    let pub_pem = pub_key.to_public_key_pem(LineEnding::LF).unwrap();
+    (priv_pem, pub_pem)
+}
+
+#[test]
+fn rsa_sign_verify_roundtrip() {
+    let (priv_pem, pub_pem) = fresh_rsa_keypair();
+    let src = format!(
+        r#"
+        module.exports = () => {{
+            const crypto = require('crypto');
+            try {{
+                const sig = crypto.sign('RS256', {priv:?}, 'payload');
+                return {{ ok: crypto.verify('RS256', {pub:?}, 'payload', sig) }};
+            }} catch (e) {{ return {{ err: e.message }}; }}
+        }};
+        "#,
+        priv = priv_pem,
+        pub = pub_pem
+    );
+    let mut m = Manifold::sealed();
+    m.crypto = true;
+    let out = run(&src, m);
+    assert_eq!(out, json!({ "ok": true }), "got {out}");
+}
+
+#[test]
+fn ecdsa_p256_sign_verify_roundtrip() {
+    let (priv_pem, pub_pem) = fresh_p256_keypair();
+    let src = format!(
+        r#"
+        module.exports = () => {{
+            const crypto = require('crypto');
+            const sig = crypto.sign('ES256', {priv:?}, 'payload');
+            return crypto.verify('ES256', {pub:?}, 'payload', sig);
+        }};
+        "#,
+        priv = priv_pem,
+        pub = pub_pem
+    );
+    let mut m = Manifold::sealed();
+    m.crypto = true;
+    let out = run(&src, m);
+    assert_eq!(out, json!(true));
+}
+
+#[test]
+fn process_is_event_emitter() {
+    let src = r#"
+        module.exports = () => {
+            let captured = null;
+            process.on('custom', (msg) => { captured = msg; });
+            process.emit('custom', 'hello');
+            return captured;
+        };
+    "#;
+    let out = run(src, Manifold::sealed());
+    assert_eq!(out, json!("hello"));
+}
+
+#[test]
+fn fs_create_read_stream_emits_chunks() {
+    // Sandbox has no event loop: the convention is to attach `end`
+    // (and `error`) listeners *before* `data` — emission fires
+    // synchronously when the first `data` listener attaches.
+    let root = temp_root();
+    let file = root.join("stream-in.txt");
+    let payload: String = "x".repeat(150_000);
+    std::fs::write(&file, &payload).unwrap();
+
+    let src = format!(
+        r#"
+        module.exports = () => {{
+            const fs = require('fs');
+            const out = {{ chunks: 0, total: 0, ended: false }};
+            const s = fs.createReadStream({p:?}, {{ highWaterMark: 32 * 1024 }});
+            s.on('end',  () => {{ out.ended = true; }});
+            s.on('data', (c) => {{ out.chunks++; out.total += c.length; }});
+            return out;
+        }};
+        "#,
+        p = file.to_string_lossy()
+    );
+    let mut m = Manifold::sealed();
+    m.fs = FsAccess::ReadOnly(vec![root]);
+    let out = run(&src, m);
+    assert_eq!(out["total"], json!(150_000));
+    assert_eq!(out["ended"], json!(true));
+    let chunks = out["chunks"].as_u64().unwrap();
+    assert!((4..=6).contains(&chunks), "got {chunks} chunks");
+}
+
+#[test]
+fn fs_create_write_stream_writes_chunks() {
+    let root = temp_root();
+    let file = root.join("stream-out.txt");
+    let path = file.to_string_lossy().into_owned();
+    let src = format!(
+        r#"
+        module.exports = () => {{
+            const fs = require('fs');
+            const w = fs.createWriteStream({p:?});
+            w.write('hello ');
+            w.write('streaming');
+            w.end();
+            return fs.readFileSync({p:?});
+        }};
+        "#,
+        p = path
+    );
+    let mut m = Manifold::sealed();
+    m.fs = FsAccess::ReadWrite(vec![root]);
+    let out = run(&src, m);
+    assert_eq!(out, json!("hello streaming"));
+}
+
+#[test]
+fn buffer_numeric_read_write() {
+    let src = r#"
+        module.exports = () => {
+            const { Buffer } = require('buffer');
+            const b = Buffer.alloc(8);
+            b.writeUInt32LE(0xDEADBEEF, 0);
+            b.writeUInt32BE(0xCAFEBABE, 4);
+            return {
+                le: b.readUInt32LE(0),
+                be: b.readUInt32BE(4),
+                hex: b.toString('hex'),
+            };
+        };
+    "#;
+    let out = run(src, Manifold::sealed());
+    assert_eq!(out["le"], json!(0xDEADBEEFu32));
+    assert_eq!(out["be"], json!(0xCAFEBABEu32));
+    assert_eq!(out["hex"], json!("efbeaddecafebabe"));
+}
+
+#[test]
+fn buffer_compare_indexof() {
+    let src = r#"
+        module.exports = () => {
+            const { Buffer } = require('buffer');
+            const b = Buffer.from('hello world');
+            return {
+                idx: b.indexOf('world'),
+                cmp_eq: b.compare(Buffer.from('hello world')),
+                cmp_lt: b.compare(Buffer.from('zebra')),
+                includes: b.includes('world'),
+            };
+        };
+    "#;
+    let out = run(src, Manifold::sealed());
+    assert_eq!(out["idx"], json!(6));
+    assert_eq!(out["cmp_eq"], json!(0));
+    assert_eq!(out["cmp_lt"], json!(-1));
+    assert_eq!(out["includes"], json!(true));
+}
+
+#[test]
+fn stubs_give_clear_error() {
+    let src = r#"
+        module.exports = () => {
+            try { require('net').createServer(); return 'unexpected'; }
+            catch (e) { return { msg: e.message, code: e.code }; }
+        };
+    "#;
+    let out = run(src, Manifold::sealed());
+    let msg = out["msg"].as_str().unwrap();
+    assert!(msg.contains("not supported"), "got {msg}");
+    assert_eq!(out["code"], json!("ERR_NOT_SUPPORTED_IN_SANDBOX"));
+}
+
+#[test]
+fn abort_controller_fires_listener() {
+    let src = r#"
+        module.exports = () => {
+            const c = new AbortController();
+            let aborted = false;
+            c.signal.addEventListener('abort', () => { aborted = true; });
+            c.abort(new Error('stop'));
+            return { aborted: aborted, reasonMsg: c.signal.reason.message };
+        };
+    "#;
+    let out = run(src, Manifold::sealed());
+    assert_eq!(out["aborted"], json!(true));
+    assert_eq!(out["reasonMsg"], json!("stop"));
+}
+
+#[test]
+fn base64_encoder_decoder_roundtrip() {
+    let src = r#"
+        module.exports = () => {
+            const s = 'afterburner!';
+            return atob(btoa(s));
+        };
+    "#;
+    let out = run(src, Manifold::sealed());
+    assert_eq!(out, json!("afterburner!"));
+}
+
+#[test]
+fn aes_gcm_encrypt_decrypt_roundtrip() {
+    let src = r#"
+        module.exports = () => {
+            const crypto = require('crypto');
+            const { Buffer } = require('buffer');
+            const key = Buffer.alloc(32, 7);
+            const iv  = Buffer.alloc(12, 0);
+            const enc = crypto.createCipheriv('aes-256-gcm', key, iv);
+            enc.setAAD(Buffer.from('hdr'));
+            enc.update('hello');
+            const cipher = enc.final();
+            const tag = enc.getAuthTag();
+
+            const dec = crypto.createDecipheriv('aes-256-gcm', key, iv);
+            dec.setAAD(Buffer.from('hdr'));
+            dec.setAuthTag(tag);
+            dec.update(cipher);
+            const plain = dec.final();
+
+            return { ok: plain.toString('utf8') === 'hello', tagLen: tag.length };
+        };
+    "#;
+    let mut m = Manifold::sealed();
+    m.crypto = true;
+    let out = run(src, m);
+    assert_eq!(out["ok"], json!(true));
+    assert_eq!(out["tagLen"], json!(16));
+}
+
+#[test]
+fn aes_cbc_encrypt_decrypt_roundtrip() {
+    let src = r#"
+        module.exports = () => {
+            const crypto = require('crypto');
+            const { Buffer } = require('buffer');
+            const key = Buffer.alloc(16, 1);
+            const iv  = Buffer.alloc(16, 2);
+            const enc = crypto.createCipheriv('aes-128-cbc', key, iv);
+            enc.update('the message');
+            const ct = enc.final();
+            const dec = crypto.createDecipheriv('aes-128-cbc', key, iv);
+            dec.update(ct);
+            const pt = dec.final();
+            return pt.toString('utf8');
+        };
+    "#;
+    let mut m = Manifold::sealed();
+    m.crypto = true;
+    let out = run(src, m);
+    assert_eq!(out, json!("the message"));
+}
+
+#[test]
+fn pbkdf2_known_vector() {
+    let src = r#"
+        module.exports = () => {
+            const crypto = require('crypto');
+            // RFC 6070 vector: P="password", S="salt", c=2, dkLen=20, sha1 not
+            // supported — use sha256 with a simpler self-test.
+            return crypto.pbkdf2Sync('password', 'salt', 1, 32, 'sha256').toString('hex');
+        };
+    "#;
+    let mut m = Manifold::sealed();
+    m.crypto = true;
+    let out = run(src, m);
+    assert_eq!(
+        out,
+        json!("120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b")
+    );
+}
+
+#[test]
+fn scrypt_known_vector() {
+    let src = r#"
+        module.exports = () => {
+            const crypto = require('crypto');
+            // RFC 7914 test vector: password="", salt="", N=16, r=1, p=1,
+            // dkLen=64.
+            return crypto.scryptSync('', '', 64, { N: 16, r: 1, p: 1 }).toString('hex');
+        };
+    "#;
+    let mut m = Manifold::sealed();
+    m.crypto = true;
+    let out = run(src, m);
+    let hex = out.as_str().unwrap();
+    assert!(hex.starts_with("77d6576238657b203b19"), "got {hex}");
 }
 
 #[test]

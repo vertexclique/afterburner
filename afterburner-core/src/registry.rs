@@ -157,12 +157,7 @@ impl BurnCache {
     /// enforces the shape and returns a typed error if either side
     /// violates it.
     #[fastrace::trace(name = "BurnCache::execute_batch")]
-    pub fn execute_batch(
-        &self,
-        id: &ScriptId,
-        rows: &Value,
-        limits: &FuelGauge,
-    ) -> Result<Value> {
+    pub fn execute_batch(&self, id: &ScriptId, rows: &Value, limits: &FuelGauge) -> Result<Value> {
         if !rows.is_array() {
             return Err(AfterburnerError::Host(
                 "execute_batch: input must be a JSON array".into(),

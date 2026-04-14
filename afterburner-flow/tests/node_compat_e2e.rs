@@ -40,10 +40,7 @@ fn flow_pure_js_modules_work_with_sealed_manifold() {
     "#;
     let id = engine.load(src).unwrap();
     let out = engine.execute(&id, &json!({ "file": "x.json" })).unwrap();
-    assert_eq!(
-        out,
-        json!({ "joined": "/data/x.json", "b64": "eC5qc29u" })
-    );
+    assert_eq!(out, json!({ "joined": "/data/x.json", "b64": "eC5qc29u" }));
 }
 
 #[test]
@@ -89,6 +86,72 @@ fn flow_crypto_works_with_crypto_manifold() {
         out,
         json!("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
     );
+}
+
+#[test]
+fn flow_load_bundle_resolves_relative_require() {
+    let engine = flow_with_manifold(Manifold::sealed());
+    let entry = r#"
+        const util = require('./util');
+        const greet = require('./greet');
+        module.exports = (input) => greet(util.uppercase(input.name));
+    "#;
+    let modules = vec![
+        (
+            "./util".to_string(),
+            r#"
+                module.exports = {
+                    uppercase: (s) => String(s).toUpperCase(),
+                };
+            "#
+            .to_string(),
+        ),
+        (
+            "./greet".to_string(),
+            r#"
+                module.exports = (who) => 'Hello, ' + who + '!';
+            "#
+            .to_string(),
+        ),
+    ];
+    let id = engine.load_bundle(entry, &modules).unwrap();
+    let out = engine
+        .execute(&id, &json!({ "name": "afterburner" }))
+        .unwrap();
+    assert_eq!(out, json!("Hello, AFTERBURNER!"));
+}
+
+#[test]
+fn flow_load_bundle_modules_can_require_each_other() {
+    let engine = flow_with_manifold(Manifold::sealed());
+    let entry = r#"
+        const lib = require('./lib');
+        module.exports = (input) => lib.process(input.value);
+    "#;
+    let modules = vec![
+        (
+            "./lib".to_string(),
+            r#"
+                const helpers = require('./helpers');
+                module.exports = {
+                    process: (v) => helpers.tag('processed', v),
+                };
+            "#
+            .to_string(),
+        ),
+        (
+            "./helpers".to_string(),
+            r#"
+                module.exports = {
+                    tag: (label, v) => ({ label, v }),
+                };
+            "#
+            .to_string(),
+        ),
+    ];
+    let id = engine.load_bundle(entry, &modules).unwrap();
+    let out = engine.execute(&id, &json!({ "value": 42 })).unwrap();
+    assert_eq!(out, json!({ "label": "processed", "v": 42 }));
 }
 
 #[test]

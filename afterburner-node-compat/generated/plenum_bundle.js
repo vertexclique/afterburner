@@ -66,6 +66,69 @@
     };
 })();
 
+// ---- abort.js ----
+// AbortController + AbortSignal — standard Web API, not built into
+// QuickJS. Supports the listener-based cancellation protocol used by
+// `fetch`, timers, and most async libraries.
+
+(function installAbort() {
+    if (typeof globalThis.AbortController === 'function') return;
+
+    function AbortSignal() {
+        this.aborted = false;
+        this.reason = undefined;
+        this._listeners = [];
+    }
+    AbortSignal.prototype.addEventListener = function(event, fn) {
+        if (event !== 'abort' || typeof fn !== 'function') return;
+        this._listeners.push(fn);
+    };
+    AbortSignal.prototype.removeEventListener = function(event, fn) {
+        if (event !== 'abort') return;
+        var i = this._listeners.indexOf(fn);
+        if (i >= 0) this._listeners.splice(i, 1);
+    };
+    AbortSignal.prototype.throwIfAborted = function() {
+        if (this.aborted) throw this.reason;
+    };
+    Object.defineProperty(AbortSignal.prototype, 'onabort', {
+        get: function() { return this._onabort || null; },
+        set: function(fn) {
+            if (this._onabort) this.removeEventListener('abort', this._onabort);
+            this._onabort = fn;
+            if (typeof fn === 'function') this.addEventListener('abort', fn);
+        }
+    });
+    AbortSignal.abort = function(reason) {
+        var s = new AbortSignal();
+        s.aborted = true;
+        s.reason = reason !== undefined ? reason : new Error('Aborted');
+        return s;
+    };
+    AbortSignal.timeout = function(_ms) {
+        // No event loop: a timeout-based abort would never fire. Produce
+        // a signal that's already aborted so scripts fail loudly rather
+        // than silently hang.
+        return AbortSignal.abort(new Error('AbortSignal.timeout: no event loop'));
+    };
+
+    function AbortController() {
+        this.signal = new AbortSignal();
+    }
+    AbortController.prototype.abort = function(reason) {
+        if (this.signal.aborted) return;
+        this.signal.aborted = true;
+        this.signal.reason = reason !== undefined ? reason : new Error('Aborted');
+        var listeners = this.signal._listeners.slice();
+        for (var i = 0; i < listeners.length; i++) {
+            try { listeners[i]({ type: 'abort' }); } catch (_) {}
+        }
+    };
+
+    globalThis.AbortController = AbortController;
+    globalThis.AbortSignal = AbortSignal;
+})();
+
 // ---- assert.js ----
 // assert — subset. Deep-equality is structural; follows the Node.js
 // "strict" semantics (=== for primitives, shape-recursive for objects).
@@ -300,6 +363,83 @@ __register_module('buffer', function(module, exports, require) {
             for (var i = 0; i < u8.length; i++) if (u8[i] !== other[i]) return false;
             return true;
         };
+        u8.compare = function(other, targetStart, targetEnd, sourceStart, sourceEnd) {
+            var a = u8.subarray(sourceStart || 0, sourceEnd !== undefined ? sourceEnd : u8.length);
+            var b = other.subarray(targetStart || 0, targetEnd !== undefined ? targetEnd : other.length);
+            var len = Math.min(a.length, b.length);
+            for (var i = 0; i < len; i++) {
+                if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+            }
+            return a.length === b.length ? 0 : a.length < b.length ? -1 : 1;
+        };
+        u8.indexOf = function(value, byteOffset, encoding) {
+            var needle;
+            if (typeof value === 'number') {
+                for (var i = byteOffset || 0; i < u8.length; i++) if (u8[i] === (value & 0xff)) return i;
+                return -1;
+            }
+            if (typeof value === 'string') needle = Buffer.from(value, encoding || 'utf8');
+            else if (value instanceof Uint8Array) needle = value;
+            else throw new TypeError('Buffer.indexOf: unsupported value');
+            outer: for (var j = byteOffset || 0; j <= u8.length - needle.length; j++) {
+                for (var k = 0; k < needle.length; k++) if (u8[j + k] !== needle[k]) continue outer;
+                return j;
+            }
+            return -1;
+        };
+        u8.includes = function(value, byteOffset, encoding) {
+            return u8.indexOf(value, byteOffset, encoding) !== -1;
+        };
+        u8.copy = function(target, targetStart, sourceStart, sourceEnd) {
+            targetStart = targetStart || 0;
+            sourceStart = sourceStart || 0;
+            sourceEnd = sourceEnd !== undefined ? sourceEnd : u8.length;
+            var n = Math.min(sourceEnd - sourceStart, target.length - targetStart);
+            for (var i = 0; i < n; i++) target[targetStart + i] = u8[sourceStart + i];
+            return n;
+        };
+        u8.write = function(str, offset, length, encoding) {
+            offset = offset || 0;
+            if (typeof length === 'string') { encoding = length; length = undefined; }
+            var bytes = Buffer.from(str, encoding || 'utf8');
+            var n = Math.min(length !== undefined ? length : bytes.length, u8.length - offset);
+            for (var i = 0; i < n; i++) u8[offset + i] = bytes[i];
+            return n;
+        };
+        // Numeric readers (little-endian + big-endian, unsigned + signed).
+        u8.readUInt8 = function(o) { return u8[o || 0]; };
+        u8.readInt8  = function(o) { var v = u8[o || 0]; return v > 127 ? v - 256 : v; };
+        u8.readUInt16LE = function(o) { o = o || 0; return u8[o] | (u8[o + 1] << 8); };
+        u8.readUInt16BE = function(o) { o = o || 0; return (u8[o] << 8) | u8[o + 1]; };
+        u8.readInt16LE  = function(o) { var v = u8.readUInt16LE(o); return v > 32767 ? v - 65536 : v; };
+        u8.readInt16BE  = function(o) { var v = u8.readUInt16BE(o); return v > 32767 ? v - 65536 : v; };
+        u8.readUInt32LE = function(o) { o = o || 0;
+            return (u8[o] | (u8[o + 1] << 8) | (u8[o + 2] << 16)) + (u8[o + 3] * 0x1000000); };
+        u8.readUInt32BE = function(o) { o = o || 0;
+            return (u8[o] * 0x1000000) + ((u8[o + 1] << 16) | (u8[o + 2] << 8) | u8[o + 3]); };
+        u8.readInt32LE  = function(o) { o = o || 0;
+            return u8[o] | (u8[o + 1] << 8) | (u8[o + 2] << 16) | (u8[o + 3] << 24); };
+        u8.readInt32BE  = function(o) { o = o || 0;
+            return (u8[o] << 24) | (u8[o + 1] << 16) | (u8[o + 2] << 8) | u8[o + 3]; };
+
+        u8.writeUInt8 = function(v, o) { u8[o || 0] = v & 0xff; return (o || 0) + 1; };
+        u8.writeInt8  = u8.writeUInt8;
+        u8.writeUInt16LE = function(v, o) { o = o || 0; u8[o] = v & 0xff; u8[o + 1] = (v >>> 8) & 0xff; return o + 2; };
+        u8.writeUInt16BE = function(v, o) { o = o || 0; u8[o] = (v >>> 8) & 0xff; u8[o + 1] = v & 0xff; return o + 2; };
+        u8.writeInt16LE  = u8.writeUInt16LE;
+        u8.writeInt16BE  = u8.writeUInt16BE;
+        u8.writeUInt32LE = function(v, o) { o = o || 0;
+            u8[o] = v & 0xff; u8[o + 1] = (v >>> 8) & 0xff;
+            u8[o + 2] = (v >>> 16) & 0xff; u8[o + 3] = (v >>> 24) & 0xff;
+            return o + 4;
+        };
+        u8.writeUInt32BE = function(v, o) { o = o || 0;
+            u8[o] = (v >>> 24) & 0xff; u8[o + 1] = (v >>> 16) & 0xff;
+            u8[o + 2] = (v >>> 8) & 0xff; u8[o + 3] = v & 0xff;
+            return o + 4;
+        };
+        u8.writeInt32LE = u8.writeUInt32LE;
+        u8.writeInt32BE = u8.writeUInt32BE;
         return u8;
     }
 
@@ -561,6 +701,192 @@ __register_module('crypto', function(module, exports, require) {
         var len = buffer && buffer.length ? buffer.length : 16;
         return ensureHost('random_bytes')(len, 'hex');
     };
+
+    // ---- ciphers (AES-GCM / AES-CBC) --------------------------------
+    var Buffer = require('buffer').Buffer;
+
+    function toB64(x) {
+        if (typeof x === 'string') return Buffer.from(x, 'utf8').toString('base64');
+        if (Buffer.isBuffer(x))    return x.toString('base64');
+        if (x instanceof Uint8Array) return Buffer.from(x).toString('base64');
+        throw new TypeError('expected string/Buffer/Uint8Array');
+    }
+    function fromB64(s, tag) {
+        if (typeof s === 'string' && s.indexOf('__HOST_ERR__:') === 0) {
+            throw new Error(tag + ': ' + s.slice('__HOST_ERR__:'.length));
+        }
+        return Buffer.from(s, 'base64');
+    }
+
+    function makeGcmCipher(algo, key, iv, opts) {
+        var aad = null;
+        var finalized = false;
+        var queued = [];
+        var mode = opts && opts.mode; // 'encrypt' | 'decrypt'
+        var authTag = null;
+        return {
+            setAAD: function(buf) { aad = Buffer.isBuffer(buf) ? buf : Buffer.from(buf); return this; },
+            setAutoPadding: function() { return this; },
+            update: function(data) {
+                if (finalized) throw new Error('cipher finalized');
+                queued.push(Buffer.isBuffer(data) ? data : Buffer.from(data));
+                return Buffer.alloc(0);
+            },
+            setAuthTag: function(tag) { authTag = tag; return this; },
+            getAuthTag: function() {
+                if (mode !== 'encrypt' || !finalized) {
+                    throw new Error('getAuthTag available only after encrypt final');
+                }
+                return authTag;
+            },
+            final: function() {
+                if (finalized) throw new Error('cipher finalized');
+                finalized = true;
+                var data = Buffer.concat(queued);
+                var fn = mode === 'encrypt' ? '__host_crypto_aes_gcm_encrypt' : '__host_crypto_aes_gcm_decrypt';
+                var rawIn = mode === 'encrypt' ? data
+                    : Buffer.concat([data, authTag || Buffer.alloc(16)]);
+                var raw = globalThis[fn](
+                    algo,
+                    toB64(key),
+                    toB64(iv),
+                    toB64(rawIn),
+                    aad ? toB64(aad) : null
+                );
+                var out = fromB64(raw, 'cipher');
+                if (mode === 'encrypt') {
+                    authTag = out.slice(out.length - 16);
+                    return out.slice(0, out.length - 16);
+                } else {
+                    return out;
+                }
+            }
+        };
+    }
+
+    function makeCbcCipher(algo, key, iv, mode) {
+        var finalized = false;
+        var queued = [];
+        return {
+            setAutoPadding: function() { return this; },
+            update: function(data) {
+                if (finalized) throw new Error('cipher finalized');
+                queued.push(Buffer.isBuffer(data) ? data : Buffer.from(data));
+                return Buffer.alloc(0);
+            },
+            final: function() {
+                if (finalized) throw new Error('cipher finalized');
+                finalized = true;
+                var data = Buffer.concat(queued);
+                var fn = mode === 'encrypt' ? '__host_crypto_aes_cbc_encrypt' : '__host_crypto_aes_cbc_decrypt';
+                var raw = globalThis[fn](algo, toB64(key), toB64(iv), toB64(data));
+                return fromB64(raw, 'cipher');
+            }
+        };
+    }
+
+    function makeCipher(algo, key, iv, mode) {
+        var a = String(algo).toLowerCase();
+        if (a.indexOf('-gcm') > 0) return makeGcmCipher(a, key, iv, { mode: mode });
+        if (a.indexOf('-cbc') > 0) return makeCbcCipher(a, key, iv, mode);
+        throw new Error('Unsupported cipher: ' + algo);
+    }
+
+    exports.createCipheriv = function(algo, key, iv) { return makeCipher(algo, key, iv, 'encrypt'); };
+    exports.createDecipheriv = function(algo, key, iv) { return makeCipher(algo, key, iv, 'decrypt'); };
+
+    // ---- KDFs --------------------------------------------------------
+    exports.pbkdf2Sync = function(password, salt, iterations, keylen, digest) {
+        var fn = globalThis.__host_crypto_pbkdf2_sync;
+        if (typeof fn !== 'function') {
+            throw new Error('Permission denied: crypto.pbkdf2Sync');
+        }
+        var pwd = typeof password === 'string' ? password
+            : Buffer.isBuffer(password) ? password.toString('binary')
+            : String(password);
+        var saltBuf = Buffer.isBuffer(salt) ? salt : Buffer.from(String(salt));
+        var raw = fn(String(digest || 'sha256'), pwd, saltBuf.toString('base64'), iterations >>> 0, keylen >>> 0);
+        return fromB64(raw, 'pbkdf2Sync');
+    };
+
+    // ---- sign / verify (RSA + ECDSA) ----------------------------------
+    function signImpl(algorithm, keyPem, data) {
+        var fn = globalThis.__host_crypto_sign;
+        if (typeof fn !== 'function') {
+            throw new Error('Permission denied: crypto.sign');
+        }
+        var dataBuf = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
+        var raw = fn(String(algorithm), String(keyPem), dataBuf.toString('base64'));
+        if (typeof raw === 'string' && raw.indexOf('__HOST_ERR__:') === 0) {
+            throw new Error('crypto.sign: ' + raw.slice('__HOST_ERR__:'.length));
+        }
+        return Buffer.from(raw, 'base64');
+    }
+
+    function verifyImpl(algorithm, keyPem, data, signature) {
+        var fn = globalThis.__host_crypto_verify;
+        if (typeof fn !== 'function') {
+            throw new Error('Permission denied: crypto.verify');
+        }
+        var dataBuf = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
+        var sigBuf = Buffer.isBuffer(signature) ? signature : Buffer.from(String(signature));
+        var code = fn(
+            String(algorithm),
+            String(keyPem),
+            dataBuf.toString('base64'),
+            sigBuf.toString('base64')
+        );
+        // Native path returns bool; WASM path returns i32 (1/0/negative).
+        if (code === true || code === 1) return true;
+        if (code === false || code === 0) return false;
+        throw new Error('crypto.verify: host error (code ' + code + ')');
+    }
+
+    exports.sign = signImpl;
+    exports.verify = verifyImpl;
+
+    // Node's stream-style createSign / createVerify aliases.
+    function makeSigner(algo) {
+        var algoToHash = { 'RSA-SHA256': 'RS256', 'RSA-SHA384': 'RS384', 'RSA-SHA512': 'RS512',
+                           'sha256WithRSAEncryption': 'RS256', 'sha384WithRSAEncryption': 'RS384',
+                           'sha512WithRSAEncryption': 'RS512' };
+        var canonical = algoToHash[algo] || algo;
+        var chunks = [];
+        return {
+            update: function(d) { chunks.push(Buffer.isBuffer(d) ? d : Buffer.from(String(d))); return this; },
+            sign:   function(key) { return signImpl(canonical, key, Buffer.concat(chunks)); }
+        };
+    }
+    function makeVerifier(algo) {
+        var algoToHash = { 'RSA-SHA256': 'RS256', 'RSA-SHA384': 'RS384', 'RSA-SHA512': 'RS512',
+                           'sha256WithRSAEncryption': 'RS256', 'sha384WithRSAEncryption': 'RS384',
+                           'sha512WithRSAEncryption': 'RS512' };
+        var canonical = algoToHash[algo] || algo;
+        var chunks = [];
+        return {
+            update: function(d) { chunks.push(Buffer.isBuffer(d) ? d : Buffer.from(String(d))); return this; },
+            verify: function(key, sig) { return verifyImpl(canonical, key, Buffer.concat(chunks), sig); }
+        };
+    }
+    exports.createSign = makeSigner;
+    exports.createVerify = makeVerifier;
+
+    exports.scryptSync = function(password, salt, keylen, options) {
+        var fn = globalThis.__host_crypto_scrypt_sync;
+        if (typeof fn !== 'function') {
+            throw new Error('Permission denied: crypto.scryptSync');
+        }
+        options = options || {};
+        var N = options.N || options.cost || 16384;
+        var r = options.r || options.blockSize || 8;
+        var p = options.p || options.parallelization || 1;
+        var pwd = typeof password === 'string' ? password
+            : Buffer.isBuffer(password) ? password.toString('binary')
+            : String(password);
+        var saltBuf = Buffer.isBuffer(salt) ? salt : Buffer.from(String(salt));
+        var raw = fn(pwd, saltBuf.toString('base64'), N >>> 0, r >>> 0, p >>> 0, keylen >>> 0);
+        return fromB64(raw, 'scryptSync');
+    };
 });
 
 // ---- dns.js ----
@@ -700,6 +1026,114 @@ __register_module('events', function(module, exports, require) {
     module.exports = EventEmitter;
 });
 
+// ---- fetch.js ----
+// fetch / Request / Response / Headers — Web API, synchronous under
+// the hood (our http host is sync) but Promise-wrapped to match the
+// standard interface.
+
+(function installFetch() {
+    if (typeof globalThis.fetch === 'function') return;
+
+    function Headers(init) {
+        this._m = Object.create(null);
+        if (!init) return;
+        if (init instanceof Headers) {
+            for (var k in init._m) this._m[k] = init._m[k];
+            return;
+        }
+        if (Array.isArray(init)) {
+            for (var i = 0; i < init.length; i++) this.set(init[i][0], init[i][1]);
+            return;
+        }
+        var keys = Object.keys(init);
+        for (var j = 0; j < keys.length; j++) this.set(keys[j], init[keys[j]]);
+    }
+    Headers.prototype.get = function(k)       { return this._m[String(k).toLowerCase()] || null; };
+    Headers.prototype.has = function(k)       { return String(k).toLowerCase() in this._m; };
+    Headers.prototype.set = function(k, v)    { this._m[String(k).toLowerCase()] = String(v); };
+    Headers.prototype.append = function(k, v) {
+        var key = String(k).toLowerCase();
+        this._m[key] = (this._m[key] ? this._m[key] + ', ' : '') + String(v);
+    };
+    Headers.prototype['delete'] = function(k) { delete this._m[String(k).toLowerCase()]; };
+    Headers.prototype.forEach = function(cb)  {
+        var keys = Object.keys(this._m);
+        for (var i = 0; i < keys.length; i++) cb(this._m[keys[i]], keys[i], this);
+    };
+    Headers.prototype.entries = function() {
+        var keys = Object.keys(this._m);
+        var self = this;
+        var i = 0;
+        return { next: function() {
+            if (i >= keys.length) return { done: true };
+            var k = keys[i++];
+            return { value: [k, self._m[k]], done: false };
+        } };
+    };
+
+    function Request(url, init) {
+        init = init || {};
+        this.url = String(url);
+        this.method = (init.method || 'GET').toUpperCase();
+        this.headers = new Headers(init.headers);
+        this.body = init.body != null ? String(init.body) : null;
+        this.signal = init.signal || null;
+    }
+
+    function Response(body, init) {
+        init = init || {};
+        this._body = body != null ? String(body) : '';
+        this.status = init.status !== undefined ? init.status : 200;
+        this.statusText = init.statusText || '';
+        this.ok = this.status >= 200 && this.status < 300;
+        this.headers = new Headers(init.headers);
+        this.url = init.url || '';
+        this.bodyUsed = false;
+    }
+    Response.prototype.text = function() {
+        if (this.bodyUsed) return Promise.reject(new TypeError('Body already consumed'));
+        this.bodyUsed = true;
+        return Promise.resolve(this._body);
+    };
+    Response.prototype.json = function() {
+        return this.text().then(function(s) { return JSON.parse(s); });
+    };
+    Response.prototype.arrayBuffer = function() {
+        var Buffer = require('buffer').Buffer;
+        return this.text().then(function(s) {
+            return Buffer.from(s, 'utf8').buffer;
+        });
+    };
+    Response.prototype.clone = function() {
+        var r = new Response(this._body, { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url });
+        return r;
+    };
+
+    function fetch(input, init) {
+        var req = input instanceof Request ? input : new Request(input, init);
+        if (req.signal && req.signal.aborted) {
+            return Promise.reject(req.signal.reason || new Error('Aborted'));
+        }
+        if (typeof globalThis.__host_http_request !== 'function') {
+            return Promise.reject(new Error('fetch: net capability not granted'));
+        }
+        var raw = globalThis.__host_http_request(req.method, req.url, req.body);
+        var parsed;
+        try { parsed = JSON.parse(raw); }
+        catch (e) { return Promise.reject(new Error('fetch: malformed host response: ' + e.message)); }
+        if (typeof parsed.body === 'string' && parsed.body.indexOf('__HOST_ERR__:') === 0) {
+            return Promise.reject(new Error('fetch: ' + parsed.body.slice('__HOST_ERR__:'.length)));
+        }
+        var resp = new Response(parsed.body, { status: parsed.status, url: req.url });
+        return Promise.resolve(resp);
+    }
+
+    globalThis.fetch = fetch;
+    globalThis.Headers = Headers;
+    globalThis.Request = Request;
+    globalThis.Response = Response;
+})();
+
 // ---- fs.js ----
 // fs — thin glue over the __host_fs_* globals installed by the engine.
 // Every method throws if the host global isn't present (meaning the
@@ -778,6 +1212,114 @@ __register_module('fs', function(module, exports, require) {
         requireHost('rename_sync')(String(from), String(to));
     };
 
+    // ---- streaming -----------------------------------------------------
+    var EventEmitter = require('events');
+    var Buffer = require('buffer').Buffer;
+
+    // No event loop in the sandbox: stream emission has to be triggered
+    // synchronously by something. We adopt the convention that emission
+    // fires when the first `data` listener is added (or when the user
+    // calls `.resume()` explicitly). Attach `end` / `error` listeners
+    // *before* attaching `data`.
+    function createReadStream(path, options) {
+        options = options || {};
+        var chunkSize = options.highWaterMark || 64 * 1024;
+        var startOffset = options.start || 0;
+        var endOffset = options.end;  // inclusive per Node semantics
+        var encoding = options.encoding || null;
+
+        var ee = new EventEmitter();
+        var pumped = false;
+
+        function pump() {
+            if (pumped) return;
+            pumped = true;
+            try {
+                var sizeFn = globalThis.__host_fs_size;
+                if (typeof sizeFn !== 'function') throw new Error('fs.createReadStream: not available');
+                var sizeRaw = sizeFn(String(path));
+                if (typeof sizeRaw === 'string' && sizeRaw.indexOf('__HOST_ERR__:') === 0) {
+                    throw new Error('fs: ' + sizeRaw.slice('__HOST_ERR__:'.length));
+                }
+                var total = parseInt(sizeRaw, 10);
+                var endIdx = (endOffset === undefined || endOffset >= total) ? total - 1 : endOffset;
+
+                var off = startOffset;
+                var readFn = globalThis.__host_fs_read_chunk;
+                if (typeof readFn !== 'function') throw new Error('fs.createReadStream: chunk reader not available');
+                while (off <= endIdx) {
+                    var want = Math.min(chunkSize, endIdx - off + 1);
+                    var raw = readFn(String(path), off, want);
+                    if (typeof raw === 'string' && raw.indexOf('__HOST_ERR__:') === 0) {
+                        throw new Error('fs: ' + raw.slice('__HOST_ERR__:'.length));
+                    }
+                    var buf = Buffer.from(raw, 'base64');
+                    if (buf.length === 0) break;
+                    var emitted = encoding ? buf.toString(encoding) : buf;
+                    ee.emit('data', emitted);
+                    off += buf.length;
+                }
+                ee.emit('end');
+                ee.emit('close');
+            } catch (e) {
+                ee.emit('error', e);
+            }
+        }
+
+        var origOn = ee.on.bind(ee);
+        ee.on = function(name, fn) {
+            origOn(name, fn);
+            if (name === 'data') pump();
+            return ee;
+        };
+        ee.addListener = ee.on;
+        ee.resume = pump;
+        ee.pipe = function(dest) {
+            ee.on('end',  function() { if (dest.end) dest.end(); });
+            ee.on('data', function(chunk) { dest.write(chunk); });
+            return dest;
+        };
+        return ee;
+    }
+
+    function createWriteStream(path, options) {
+        options = options || {};
+        var off = options.start || 0;
+        var truncateFirst = (options.flags === undefined) || options.flags === 'w';
+        var ee = new EventEmitter();
+        var writeFn = globalThis.__host_fs_write_chunk;
+        if (typeof writeFn !== 'function') {
+            // Defer emission so callers can attach 'error' first.
+            Promise.resolve().then(function() {
+                ee.emit('error', new Error('fs.createWriteStream: not available'));
+            });
+        }
+        if (truncateFirst) {
+            // Best-effort truncate: write zero bytes at offset 0.
+            try { writeFn(String(path), 0, ''); } catch (_) {}
+        }
+        ee.write = function(chunk) {
+            try {
+                var buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+                var raw = writeFn(String(path), off, buf.toString('base64'));
+                if (typeof raw === 'string' && raw.indexOf('__HOST_ERR__:') === 0) {
+                    throw new Error('fs: ' + raw.slice('__HOST_ERR__:'.length));
+                }
+                off += buf.length;
+                return true;
+            } catch (e) { ee.emit('error', e); return false; }
+        };
+        ee.end = function(chunk) {
+            if (chunk) ee.write(chunk);
+            ee.emit('finish');
+            ee.emit('close');
+        };
+        return ee;
+    }
+
+    exports.createReadStream  = createReadStream;
+    exports.createWriteStream = createWriteStream;
+
     // fs.promises — thin Promise wrappers around the sync variants.
     exports.promises = {};
     ['readFile','writeFile','stat','readdir','mkdir','unlink','rename'].forEach(function(name) {
@@ -814,6 +1356,11 @@ function __plenum_install_http(moduleName) {
 
             var resultRaw = globalThis.__host_http_request(method, url, body || null);
             var result = JSON.parse(resultRaw);
+            if (typeof result.body === 'string' && result.body.indexOf('__HOST_ERR__:') === 0) {
+                var err = new Error("http: " + result.body.slice('__HOST_ERR__:'.length));
+                if (err.message.toLowerCase().indexOf('permission denied') !== -1) err.code = 'EACCES';
+                throw err;
+            }
 
             // Shape the response like a minimal IncomingMessage.
             var resp = {
@@ -1096,36 +1643,44 @@ __register_module('path', function(module, exports, require) {
 });
 
 // ---- process.js ----
-// process — a lean facade. `env` / `platform` / `arch` are backed by
-// host globals when the native/WASM layer sets them; otherwise defaults.
-// `nextTick` is treated like `setImmediate` (synchronous per timers.js).
+// process — eager-installed as `globalThis.process` and registered as
+// the CommonJS `process` module. Acts as an EventEmitter so scripts
+// using `process.on('exit', …)` etc. do not blow up.
+//
+// The IIFE runs at bundle-load time so `globalThis.process` is set
+// regardless of whether the user script ever calls `require('process')`.
 
-__register_module('process', function(module, exports, require) {
+(function bootstrapProcess() {
+    // EventEmitter is provided by events.js; we lookup directly from
+    // the require resolver since this runs before user code.
+    var EventEmitter = require('events');
 
-    // Host-populated; guard for absence.
     var hostEnv = globalThis.__host_env || {};
+    var proc = Object.create(EventEmitter.prototype);
+    EventEmitter.call(proc);
 
-    var proc = {
-        platform:  globalThis.__host_platform  || 'linux',
-        arch:      globalThis.__host_arch      || 'x64',
-        version:   'v20.0.0-afterburner',
-        versions:  { node: '20.0.0', afterburner: '0.1.0' },
-        env:       hostEnv,
-        argv:      ['afterburner'],
-        execPath:  '/usr/bin/afterburner',
-        pid:       1,
-        title:     'afterburner',
+    var fields = {
+        platform: globalThis.__host_platform || 'linux',
+        arch:     globalThis.__host_arch     || 'x64',
+        version:  'v20.0.0-afterburner',
+        versions: { node: '20.0.0', afterburner: '0.1.0' },
+        env:      hostEnv,
+        argv:     ['afterburner'],
+        execPath: '/usr/bin/afterburner',
+        pid:      1,
+        title:    'afterburner',
 
-        cwd:       function() { return globalThis.__host_cwd || '/'; },
-        chdir:     function(_d) { throw new Error('process.chdir is not supported'); },
+        cwd:      function() { return globalThis.__host_cwd || '/'; },
+        chdir:    function() { throw new Error('process.chdir is not supported'); },
 
-        nextTick:  function(fn) {
+        nextTick: function(fn) {
             if (typeof fn !== 'function') throw new TypeError('callback must be a function');
             var args = Array.prototype.slice.call(arguments, 1);
             fn.apply(null, args);
         },
 
-        exit:      function(code) {
+        exit: function(code) {
+            try { proc.emit('exit', code || 0); } catch (_) {}
             if (globalThis.__host_process_exit) globalThis.__host_process_exit(code || 0);
             var err = new Error('process.exit(' + (code || 0) + ')');
             err.code = 'ERR_PROCESS_EXIT';
@@ -1133,8 +1688,7 @@ __register_module('process', function(module, exports, require) {
             throw err;
         },
 
-        hrtime:    function(prev) {
-            // No high-res clock in the sandbox. Fall back to Date.now().
+        hrtime: function(prev) {
             var now = Date.now();
             var seconds = Math.floor(now / 1000);
             var nanos = (now % 1000) * 1e6;
@@ -1147,21 +1701,21 @@ __register_module('process', function(module, exports, require) {
             return [seconds, nanos];
         },
 
-        stdout:    { write: function(s) { if (globalThis.console) console.log(String(s)); return true; } },
-        stderr:    { write: function(s) { if (globalThis.console) console.error(String(s)); return true; } },
-        stdin:     { on: function() {}, read: function() { return null; } }
+        stdout: { write: function(s) { if (globalThis.console) console.log(String(s)); return true; } },
+        stderr: { write: function(s) { if (globalThis.console) console.error(String(s)); return true; } },
+        stdin:  { on: function() {}, read: function() { return null; } }
     };
 
-    proc.hrtime.bigint = function() {
-        var t = proc.hrtime();
+    fields.hrtime.bigint = function() {
+        var t = fields.hrtime();
         return BigInt(t[0]) * 1000000000n + BigInt(t[1]);
     };
 
-    module.exports = proc;
+    Object.keys(fields).forEach(function(k) { proc[k] = fields[k]; });
 
-    // Expose as a global, matching Node.
-    if (!globalThis.process) globalThis.process = proc;
-});
+    globalThis.process = proc;
+    __register_host_module('process', proc);
+})();
 
 // ---- punycode.js ----
 // punycode — RFC 3492 implementation.
@@ -1389,6 +1943,74 @@ __register_module('querystring', function(module, exports, require) {
     exports.decode = exports.parse;
 });
 
+// ---- state.js ----
+// afterburner:state — cross-invocation key/value store. Not part of
+// Node's standard surface; lives under the `afterburner:` package
+// namespace so it can never collide with a real Node module.
+//
+// Values are stored as opaque bytes by the host. JS exposes:
+//   * get(key)   -> Buffer | null
+//   * set(key, value)  (string | Buffer | Uint8Array)
+//   * delete(key)
+//   * getJSON / setJSON convenience wrappers
+
+__register_module('afterburner:state', function(module, exports, require) {
+    var Buffer = require('buffer').Buffer;
+
+    function ensure(name) {
+        var fn = globalThis['__host_state_' + name];
+        if (typeof fn !== 'function') {
+            throw new Error('afterburner:state.' + name + ' is not available');
+        }
+        return fn;
+    }
+
+    function toBytesB64(value) {
+        if (value === undefined || value === null) return '';
+        if (typeof value === 'string') return Buffer.from(value, 'utf8').toString('base64');
+        if (Buffer.isBuffer(value))    return value.toString('base64');
+        if (value instanceof Uint8Array) return Buffer.from(value).toString('base64');
+        throw new TypeError('state.set: value must be string/Buffer/Uint8Array');
+    }
+
+    exports.get = function(key) {
+        var raw = ensure('get')(String(key));
+        if (raw === null || raw === undefined) return null;
+        return Buffer.from(raw, 'base64');
+    };
+
+    exports.set = function(key, value) {
+        ensure('set')(String(key), toBytesB64(value));
+    };
+
+    exports['delete'] = function(key) {
+        ensure('delete')(String(key));
+    };
+
+    exports.has = function(key) {
+        return exports.get(key) !== null;
+    };
+
+    // JSON helpers — the most common usage.
+    exports.getJSON = function(key) {
+        var b = exports.get(key);
+        if (b === null) return undefined;
+        try { return JSON.parse(b.toString('utf8')); } catch (e) { return undefined; }
+    };
+    exports.setJSON = function(key, value) {
+        exports.set(key, JSON.stringify(value));
+    };
+
+    // Numeric helper for counters.
+    exports.increment = function(key, delta) {
+        var n = exports.getJSON(key);
+        if (typeof n !== 'number') n = 0;
+        n += (delta === undefined ? 1 : delta);
+        exports.setJSON(key, n);
+        return n;
+    };
+});
+
 // ---- stream.js ----
 // stream — minimal shim. Phase 1 does NOT implement backpressure,
 // highWaterMark, or object-mode semantics. It provides just enough of
@@ -1575,6 +2197,50 @@ __register_module('string_decoder', function(module, exports, require) {
 
     exports.StringDecoder = StringDecoder;
 });
+
+// ---- stubs.js ----
+// Stub modules that throw a helpful NotSupportedInSandbox error on any
+// property access. Registering them means `require('net')` returns an
+// object instead of `Cannot find module 'net'` — scripts get a clear
+// signal about what's unsupported and why.
+
+(function installStubs() {
+    var reasons = {
+        net: 'raw TCP sockets',
+        tls: 'raw TLS sockets',
+        dgram: 'UDP sockets',
+        http2: 'HTTP/2 (plain http/https works for outbound requests)',
+        cluster: 'multi-process clustering',
+        worker_threads: 'additional JavaScript threads',
+        inspector: 'Node inspector protocol',
+        vm: 'nested VM contexts',
+        v8: 'V8-specific APIs',
+        readline: 'stdin line reader',
+        repl: 'interactive REPL',
+        wasi: 'guest WASI access (already inside the sandbox)',
+        domain: 'deprecated domain API',
+        trace_events: 'trace events',
+        async_hooks: 'async hooks (no event loop)',
+        perf_hooks: 'perf hooks (see globalThis.performance)',
+    };
+
+    Object.keys(reasons).forEach(function(name) {
+        var reason = reasons[name];
+        __register_module(name, function(module, exports, require) {
+            var why = 'Module "' + name + '" is not supported in the Afterburner sandbox: '
+                + reason;
+            var trap = new Proxy({}, {
+                get: function(_t, prop) {
+                    if (prop === 'then') return undefined; // don't claim to be a thenable
+                    var err = new Error(why + ' (accessed: ' + String(prop) + ')');
+                    err.code = 'ERR_NOT_SUPPORTED_IN_SANDBOX';
+                    throw err;
+                }
+            });
+            module.exports = trap;
+        });
+    });
+})();
 
 // ---- timers.js ----
 // timers — Phase 1 behavior is deliberately conservative.
@@ -1845,6 +2511,53 @@ __register_module('util', function(module, exports, require) {
     exports.TextEncoder = typeof TextEncoder === 'function' ? TextEncoder : undefined;
     exports.TextDecoder = typeof TextDecoder === 'function' ? TextDecoder : undefined;
 });
+
+// ---- web_compat.js ----
+// Small Web-API polyfills that most Node.js scripts now assume. Wired
+// as globals, not modules, to match the browser/Node semantics.
+
+(function installWebCompat() {
+    // structuredClone — ES2022. QuickJS-NG typically has it; fall back
+    // to a JSON deep-copy so scripts don't blow up if this runtime
+    // doesn't.
+    if (typeof globalThis.structuredClone !== 'function') {
+        globalThis.structuredClone = function(value) {
+            if (value === undefined) return undefined;
+            return JSON.parse(JSON.stringify(value));
+        };
+    }
+
+    // performance.now — no monotonic clock inside the sandbox, but
+    // Date.now gives us something non-decreasing for most practical
+    // purposes. Hrtime-style scripts won't crash.
+    if (typeof globalThis.performance !== 'object' || typeof globalThis.performance.now !== 'function') {
+        globalThis.performance = globalThis.performance || {};
+        globalThis.performance.now = function() { return Date.now(); };
+    }
+
+    // `queueMicrotask` — schedule a microtask. QuickJS supports
+    // Promise.then which gives us the microtask queue for free.
+    if (typeof globalThis.queueMicrotask !== 'function') {
+        globalThis.queueMicrotask = function(fn) {
+            if (typeof fn !== 'function') throw new TypeError('callback must be a function');
+            Promise.resolve().then(fn);
+        };
+    }
+
+    // `btoa` / `atob` — base64 encoders. QuickJS doesn't ship these.
+    if (typeof globalThis.btoa !== 'function') {
+        globalThis.btoa = function(str) {
+            var Buffer = require('buffer').Buffer;
+            return Buffer.from(String(str), 'binary').toString('base64');
+        };
+    }
+    if (typeof globalThis.atob !== 'function') {
+        globalThis.atob = function(b64) {
+            var Buffer = require('buffer').Buffer;
+            return Buffer.from(String(b64), 'base64').toString('binary');
+        };
+    }
+})();
 
 // ---- zlib.js ----
 // zlib — synchronous deflate/inflate/gzip/gunzip backed by Rust

@@ -75,6 +75,114 @@ __register_module('fs', function(module, exports, require) {
         requireHost('rename_sync')(String(from), String(to));
     };
 
+    // ---- streaming -----------------------------------------------------
+    var EventEmitter = require('events');
+    var Buffer = require('buffer').Buffer;
+
+    // No event loop in the sandbox: stream emission has to be triggered
+    // synchronously by something. We adopt the convention that emission
+    // fires when the first `data` listener is added (or when the user
+    // calls `.resume()` explicitly). Attach `end` / `error` listeners
+    // *before* attaching `data`.
+    function createReadStream(path, options) {
+        options = options || {};
+        var chunkSize = options.highWaterMark || 64 * 1024;
+        var startOffset = options.start || 0;
+        var endOffset = options.end;  // inclusive per Node semantics
+        var encoding = options.encoding || null;
+
+        var ee = new EventEmitter();
+        var pumped = false;
+
+        function pump() {
+            if (pumped) return;
+            pumped = true;
+            try {
+                var sizeFn = globalThis.__host_fs_size;
+                if (typeof sizeFn !== 'function') throw new Error('fs.createReadStream: not available');
+                var sizeRaw = sizeFn(String(path));
+                if (typeof sizeRaw === 'string' && sizeRaw.indexOf('__HOST_ERR__:') === 0) {
+                    throw new Error('fs: ' + sizeRaw.slice('__HOST_ERR__:'.length));
+                }
+                var total = parseInt(sizeRaw, 10);
+                var endIdx = (endOffset === undefined || endOffset >= total) ? total - 1 : endOffset;
+
+                var off = startOffset;
+                var readFn = globalThis.__host_fs_read_chunk;
+                if (typeof readFn !== 'function') throw new Error('fs.createReadStream: chunk reader not available');
+                while (off <= endIdx) {
+                    var want = Math.min(chunkSize, endIdx - off + 1);
+                    var raw = readFn(String(path), off, want);
+                    if (typeof raw === 'string' && raw.indexOf('__HOST_ERR__:') === 0) {
+                        throw new Error('fs: ' + raw.slice('__HOST_ERR__:'.length));
+                    }
+                    var buf = Buffer.from(raw, 'base64');
+                    if (buf.length === 0) break;
+                    var emitted = encoding ? buf.toString(encoding) : buf;
+                    ee.emit('data', emitted);
+                    off += buf.length;
+                }
+                ee.emit('end');
+                ee.emit('close');
+            } catch (e) {
+                ee.emit('error', e);
+            }
+        }
+
+        var origOn = ee.on.bind(ee);
+        ee.on = function(name, fn) {
+            origOn(name, fn);
+            if (name === 'data') pump();
+            return ee;
+        };
+        ee.addListener = ee.on;
+        ee.resume = pump;
+        ee.pipe = function(dest) {
+            ee.on('end',  function() { if (dest.end) dest.end(); });
+            ee.on('data', function(chunk) { dest.write(chunk); });
+            return dest;
+        };
+        return ee;
+    }
+
+    function createWriteStream(path, options) {
+        options = options || {};
+        var off = options.start || 0;
+        var truncateFirst = (options.flags === undefined) || options.flags === 'w';
+        var ee = new EventEmitter();
+        var writeFn = globalThis.__host_fs_write_chunk;
+        if (typeof writeFn !== 'function') {
+            // Defer emission so callers can attach 'error' first.
+            Promise.resolve().then(function() {
+                ee.emit('error', new Error('fs.createWriteStream: not available'));
+            });
+        }
+        if (truncateFirst) {
+            // Best-effort truncate: write zero bytes at offset 0.
+            try { writeFn(String(path), 0, ''); } catch (_) {}
+        }
+        ee.write = function(chunk) {
+            try {
+                var buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+                var raw = writeFn(String(path), off, buf.toString('base64'));
+                if (typeof raw === 'string' && raw.indexOf('__HOST_ERR__:') === 0) {
+                    throw new Error('fs: ' + raw.slice('__HOST_ERR__:'.length));
+                }
+                off += buf.length;
+                return true;
+            } catch (e) { ee.emit('error', e); return false; }
+        };
+        ee.end = function(chunk) {
+            if (chunk) ee.write(chunk);
+            ee.emit('finish');
+            ee.emit('close');
+        };
+        return ee;
+    }
+
+    exports.createReadStream  = createReadStream;
+    exports.createWriteStream = createWriteStream;
+
     // fs.promises — thin Promise wrappers around the sync variants.
     exports.promises = {};
     ['readFile','writeFile','stat','readdir','mkdir','unlink','rename'].forEach(function(name) {

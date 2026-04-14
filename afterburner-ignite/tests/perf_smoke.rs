@@ -14,9 +14,7 @@ use std::time::Instant;
 #[test]
 fn native_thrust_rate_meets_floor() {
     let combustor = NativeCombustor::new().unwrap();
-    let id = combustor
-        .ignite("module.exports = (d) => d.n + 1")
-        .unwrap();
+    let id = combustor.ignite("module.exports = (d) => d.n + 1").unwrap();
 
     const ITERS: u64 = 10_000;
     let input = json!({ "n": 41 });

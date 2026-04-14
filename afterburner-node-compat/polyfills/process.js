@@ -1,33 +1,41 @@
-// process — a lean facade. `env` / `platform` / `arch` are backed by
-// host globals when the native/WASM layer sets them; otherwise defaults.
-// `nextTick` is treated like `setImmediate` (synchronous per timers.js).
+// process — eager-installed as `globalThis.process` and registered as
+// the CommonJS `process` module. Acts as an EventEmitter so scripts
+// using `process.on('exit', …)` etc. do not blow up.
+//
+// The IIFE runs at bundle-load time so `globalThis.process` is set
+// regardless of whether the user script ever calls `require('process')`.
 
-__register_module('process', function(module, exports, require) {
+(function bootstrapProcess() {
+    // EventEmitter is provided by events.js; we lookup directly from
+    // the require resolver since this runs before user code.
+    var EventEmitter = require('events');
 
-    // Host-populated; guard for absence.
     var hostEnv = globalThis.__host_env || {};
+    var proc = Object.create(EventEmitter.prototype);
+    EventEmitter.call(proc);
 
-    var proc = {
-        platform:  globalThis.__host_platform  || 'linux',
-        arch:      globalThis.__host_arch      || 'x64',
-        version:   'v20.0.0-afterburner',
-        versions:  { node: '20.0.0', afterburner: '0.1.0' },
-        env:       hostEnv,
-        argv:      ['afterburner'],
-        execPath:  '/usr/bin/afterburner',
-        pid:       1,
-        title:     'afterburner',
+    var fields = {
+        platform: globalThis.__host_platform || 'linux',
+        arch:     globalThis.__host_arch     || 'x64',
+        version:  'v20.0.0-afterburner',
+        versions: { node: '20.0.0', afterburner: '0.1.0' },
+        env:      hostEnv,
+        argv:     ['afterburner'],
+        execPath: '/usr/bin/afterburner',
+        pid:      1,
+        title:    'afterburner',
 
-        cwd:       function() { return globalThis.__host_cwd || '/'; },
-        chdir:     function(_d) { throw new Error('process.chdir is not supported'); },
+        cwd:      function() { return globalThis.__host_cwd || '/'; },
+        chdir:    function() { throw new Error('process.chdir is not supported'); },
 
-        nextTick:  function(fn) {
+        nextTick: function(fn) {
             if (typeof fn !== 'function') throw new TypeError('callback must be a function');
             var args = Array.prototype.slice.call(arguments, 1);
             fn.apply(null, args);
         },
 
-        exit:      function(code) {
+        exit: function(code) {
+            try { proc.emit('exit', code || 0); } catch (_) {}
             if (globalThis.__host_process_exit) globalThis.__host_process_exit(code || 0);
             var err = new Error('process.exit(' + (code || 0) + ')');
             err.code = 'ERR_PROCESS_EXIT';
@@ -35,8 +43,7 @@ __register_module('process', function(module, exports, require) {
             throw err;
         },
 
-        hrtime:    function(prev) {
-            // No high-res clock in the sandbox. Fall back to Date.now().
+        hrtime: function(prev) {
             var now = Date.now();
             var seconds = Math.floor(now / 1000);
             var nanos = (now % 1000) * 1e6;
@@ -49,18 +56,18 @@ __register_module('process', function(module, exports, require) {
             return [seconds, nanos];
         },
 
-        stdout:    { write: function(s) { if (globalThis.console) console.log(String(s)); return true; } },
-        stderr:    { write: function(s) { if (globalThis.console) console.error(String(s)); return true; } },
-        stdin:     { on: function() {}, read: function() { return null; } }
+        stdout: { write: function(s) { if (globalThis.console) console.log(String(s)); return true; } },
+        stderr: { write: function(s) { if (globalThis.console) console.error(String(s)); return true; } },
+        stdin:  { on: function() {}, read: function() { return null; } }
     };
 
-    proc.hrtime.bigint = function() {
-        var t = proc.hrtime();
+    fields.hrtime.bigint = function() {
+        var t = fields.hrtime();
         return BigInt(t[0]) * 1000000000n + BigInt(t[1]);
     };
 
-    module.exports = proc;
+    Object.keys(fields).forEach(function(k) { proc[k] = fields[k]; });
 
-    // Expose as a global, matching Node.
-    if (!globalThis.process) globalThis.process = proc;
-});
+    globalThis.process = proc;
+    __register_host_module('process', proc);
+})();

@@ -33,7 +33,9 @@ fn main() {
 
     let mut bundle = String::new();
     bundle.push_str("// GENERATED — do not edit. Source: afterburner-node-compat/polyfills/\n");
-    bundle.push_str("// Rebuild with: AFTERBURNER_REBUILD_PLENUM=1 cargo build -p afterburner-node-compat\n\n");
+    bundle.push_str(
+        "// Rebuild with: AFTERBURNER_REBUILD_PLENUM=1 cargo build -p afterburner-node-compat\n\n",
+    );
 
     // Always lead with the require resolver so later polyfills can
     // assume `__register_module` is installed.
@@ -64,8 +66,8 @@ fn main() {
 }
 
 fn append_file(buf: &mut String, path: &Path) {
-    let contents = fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    let contents =
+        fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
     buf.push_str(&format!(
         "// ---- {} ----\n",
         path.file_name().unwrap().to_string_lossy()

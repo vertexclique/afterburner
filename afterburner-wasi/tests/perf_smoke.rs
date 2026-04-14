@@ -63,9 +63,7 @@ fn wasm_thrust_with_require_path_overhead_is_bounded() {
     }
     let elapsed = start.elapsed();
     let per_sec = ITERS as f64 / elapsed.as_secs_f64();
-    eprintln!(
-        "wasm require('path') throughput: {per_sec:.0}/sec over {ITERS} iters"
-    );
+    eprintln!("wasm require('path') throughput: {per_sec:.0}/sec over {ITERS} iters");
     assert!(
         per_sec > 20.0,
         "require('path') throughput dropped below 20/sec: {per_sec:.0}/sec"

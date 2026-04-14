@@ -23,7 +23,9 @@ pub fn write_file_sync(path: &str, data: &[u8], m: &Manifold) -> Result<()> {
 
 /// `true` if the path exists and is reachable under the active FS policy.
 pub fn exists_sync(path: &str, m: &Manifold) -> bool {
-    validate_read(path, &m.fs).map(|p| p.exists()).unwrap_or(false)
+    validate_read(path, &m.fs)
+        .map(|p| p.exists())
+        .unwrap_or(false)
 }
 
 /// Stat: returns (size_bytes, is_file, is_dir, mtime_ms).
@@ -80,6 +82,46 @@ pub fn rename_sync(from: &str, to: &str, m: &Manifold) -> Result<()> {
     let dst = validate_write(to, &m.fs)?;
     std::fs::rename(&src, &dst)
         .map_err(|e| AfterburnerError::Host(format!("fs.renameSync({from} → {to}): {e}")))
+}
+
+/// Read up to `len` bytes from `offset`. Backs `fs.createReadStream`.
+pub fn read_chunk(path: &str, offset: u64, len: usize, m: &Manifold) -> Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let resolved = validate_read(path, &m.fs)?;
+    let mut f = std::fs::File::open(&resolved)
+        .map_err(|e| AfterburnerError::Host(format!("fs.read_chunk({path}): {e}")))?;
+    f.seek(SeekFrom::Start(offset))
+        .map_err(|e| AfterburnerError::Host(format!("fs.read_chunk({path}): seek {e}")))?;
+    let mut buf = vec![0u8; len];
+    let n = f
+        .read(&mut buf)
+        .map_err(|e| AfterburnerError::Host(format!("fs.read_chunk({path}): read {e}")))?;
+    buf.truncate(n);
+    Ok(buf)
+}
+
+/// Write `data` at `offset`. Creates the file when missing. Backs
+/// `fs.createWriteStream` (append-style; offset is supplied by JS).
+pub fn write_chunk(path: &str, offset: u64, data: &[u8], m: &Manifold) -> Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+    let resolved = validate_write(path, &m.fs)?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&resolved)
+        .map_err(|e| AfterburnerError::Host(format!("fs.write_chunk({path}): {e}")))?;
+    f.seek(SeekFrom::Start(offset))
+        .map_err(|e| AfterburnerError::Host(format!("fs.write_chunk({path}): seek {e}")))?;
+    f.write_all(data)
+        .map_err(|e| AfterburnerError::Host(format!("fs.write_chunk({path}): write {e}")))
+}
+
+pub fn file_size(path: &str, m: &Manifold) -> Result<u64> {
+    let resolved = validate_read(path, &m.fs)?;
+    let meta = std::fs::metadata(&resolved)
+        .map_err(|e| AfterburnerError::Host(format!("fs.size({path}): {e}")))?;
+    Ok(meta.len())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -170,10 +212,7 @@ fn canonicalize_with_fallback(path: &Path) -> PathBuf {
     let mut trailing: Vec<PathBuf> = Vec::new();
     while !cursor.exists() {
         if let Some(parent) = cursor.parent().map(|p| p.to_path_buf()) {
-            let name = cursor
-                .file_name()
-                .map(PathBuf::from)
-                .unwrap_or_default();
+            let name = cursor.file_name().map(PathBuf::from).unwrap_or_default();
             trailing.push(name);
             cursor = parent;
         } else {

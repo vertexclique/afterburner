@@ -1,8 +1,8 @@
 //! Integration tests exercising `FlowEngine` through its public API.
 
 use afterburner_core::AfterburnerError;
-use afterburner_flow::chain::merge;
 use afterburner_flow::FlowEngine;
+use afterburner_flow::chain::merge;
 use serde_json::json;
 
 fn make_engine() -> Option<FlowEngine> {

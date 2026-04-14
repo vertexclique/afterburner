@@ -3,7 +3,7 @@
 //! per-store memory limiter, and the active [`Manifold`] plus a
 //! last-error slot consulted by `afterburner:host` imports.
 
-use afterburner_core::Manifold;
+use afterburner_core::{Manifold, SharedStateStore};
 use wasmtime::{ResourceLimiter, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::preview1::WasiP1Ctx;
@@ -19,6 +19,8 @@ pub struct HostState {
     pub limits: StoreLimits,
     /// Capability profile consulted by every `afterburner:host` import.
     pub manifold: Manifold,
+    /// Cross-invocation key/value store, read by `afterburner:state`.
+    pub state_store: SharedStateStore,
     /// Detailed message for the last failed host call. The plugin reads
     /// this via the `host_last_error` import when a syscall returned a
     /// negative error code, and the JS glue surfaces it to the user.
@@ -33,6 +35,7 @@ impl HostState {
         memory_bytes: Option<usize>,
         stdout_capacity: usize,
         manifold: Manifold,
+        state_store: SharedStateStore,
     ) -> Self {
         let stdin = MemoryInputPipe::new(input.to_vec());
         let stdout = MemoryOutputPipe::new(stdout_capacity);
@@ -58,6 +61,7 @@ impl HostState {
             stdout_capacity,
             limits,
             manifold,
+            state_store,
             last_error: String::new(),
         }
     }
