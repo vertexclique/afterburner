@@ -1,10 +1,12 @@
 //! Host state threaded through the Wasmtime `Store`. Holds the WASI
-//! preview1 context plus bounded stdin/stdout/stderr memory pipes and the
-//! per-store memory limiter.
+//! preview1 context, bounded stdin/stdout/stderr memory pipes, the
+//! per-store memory limiter, and the active [`Manifold`] plus a
+//! last-error slot consulted by `afterburner:host` imports.
 
+use afterburner_core::Manifold;
 use wasmtime::{ResourceLimiter, StoreLimits, StoreLimitsBuilder};
+use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::preview1::WasiP1Ctx;
-use wasmtime_wasi::pipe::{MemoryInputPipe, MemoryOutputPipe};
 
 /// Per-`thrust` host state. A fresh instance is created for every call so
 /// invocations are fully isolated (no shared JS globals, no stdout leak
@@ -15,12 +17,23 @@ pub struct HostState {
     pub stderr: MemoryOutputPipe,
     pub stdout_capacity: usize,
     pub limits: StoreLimits,
+    /// Capability profile consulted by every `afterburner:host` import.
+    pub manifold: Manifold,
+    /// Detailed message for the last failed host call. The plugin reads
+    /// this via the `host_last_error` import when a syscall returned a
+    /// negative error code, and the JS glue surfaces it to the user.
+    pub last_error: String,
 }
 
 impl HostState {
     /// Build a `HostState` with the given input JSON piped to stdin and
     /// bounded capture buffers for stdout and stderr.
-    pub fn new(input: &[u8], memory_bytes: Option<usize>, stdout_capacity: usize) -> Self {
+    pub fn new(
+        input: &[u8],
+        memory_bytes: Option<usize>,
+        stdout_capacity: usize,
+        manifold: Manifold,
+    ) -> Self {
         let stdin = MemoryInputPipe::new(input.to_vec());
         let stdout = MemoryOutputPipe::new(stdout_capacity);
         // Stderr is bounded too — preserving it unbounded is a memory-
@@ -44,6 +57,8 @@ impl HostState {
             stderr,
             stdout_capacity,
             limits,
+            manifold,
+            last_error: String::new(),
         }
     }
 

@@ -53,8 +53,56 @@ impl ThreadRuntime {
             .map_err(|e| AfterburnerError::Engine(format!("rquickjs runtime init: {e}")))?;
         let context = Context::full(&runtime)
             .map_err(|e| AfterburnerError::Engine(format!("rquickjs context init: {e}")))?;
+
+        // Eval the plenum bundle once per thread-local Runtime so every
+        // thrust on this thread can `require('path')` etc. without
+        // paying the ~45 KB parse cost again. Host-backed modules
+        // (`fs`, `crypto`, `os`, `http`) are wired here too — the
+        // per-thrust Manifold is read via a thread-local slot that
+        // `do_thrust` populates for the duration of each call.
+        context
+            .with(|ctx| -> std::result::Result<(), AfterburnerError> {
+                install_host_globals(&ctx)?;
+                afterburner_node_compat::register_native_builtins(&ctx)?;
+                ctx.eval::<(), _>(afterburner_node_compat::PLENUM_BUNDLE.as_bytes())
+                    .map_err(|e| {
+                        AfterburnerError::Engine(format!("plenum bundle eval: {e}"))
+                    })?;
+                Ok(())
+            })?;
+
         Ok(Self { runtime, context })
     }
+}
+
+/// Install the small set of host-provided globals the plenum bundle
+/// expects (currently just `__host_log` for `console.*`). Keeps the JS
+/// side agnostic to where logs end up.
+fn install_host_globals(ctx: &Ctx<'_>) -> std::result::Result<(), AfterburnerError> {
+    use rquickjs::Function;
+    let globals = ctx.globals();
+    globals
+        .set(
+            "__host_log",
+            Function::new(ctx.clone(), |level: String, msg: String| {
+                host_log(&level, &msg);
+            })
+            .map_err(|e| AfterburnerError::Engine(format!("Function::new host_log: {e}")))?,
+        )
+        .map_err(|e| AfterburnerError::Engine(format!("globals.set host_log: {e}")))?;
+    Ok(())
+}
+
+fn host_log(level: &str, msg: &str) {
+    use afterburner_core::log::Level;
+    use afterburner_core::ab_event;
+    let level = match level {
+        "error" => Level::Error,
+        "warn" => Level::Warn,
+        "debug" => Level::Debug,
+        _ => Level::Info,
+    };
+    ab_event!(level, "script.console", "message" => msg);
 }
 
 /// Run a closure with access to the current thread's `ThreadRuntime`,
@@ -65,7 +113,10 @@ fn with_thread_rt<R>(f: impl FnOnce(&ThreadRuntime) -> Result<R>) -> Result<R> {
         if borrow.is_none() {
             *borrow = Some(ThreadRuntime::new()?);
         }
-        f(borrow.as_ref().unwrap())
+        let rt = borrow
+            .as_ref()
+            .ok_or_else(|| AfterburnerError::Engine("thread runtime uninitialized".into()))?;
+        f(rt)
     })
 }
 
@@ -83,12 +134,6 @@ impl NativeCombustor {
         Ok(Self {
             source_store: HopscotchMap::new(),
         })
-    }
-}
-
-impl Default for NativeCombustor {
-    fn default() -> Self {
-        Self::new().expect("NativeCombustor::new failed")
     }
 }
 
@@ -148,6 +193,10 @@ fn do_thrust(
     input_json: &str,
     limits: &FuelGauge,
 ) -> Result<String> {
+    // Activate the per-thrust manifold so host globals can read it. The
+    // guard restores the previous value when `do_thrust` returns.
+    let _manifold_guard = afterburner_node_compat::active_manifold::activate(limits.manifold.clone());
+
     rt.runtime.set_memory_limit(limits.memory_bytes.unwrap_or(0));
 
     let fuel_budget = limits.fuel;
@@ -266,6 +315,74 @@ mod tests {
     }
 
     #[test]
+    fn require_path_join_works() {
+        let src = r#"
+            const path = require('path');
+            module.exports = () => path.join('/var', 'data', 'x.json');
+        "#;
+        let out = combust(src, json!(null)).unwrap();
+        assert_eq!(out, json!("/var/data/x.json"));
+    }
+
+    #[test]
+    fn require_querystring_roundtrip() {
+        let src = r#"
+            const qs = require('querystring');
+            module.exports = () => qs.parse(qs.stringify({ a: '1', b: 'two & three' }));
+        "#;
+        let out = combust(src, json!(null)).unwrap();
+        assert_eq!(out, json!({ "a": "1", "b": "two & three" }));
+    }
+
+    #[test]
+    fn require_events_emitter_roundtrip() {
+        let src = r#"
+            const EventEmitter = require('events');
+            module.exports = () => {
+                const ee = new EventEmitter();
+                let captured = null;
+                ee.on('ping', (x) => { captured = x; });
+                ee.emit('ping', 42);
+                return captured;
+            };
+        "#;
+        let out = combust(src, json!(null)).unwrap();
+        assert_eq!(out, json!(42));
+    }
+
+    #[test]
+    fn require_buffer_hex_roundtrip() {
+        let src = r#"
+            const { Buffer } = require('buffer');
+            module.exports = () => Buffer.from('afterburner').toString('hex');
+        "#;
+        let out = combust(src, json!(null)).unwrap();
+        assert_eq!(out, json!("61667465726275726e6572"));
+    }
+
+    #[test]
+    fn require_unknown_module_throws() {
+        let src = r#"
+            module.exports = () => {
+                try { require('no-such-module'); return 'unexpected'; }
+                catch (e) { return e.message; }
+            };
+        "#;
+        let out = combust(src, json!(null)).unwrap();
+        assert_eq!(out, json!("Cannot find module 'no-such-module'"));
+    }
+
+    #[test]
+    fn require_node_prefix_stripped() {
+        let src = r#"
+            const path = require('node:path');
+            module.exports = () => path.basename('/a/b/c.js');
+        "#;
+        let out = combust(src, json!(null)).unwrap();
+        assert_eq!(out, json!("c.js"));
+    }
+
+    #[test]
     fn eval_string_ops() {
         let out = combust(
             "module.exports = (d) => d.name.toUpperCase()",
@@ -331,8 +448,7 @@ mod tests {
         let id = c.ignite("module.exports = () => { while (true) {} }").unwrap();
         let limits = FuelGauge {
             fuel: Some(1_000),
-            memory_bytes: None,
-            timeout_ms: None,
+            ..FuelGauge::default()
         };
         let err = c.thrust(&id, &json!(null), &limits).unwrap_err();
         match err {

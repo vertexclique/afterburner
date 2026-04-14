@@ -1,0 +1,135 @@
+//! `Manifold` — capability gate controlling which Node.js-style built-in
+//! modules (and which parts of them) are available to a running script.
+//!
+//! The metaphor: the intake manifold decides what air can enter the
+//! combustion chamber. By default — [`Manifold::sealed`] — nothing enters.
+//! Hosts that trust their scripts open specific flaps (FS roots, env
+//! allow-lists, outbound HTTP allow-lists) explicitly.
+//!
+//! A `Manifold` rides alongside every call via `FuelGauge`, so different
+//! scripts on the same engine can have different capability profiles.
+
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+/// Filesystem capability. Roots are resolved via `fs::canonicalize` at
+/// call time; any path escape (via `..`, symlinks, etc.) outside the
+/// listed roots is rejected with `AfterburnerError::PermissionDenied`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FsAccess {
+    /// No FS access. Any call into `fs.*` from a script returns
+    /// `PermissionDenied`.
+    #[default]
+    None,
+    /// Read-only access rooted at the given paths. Writes return
+    /// `PermissionDenied`.
+    ReadOnly(Vec<PathBuf>),
+    /// Read-write access rooted at the given paths.
+    ReadWrite(Vec<PathBuf>),
+}
+
+/// Outbound networking capability. Inbound/listening is never supported —
+/// Afterburner has no event loop and scripts are request/response shaped.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum NetAccess {
+    /// No network access.
+    #[default]
+    None,
+    /// Outbound HTTP/HTTPS only. `Some(list)` is a host-allow-list of
+    /// regexes/globs matched against the request host; `None` is
+    /// "any host."
+    OutboundHttp(Option<Vec<String>>),
+    /// Outbound TCP + HTTP. Same allow-list semantics.
+    OutboundFull(Option<Vec<String>>),
+}
+
+/// Process-environment access for `process.env` and `getenv`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum EnvAccess {
+    /// `process.env` is an empty object. No env vars readable.
+    #[default]
+    None,
+    /// Only the listed keys are readable. Unknown keys return `undefined`.
+    AllowList(Vec<String>),
+    /// Full process environment is visible. Use only for trusted scripts.
+    Full,
+}
+
+/// A full capability profile for one script execution.
+///
+/// Construct via [`Manifold::sealed`] (safe default) or
+/// [`Manifold::open`] (trusted admin contexts), then adjust individual
+/// fields.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Manifold {
+    pub fs: FsAccess,
+    pub net: NetAccess,
+    pub crypto: bool,
+    pub child_process: bool,
+    pub env: EnvAccess,
+    /// Whether `process.exit()` terminates the script early. When `false`,
+    /// `process.exit(code)` throws instead, so the host always receives
+    /// a trap-or-value result.
+    pub allow_exit: bool,
+}
+
+impl Manifold {
+    /// Zero-capability manifold. Safe for untrusted code — pure-JS
+    /// modules (`path`, `url`, `buffer`, …) still work; host-backed
+    /// modules (`fs`, `crypto`, `http`, …) return `PermissionDenied`.
+    pub const fn sealed() -> Self {
+        Self {
+            fs: FsAccess::None,
+            net: NetAccess::None,
+            crypto: false,
+            child_process: false,
+            env: EnvAccess::None,
+            allow_exit: false,
+        }
+    }
+
+    /// Full capabilities — every flap open. Only appropriate for
+    /// admin/trusted contexts; never expose to untrusted user JS.
+    pub fn open() -> Self {
+        Self {
+            fs: FsAccess::ReadWrite(Vec::new()),
+            net: NetAccess::OutboundFull(None),
+            crypto: true,
+            child_process: true,
+            env: EnvAccess::Full,
+            allow_exit: true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sealed_is_the_default() {
+        assert_eq!(Manifold::default(), Manifold::sealed());
+    }
+
+    #[test]
+    fn sealed_has_no_capabilities() {
+        let m = Manifold::sealed();
+        assert!(matches!(m.fs, FsAccess::None));
+        assert!(matches!(m.net, NetAccess::None));
+        assert!(!m.crypto);
+        assert!(!m.child_process);
+        assert!(matches!(m.env, EnvAccess::None));
+        assert!(!m.allow_exit);
+    }
+
+    #[test]
+    fn open_grants_everything() {
+        let m = Manifold::open();
+        assert!(matches!(m.fs, FsAccess::ReadWrite(_)));
+        assert!(matches!(m.net, NetAccess::OutboundFull(_)));
+        assert!(m.crypto);
+        assert!(m.child_process);
+        assert!(matches!(m.env, EnvAccess::Full));
+        assert!(m.allow_exit);
+    }
+}

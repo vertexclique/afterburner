@@ -1,5 +1,6 @@
 //! Core value types shared by every `Combustor` implementation.
 
+use crate::manifold::Manifold;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -47,7 +48,7 @@ pub enum EngineMode {
 /// |                | Wasmtime's `ResourceLimiter`.          |                                      |
 /// | `timeout_ms`   | Wall-clock; trapped by the shared      | Wall-clock; checked in the interrupt |
 /// |                | epoch ticker.                          | handler.                             |
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct FuelGauge {
     /// Backend-specific instruction budget. See type-level docs for the
     /// per-mode semantics — values are NOT comparable across modes.
@@ -56,15 +57,21 @@ pub struct FuelGauge {
     pub memory_bytes: Option<usize>,
     /// Wall-clock cap. Same meaning across all backends.
     pub timeout_ms: Option<u64>,
+    /// Capability gate for Node-style built-in modules. Defaults to
+    /// [`Manifold::sealed`] — no host-backed modules accessible.
+    pub manifold: Manifold,
 }
 
 impl FuelGauge {
-    /// Unrestricted — every field `None`. Useful for tests and trusted code.
+    /// Unrestricted resource limits, sealed manifold. Useful for tests
+    /// and for trusted code that still needs a capability-free starting
+    /// point — override individual fields as needed.
     pub const fn unlimited() -> Self {
         Self {
             fuel: None,
             memory_bytes: None,
             timeout_ms: None,
+            manifold: Manifold::sealed(),
         }
     }
 }

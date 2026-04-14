@@ -6,20 +6,16 @@
 //! there would obscure real regressions.
 
 use afterburner_core::{AfterburnerError, Combustor, FuelGauge};
-use afterburner_wasi::{WasmCombustor, test_support};
+use afterburner_wasi::{WasmCombustor, WasmConfig};
 use serde_json::json;
 
-fn make_combustor() -> Option<WasmCombustor> {
-    let cfg = test_support::config_with_resolved_javy()?;
-    Some(WasmCombustor::new(cfg).unwrap())
+fn make_combustor() -> WasmCombustor {
+    WasmCombustor::new(WasmConfig::default()).unwrap()
 }
 
 macro_rules! combustor_or_skip {
     () => {
-        match make_combustor() {
-            Some(c) => c,
-            None => return,
-        }
+        make_combustor()
     };
 }
 
@@ -30,9 +26,8 @@ fn infinite_loop_terminates_via_fuel() {
         .ignite("module.exports = () => { while (true) { /* burn */ } }")
         .unwrap();
     let limits = FuelGauge {
-        fuel: Some(10_000_000), // ~10 million instructions — plenty to prove the trap fires
-        memory_bytes: None,
-        timeout_ms: None,
+        fuel: Some(10_000_000),
+        ..FuelGauge::default()
     };
     let err = c.thrust(&id, &json!(null), &limits).unwrap_err();
     assert!(
@@ -48,9 +43,8 @@ fn infinite_loop_terminates_via_timeout() {
         .ignite("module.exports = () => { while (true) { /* burn */ } }")
         .unwrap();
     let limits = FuelGauge {
-        fuel: None,
-        memory_bytes: None,
         timeout_ms: Some(500),
+        ..FuelGauge::default()
     };
     let err = c.thrust(&id, &json!(null), &limits).unwrap_err();
     assert!(
@@ -73,9 +67,9 @@ fn memory_bomb_capped() {
         )
         .unwrap();
     let limits = FuelGauge {
-        fuel: None,
-        memory_bytes: Some(4 * 1024 * 1024), // 4 MiB
-        timeout_ms: Some(10_000),            // safety net
+        memory_bytes: Some(4 * 1024 * 1024),
+        timeout_ms: Some(10_000),
+        ..FuelGauge::default()
     };
     let err = c.thrust(&id, &json!(null), &limits).unwrap_err();
     // Could surface as MemoryLimit (wasmtime ResourceLimiter),
@@ -151,8 +145,7 @@ fn fuel_exhaustion_returns_typed_error() {
         .unwrap();
     let limits = FuelGauge {
         fuel: Some(1_000_000),
-        memory_bytes: None,
-        timeout_ms: None,
+        ..FuelGauge::default()
     };
     let err = c.thrust(&id, &json!(null), &limits).unwrap_err();
     assert!(matches!(err, AfterburnerError::FuelExhausted));
@@ -221,14 +214,12 @@ fn concurrent_thrusts_do_not_steal_each_others_timeouts() {
     // Generous deadline for the trivial side; an infinite loop that the
     // ticker will trap after ~50 ms on the other side.
     let trivial_limits = FuelGauge {
-        fuel: None,
-        memory_bytes: None,
         timeout_ms: Some(10_000),
+        ..FuelGauge::default()
     };
     let infinite_limits = FuelGauge {
-        fuel: None,
-        memory_bytes: None,
         timeout_ms: Some(50),
+        ..FuelGauge::default()
     };
 
     // Spawn the doomed infinite-loop thrust first so its short deadline
@@ -251,7 +242,7 @@ fn concurrent_thrusts_do_not_steal_each_others_timeouts() {
     for n in 0..16u64 {
         let c = c.clone();
         let id = trivial;
-        let limits = trivial_limits;
+        let limits = trivial_limits.clone();
         trivial_handles.push(thread::spawn(move || {
             let out = c.thrust(&id, &json!({"n": n}), &limits).unwrap();
             assert_eq!(out, json!(n + 1));

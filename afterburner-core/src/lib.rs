@@ -8,11 +8,13 @@ pub mod engine;
 pub mod error;
 pub mod host;
 pub mod log;
+pub mod manifold;
 pub mod registry;
 pub mod types;
 
 pub use engine::Combustor;
 pub use error::{AfterburnerError, Result};
 pub use host::{HostContext, HostFunction, HttpMethod, HttpResponse, LogLevel, NullHost};
+pub use manifold::{EnvAccess, FsAccess, Manifold, NetAccess};
 pub use registry::{BurnCache, RegistryStats};
 pub use types::{EngineMode, FuelGauge, ScriptId, sha256};

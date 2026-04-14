@@ -14,3 +14,4 @@ serde.workspace = true
 serde_json.workspace = true
 kovan-map.workspace = true
 fastrace.workspace = true
+afterburner-node-compat.workspace = true

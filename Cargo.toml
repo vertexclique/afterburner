@@ -6,6 +6,20 @@ members = [
     "afterburner-ignite",
     "afterburner-flow",
     "afterburner-adaptive",
+    "afterburner-node-compat",
+    "afterburner-plugin",
+]
+# `afterburner-plugin` targets `wasm32-wasip1`. Building it on the host
+# triple fails because `javy-plugin-api` assumes a WASI environment.
+# Keep it out of `cargo build --workspace` by trimming default-members;
+# the plugin is built explicitly via `afterburner-plugin/build.sh`.
+default-members = [
+    "afterburner-core",
+    "afterburner-wasi",
+    "afterburner-ignite",
+    "afterburner-flow",
+    "afterburner-adaptive",
+    "afterburner-node-compat",
 ]
 
 [workspace.package]
@@ -21,21 +35,33 @@ afterburner-wasi = { path = "afterburner-wasi" }
 afterburner-ignite = { path = "afterburner-ignite" }
 afterburner-flow = { path = "afterburner-flow" }
 afterburner-adaptive = { path = "afterburner-adaptive" }
+afterburner-node-compat = { path = "afterburner-node-compat" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
+hmac = "0.12"
+md-5 = "0.10"
+getrandom = "0.2"
+base64 = "0.22"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+ureq = { version = "2", features = ["json"] }
+tempfile = "3"
+flate2 = "1"
 kovan-map = "0.1"
 kovan-channel = "0.1"
 
-wasmtime = { version = "28", features = ["cranelift", "cache"] }
-wasmtime-wasi = "28"
+wasmtime = { version = "36", features = ["cranelift", "cache"] }
+wasmtime-wasi = "36"
 anyhow = "1"
 
 rquickjs = { version = "0.11", features = ["bindgen"] }
 
 fastrace = { version = "0.7", features = ["enable"] }
+
+javy-plugin-api = "6.0"
 
 [profile.release]
 opt-level = 3

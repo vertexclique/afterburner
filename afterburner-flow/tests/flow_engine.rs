@@ -2,12 +2,11 @@
 
 use afterburner_core::AfterburnerError;
 use afterburner_flow::chain::merge;
-use afterburner_flow::{FlowEngine, default_fuel_gauge};
+use afterburner_flow::FlowEngine;
 use serde_json::json;
 
 fn make_engine() -> Option<FlowEngine> {
-    let javy = afterburner_wasi::test_support::resolve_javy()?;
-    Some(FlowEngine::with_javy(javy, default_fuel_gauge()).unwrap())
+    Some(FlowEngine::new().unwrap())
 }
 
 macro_rules! engine_or_skip {

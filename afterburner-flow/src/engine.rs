@@ -8,7 +8,6 @@
 use afterburner_core::{BurnCache, FuelGauge, Result, ScriptId};
 use afterburner_wasi::{WasmCombustor, WasmConfig};
 use serde_json::Value;
-use std::path::PathBuf;
 
 /// Conservative defaults for an interactive flow step: 1 B fuel
 /// (≈10 s of compute on typical scripts), 64 MiB max memory, 30 s wall.
@@ -17,6 +16,7 @@ pub fn default_fuel_gauge() -> FuelGauge {
         fuel: Some(1_000_000_000),
         memory_bytes: Some(64 * 1024 * 1024),
         timeout_ms: Some(30_000),
+        ..FuelGauge::default()
     }
 }
 
@@ -37,17 +37,6 @@ impl FlowEngine {
     /// Build the engine with custom limits applied to every `execute` call.
     pub fn with_fuel(fuel: FuelGauge) -> Result<Self> {
         Self::with_config(WasmConfig::default(), fuel)
-    }
-
-    /// Build the engine with a custom Javy CLI path. Useful when the
-    /// caller doesn't want to rely on `PATH` lookup.
-    pub fn with_javy(javy_binary: PathBuf, fuel: FuelGauge) -> Result<Self> {
-        Self::with_config(
-            WasmConfig {
-                javy_binary: Some(javy_binary),
-            },
-            fuel,
-        )
     }
 
     fn with_config(cfg: WasmConfig, fuel: FuelGauge) -> Result<Self> {
@@ -92,8 +81,7 @@ mod tests {
     use serde_json::json;
 
     fn make_engine() -> Option<FlowEngine> {
-        let javy = afterburner_wasi::test_support::resolve_javy()?;
-        Some(FlowEngine::with_javy(javy, default_fuel_gauge()).unwrap())
+        Some(FlowEngine::new().unwrap())
     }
 
     #[test]
@@ -121,11 +109,28 @@ mod tests {
     }
 
     #[test]
-    fn require_is_unavailable() {
+    fn fs_method_call_without_manifold_throws() {
+        // `require('fs')` returns a stub module even under
+        // `Manifold::sealed` — the polyfill always loads — but invoking
+        // a method throws `Permission denied` because the host globals
+        // aren't wired.
         let Some(engine) = make_engine() else { return };
-        let id = engine.load("module.exports = () => require('fs');").unwrap();
-        let err = engine.execute(&id, &json!({})).unwrap_err();
-        assert!(matches!(err, AfterburnerError::WasmTrap(_)));
+        let id = engine
+            .load(
+                r#"
+                module.exports = () => {
+                    try { require('fs').readFileSync('/tmp/x'); return 'unexpected'; }
+                    catch (e) { return e.message; }
+                };
+                "#,
+            )
+            .unwrap();
+        let out = engine.execute(&id, &json!({})).unwrap();
+        let msg = out.as_str().unwrap().to_lowercase();
+        assert!(
+            msg.contains("permission denied") || msg.contains("not available"),
+            "expected fs denial; got {msg}"
+        );
     }
 
     #[test]

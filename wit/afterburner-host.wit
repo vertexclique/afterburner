@@ -1,0 +1,139 @@
+// Afterburner host interface — authoritative specification for the
+// ABI between `afterburner-plugin` (guest) and `afterburner-wasi`
+// (host). Written as a WASI P2 WIT document so that a future migration
+// from the current `extern "C" i32`-based ABI can be mechanical.
+//
+// The current implementation uses the hand-written buffer protocol
+// (see afterburner-plugin/src/lib.rs and afterburner-wasi/src/host_imports.rs).
+// The mapping to WIT types is documented on each function below.
+
+package afterburner:host@1.0.0;
+
+// ---- shared types --------------------------------------------------------
+
+interface types {
+    /// Structured error returned by any host call that can fail.
+    /// Current buffer-protocol equivalent:
+    ///   * `-1`  -> `permission-denied`
+    ///   * `-2`  -> `not-found`
+    ///   * `-3`  -> `other`
+    ///   * `-4`  -> `buffer-too-small`
+    variant host-error {
+        permission-denied(string),
+        not-found(string),
+        other(string),
+        buffer-too-small(u32),
+    }
+
+    record file-stat {
+        size: u64,
+        is-file: bool,
+        is-directory: bool,
+        mtime-ms: u64,
+    }
+
+    record http-response {
+        status: u16,
+        body: list<u8>,
+    }
+}
+
+// ---- filesystem ---------------------------------------------------------
+
+/// Capability-gated filesystem access. Roots are supplied by the host's
+/// `Manifold::fs` and enforced via canonicalized path validation.
+interface fs {
+    use types.{host-error, file-stat};
+
+    read-file-sync:  func(path: string) -> result<list<u8>, host-error>;
+    write-file-sync: func(path: string, data: list<u8>) -> result<_, host-error>;
+    exists-sync:     func(path: string) -> bool;
+    stat-sync:       func(path: string) -> result<file-stat, host-error>;
+    readdir-sync:    func(path: string) -> result<list<string>, host-error>;
+    mkdir-sync:      func(path: string, recursive: bool) -> result<_, host-error>;
+    unlink-sync:     func(path: string) -> result<_, host-error>;
+    rename-sync:     func(from: string, to: string) -> result<_, host-error>;
+}
+
+// ---- crypto -------------------------------------------------------------
+
+interface crypto {
+    use types.{host-error};
+
+    hash:              func(algorithm: string, data: list<u8>) -> result<list<u8>, host-error>;
+    hmac:              func(algorithm: string, key: list<u8>, data: list<u8>) -> result<list<u8>, host-error>;
+    random-bytes:      func(len: u32) -> result<list<u8>, host-error>;
+    random-uuid:       func() -> result<string, host-error>;
+    timing-safe-equal: func(a: list<u8>, b: list<u8>) -> bool;
+}
+
+// ---- os -----------------------------------------------------------------
+
+interface os {
+    platform: func() -> string;
+    arch:     func() -> string;
+    hostname: func() -> string;
+    tmpdir:   func() -> string;
+    cpus:     func() -> u32;
+    home-dir: func() -> string;
+}
+
+// ---- http ---------------------------------------------------------------
+
+interface http {
+    use types.{host-error, http-response};
+
+    request: func(
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: option<list<u8>>,
+    ) -> result<http-response, host-error>;
+}
+
+// ---- dns ----------------------------------------------------------------
+
+interface dns {
+    use types.{host-error};
+
+    lookup: func(hostname: string) -> result<string, host-error>;
+}
+
+// ---- zlib ---------------------------------------------------------------
+
+interface zlib {
+    use types.{host-error};
+
+    deflate-sync: func(input: list<u8>) -> result<list<u8>, host-error>;
+    inflate-sync: func(input: list<u8>) -> result<list<u8>, host-error>;
+    gzip-sync:    func(input: list<u8>) -> result<list<u8>, host-error>;
+    gunzip-sync:  func(input: list<u8>) -> result<list<u8>, host-error>;
+}
+
+// ---- child_process ------------------------------------------------------
+
+/// Native path only. The plugin does NOT import this interface — the
+/// WASM sandbox has no path to a host subprocess launcher.
+interface child-process {
+    use types.{host-error};
+
+    record exec-result {
+        status: s32,
+        stdout: string,
+        stderr: string,
+    }
+
+    exec-sync: func(command: string, args: list<string>) -> result<exec-result, host-error>;
+}
+
+// ---- plugin world --------------------------------------------------------
+
+/// The plugin imports everything except `child-process`.
+world afterburner-plugin-v2 {
+    import fs;
+    import crypto;
+    import os;
+    import http;
+    import dns;
+    import zlib;
+}

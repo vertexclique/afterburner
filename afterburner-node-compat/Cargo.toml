@@ -1,0 +1,25 @@
+[package]
+name = "afterburner-node-compat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Afterburner Node.js compatibility layer — polyfill bundle (plenum.js) and host-function implementations"
+
+[dependencies]
+afterburner-core.workspace = true
+rquickjs.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+md-5.workspace = true
+getrandom.workspace = true
+base64.workspace = true
+hex.workspace = true
+uuid.workspace = true
+ureq.workspace = true
+flate2.workspace = true
+
+[build-dependencies]
+# Phase 1 keeps the bundler in pure Rust (concatenation). Phase 2 pulls in
+# esbuild when AFTERBURNER_REBUILD_PLENUM=1 is set and npm deps are present.

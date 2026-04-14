@@ -290,10 +290,7 @@ mod tests {
 
     #[test]
     fn second_call_uses_wasm_after_compile() {
-        let Some(cfg) = afterburner_wasi::test_support::config_with_resolved_javy() else {
-            return;
-        };
-        let c = AdaptiveCombustor::with_wasm_config(cfg).unwrap();
+        let c = AdaptiveCombustor::new().unwrap();
         let id = c.ignite("module.exports = (d) => d.x * 2").unwrap();
         assert_eq!(c.wait_for_compile(&id, 60_000), CompileOutcome::Ready);
         assert_eq!(c.current_tier(&id), "wasm");
@@ -325,10 +322,7 @@ mod tests {
         // ignite could write Ready into the state map *after* extinguish
         // had cleared the wasm cache, leaving subsequent thrusts pointed
         // at an empty cache → ScriptNotFound.
-        let Some(cfg) = afterburner_wasi::test_support::config_with_resolved_javy() else {
-            return;
-        };
-        let c = AdaptiveCombustor::with_wasm_config(cfg).unwrap();
+        let c = AdaptiveCombustor::new().unwrap();
         let src = "module.exports = (d) => d.n + 100";
         let id = c.ignite(src).unwrap();
         // Extinguish during the (likely-still-running) wasm compile.
