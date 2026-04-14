@@ -193,7 +193,16 @@ Phases with no edges between them can proceed in parallel. The critical path is 
 
 ---
 
-## Phase F — Pseudo-`worker_threads` (decide via Q2)
+## Phase F — Pseudo-`worker_threads` — DEFERRED AFTER RE-EVALUATION
+
+**Decision.** After landing Phases A–E, the tradeoffs made this phase unworthwhile:
+
+- Node's `worker_threads` is used for (1) CPU-bound parallel computation, (2) state isolation from main, and (3) import-compat where code references the module without actually using workers. Case 1 is architecturally impossible in our single-threaded QuickJS sandbox. Case 2 can't be delivered without a second runtime (sharing QuickJS state defeats the purpose). Case 3 is already handled by `stubs.js::worker_threads`, which throws `ERR_NOT_SUPPORTED_IN_SANDBOX` with a clear message on any access.
+- A pseudo-worker polyfill (~600 LOC of structured-clone + message dispatch) would give scripts a Worker shape, but the shape would behave differently enough from real workers that scripts depending on parallelism or isolation would silently produce wrong results — worse than failing loudly at the stub.
+
+**Status.** The current stub stays. Phase F is skipped. If a consumer actually needs a same-thread-second-context "Worker" later, revisit then — the polyfill lives in JS space and doesn't need to block other phases.
+
+**Original design (kept for reference):**
 
 **Goal.** Make scripts that use `new Worker(sourcePath)` / `parentPort.postMessage` / `worker.postMessage` structurally work — without true threads.
 

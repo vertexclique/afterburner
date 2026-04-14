@@ -14,6 +14,59 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
+/// Pluggable storage for script source text, keyed by SHA-256 of the
+/// source. Enables distributed deployments where a single script is
+/// registered once on any node and replicated via an external
+/// coordinator (Redis, S3, NATS, etc.). Each node still compiles
+/// locally — the backend stores source text, not compiled modules,
+/// since the compiled form is engine-specific (wasmtime vs rquickjs)
+/// and not portably serializable today.
+///
+/// Trait objects must be `Send + Sync` because `BurnCache` is shared
+/// across threads.
+pub trait BurnCacheBackend: Send + Sync {
+    /// Look up the source for `hash`. `Ok(None)` means "not in this
+    /// backend" — BurnCache then expects the caller to supply the
+    /// source via `register(source)`. `Err(_)` is treated the same as
+    /// `Ok(None)` in the hot path — backend errors must never block
+    /// registration of a locally-available source.
+    fn fetch(&self, hash: &[u8; 32]) -> Result<Option<String>>;
+
+    /// Store `source` under `hash`. Called after a successful local
+    /// compile so peer nodes can look it up on their own registration.
+    /// Must be idempotent — a concurrent publisher racing this call
+    /// with the same hash is explicitly allowed.
+    fn publish(&self, hash: &[u8; 32], source: &str) -> Result<()>;
+}
+
+/// In-process default backend — no network involvement, state lives in
+/// a single lock-free map. Equivalent to the pre-Phase-G behavior.
+#[derive(Default)]
+pub struct InProcessCacheBackend {
+    store: HopscotchMap<[u8; 32], String>,
+}
+
+impl InProcessCacheBackend {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn shared() -> Arc<Self> {
+        Arc::new(Self::new())
+    }
+}
+
+impl BurnCacheBackend for InProcessCacheBackend {
+    fn fetch(&self, hash: &[u8; 32]) -> Result<Option<String>> {
+        Ok(self.store.get(hash))
+    }
+
+    fn publish(&self, hash: &[u8; 32], source: &str) -> Result<()> {
+        self.store.insert(*hash, source.to_string());
+        Ok(())
+    }
+}
+
 /// Statistics the cache exposes for observability. Load-atomically; no
 /// snapshot guarantees across fields.
 #[derive(Default)]
@@ -61,6 +114,11 @@ pub struct BurnCache {
     engine: Box<dyn Combustor>,
     compiled: HopscotchMap<[u8; 32], Arc<CompileCell>>,
     source_store: HopscotchMap<[u8; 32], String>,
+    /// Optional cross-process / cross-node backend. Local-only builds
+    /// set this to `None` (equivalent to `InProcessCacheBackend`
+    /// behavior) so there's no hot-path branch unless the caller opted
+    /// into distributed caching.
+    backend: Option<Arc<dyn BurnCacheBackend>>,
     stats: RegistryStats,
 }
 
@@ -70,7 +128,39 @@ impl BurnCache {
             engine,
             compiled: HopscotchMap::new(),
             source_store: HopscotchMap::new(),
+            backend: None,
             stats: RegistryStats::default(),
+        }
+    }
+
+    /// Attach a distributed cache backend. See [`BurnCacheBackend`].
+    /// When set, `register_by_hash` and `register` consult the backend
+    /// for a cache miss before treating it as a genuinely-new script.
+    pub fn with_backend(mut self, backend: Arc<dyn BurnCacheBackend>) -> Self {
+        self.backend = Some(backend);
+        self
+    }
+
+    /// Register a script when only its hash is known — the source is
+    /// fetched from the [`BurnCacheBackend`]. Returns
+    /// [`AfterburnerError::ScriptNotFound`] if no backend is attached
+    /// or the backend has no entry for `hash`.
+    ///
+    /// Useful for "worker nodes" in a distributed deployment that
+    /// receive only a script-id reference and must pull the source
+    /// from a shared store before running it.
+    pub fn register_by_hash(&self, hash: &[u8; 32]) -> Result<ScriptId> {
+        // Fast path: source already cached locally.
+        if let Some(src) = self.source_store.get(hash) {
+            return self.register(&src);
+        }
+        let backend = self
+            .backend
+            .as_ref()
+            .ok_or(AfterburnerError::ScriptNotFound)?;
+        match backend.fetch(hash)? {
+            Some(src) => self.register(&src),
+            None => Err(AfterburnerError::ScriptNotFound),
         }
     }
 
@@ -110,6 +200,15 @@ impl BurnCache {
                 "source_bytes" => source.len(),
             );
             self.source_store.insert(hash, source.to_string());
+            // Publish to the distributed backend (if attached) so peer
+            // nodes can fetch the source by hash. Publish failures are
+            // logged but don't abort registration — local compilation
+            // succeeded and we want the caller to keep working.
+            if let Some(b) = self.backend.as_ref()
+                && let Err(e) = b.publish(&hash, source)
+            {
+                ab_event!(Level::Warn, "burn_cache.publish_failed", "error" => e.to_string());
+            }
             let stored = match self.engine.ignite(source) {
                 Ok(id) => Ok(id),
                 Err(e) => {
@@ -316,6 +415,110 @@ mod tests {
         assert!(cache.source(&id).is_some());
         cache.forget(&id);
         assert!(cache.source(&id).is_none());
+    }
+
+    /// Build two BurnCache instances around independent MockCombustors
+    /// but sharing a single BurnCacheBackend. Simulates a two-node
+    /// cluster with a distributed source store.
+    fn shared_backend_pair() -> (
+        BurnCache,
+        BurnCache,
+        std::sync::Arc<MockCombustor>,
+        std::sync::Arc<MockCombustor>,
+        std::sync::Arc<InProcessCacheBackend>,
+    ) {
+        let mock_a = std::sync::Arc::new(MockCombustor::default());
+        let mock_b = std::sync::Arc::new(MockCombustor::default());
+        struct Shim(std::sync::Arc<MockCombustor>);
+        impl Combustor for Shim {
+            fn ignite(&self, s: &str) -> Result<ScriptId> {
+                self.0.ignite(s)
+            }
+            fn thrust(&self, id: &ScriptId, i: &Value, l: &FuelGauge) -> Result<Value> {
+                self.0.thrust(id, i, l)
+            }
+            fn extinguish(&self, id: &ScriptId) {
+                self.0.extinguish(id)
+            }
+        }
+        let backend = InProcessCacheBackend::shared();
+        let cache_a = BurnCache::new(Box::new(Shim(mock_a.clone())))
+            .with_backend(backend.clone() as std::sync::Arc<dyn BurnCacheBackend>);
+        let cache_b = BurnCache::new(Box::new(Shim(mock_b.clone())))
+            .with_backend(backend.clone() as std::sync::Arc<dyn BurnCacheBackend>);
+        (cache_a, cache_b, mock_a, mock_b, backend)
+    }
+
+    #[test]
+    fn register_publishes_to_backend() {
+        let (cache_a, _cache_b, _mock_a, _mock_b, backend) = shared_backend_pair();
+        let id = cache_a.register("module.exports = () => 99").unwrap();
+        // Backend got the source at the same hash.
+        let fetched = backend.fetch(&id.hash).unwrap();
+        assert_eq!(fetched.as_deref(), Some("module.exports = () => 99"));
+    }
+
+    #[test]
+    fn register_by_hash_resolves_via_shared_backend() {
+        // Node A registers a source. Node B knows only the hash and
+        // asks BurnCache to materialize it. The shared backend
+        // supplies the source; Node B still compiles locally (each
+        // engine keeps its own compile state — source distribution is
+        // what the backend gives us, not compiled modules).
+        let (cache_a, cache_b, _mock_a, mock_b, _backend) = shared_backend_pair();
+        let id_a = cache_a.register("module.exports = (d) => d + 1").unwrap();
+        // Node B: only knows the hash.
+        let id_b = cache_b.register_by_hash(&id_a.hash).unwrap();
+        assert_eq!(id_a.hash, id_b.hash);
+        // Node B compiled exactly once — its own mock shows one ignite.
+        assert_eq!(mock_b.ignite_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn register_by_hash_without_backend_is_not_found() {
+        let (cache, _mock) = cache_with_mock();
+        // No backend attached; hash is bogus, source isn't locally
+        // known — should surface ScriptNotFound, not a panic.
+        let err = cache.register_by_hash(&[0xab; 32]).unwrap_err();
+        assert!(
+            matches!(err, AfterburnerError::ScriptNotFound),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn register_by_hash_prefers_local_source_over_backend() {
+        // If the source is already cached locally, register_by_hash
+        // must not phone home. We enforce this via a test backend
+        // whose fetch panics.
+        struct LoudBackend;
+        impl BurnCacheBackend for LoudBackend {
+            fn fetch(&self, _: &[u8; 32]) -> Result<Option<String>> {
+                panic!("backend.fetch should not be called on a local hit");
+            }
+            fn publish(&self, _: &[u8; 32], _: &str) -> Result<()> {
+                Ok(())
+            }
+        }
+        let mock = std::sync::Arc::new(MockCombustor::default());
+        struct Shim(std::sync::Arc<MockCombustor>);
+        impl Combustor for Shim {
+            fn ignite(&self, s: &str) -> Result<ScriptId> {
+                self.0.ignite(s)
+            }
+            fn thrust(&self, id: &ScriptId, i: &Value, l: &FuelGauge) -> Result<Value> {
+                self.0.thrust(id, i, l)
+            }
+            fn extinguish(&self, id: &ScriptId) {
+                self.0.extinguish(id)
+            }
+        }
+        let cache = BurnCache::new(Box::new(Shim(mock.clone())))
+            .with_backend(std::sync::Arc::new(LoudBackend));
+        let id = cache.register("module.exports = () => 7").unwrap();
+        // This call must short-circuit on source_store, not hit the backend.
+        let id2 = cache.register_by_hash(&id.hash).unwrap();
+        assert_eq!(id.hash, id2.hash);
     }
 
     #[test]
