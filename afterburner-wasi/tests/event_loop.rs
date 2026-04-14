@@ -175,3 +175,68 @@ fn promise_rejection_surfaces_as_error() {
     let (n, _) = run_both(src);
     assert_eq!(n, json!({ "caught": "boom" }));
 }
+
+#[test]
+fn unhandled_rejection_surfaces_as_thrust_error() {
+    // Prior review flagged the WASM envelope's .then without .catch as
+    // potentially swallowing uncaught rejections. This test locks in
+    // the contract: if a script returns a rejecting Promise without
+    // handling it, thrust returns Err, not a successful empty value.
+    let src = r#"
+        module.exports = () => Promise.reject(new Error('unhandled'));
+    "#;
+    // Native
+    {
+        let c = native();
+        let id = c.ignite(src).unwrap();
+        let lim = FuelGauge {
+            manifold: Manifold::sealed(),
+            ..FuelGauge::default()
+        };
+        let out = c.thrust(&id, &json!(null), &lim);
+        assert!(
+            out.is_err(),
+            "native: expected Err on unhandled rejection; got {out:?}"
+        );
+    }
+    // WASM
+    {
+        let c = wasm();
+        let id = c.ignite(src).unwrap();
+        let lim = FuelGauge {
+            manifold: Manifold::sealed(),
+            ..FuelGauge::default()
+        };
+        let out = c.thrust(&id, &json!(null), &lim);
+        assert!(
+            out.is_err(),
+            "wasm: expected Err on unhandled rejection; got {out:?}"
+        );
+    }
+}
+
+#[test]
+fn native_infinite_microtask_chain_is_bounded() {
+    // A script that schedules itself forever as a microtask previously
+    // wedged the native engine: each job's opcode count was too low
+    // for the rquickjs interrupt handler to accumulate enough counter
+    // ticks to fire. run_script now caps the drain loop at a hard
+    // MAX_PUMP_ITERATIONS, surfacing as FuelExhausted.
+    let src = r#"
+        module.exports = () => new Promise(() => {
+            function step() { queueMicrotask(step); }
+            step();
+        });
+    "#;
+    let lim = FuelGauge {
+        manifold: Manifold::sealed(),
+        ..FuelGauge::default()
+    };
+    let c = native();
+    let id = c.ignite(src).unwrap();
+    let out = c.thrust(&id, &json!(null), &lim);
+    assert!(
+        matches!(out, Err(afterburner_core::AfterburnerError::FuelExhausted)),
+        "expected FuelExhausted from the pump cap; got {out:?}"
+    );
+}

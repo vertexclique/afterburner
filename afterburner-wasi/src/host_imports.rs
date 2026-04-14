@@ -1216,6 +1216,11 @@ fn wrap_crypto_hash_streaming(linker: &mut Linker<HostState>) -> Result<(), Afte
                     "hex" => hex::encode(&bytes),
                     "base64" => B64.encode(&bytes),
                     "binary" | "latin1" => bytes.iter().map(|b| *b as char).collect(),
+                    // Parity with the native path's `encode_bytes`. Without
+                    // this arm, `crypto.createHash('sha256').digest('utf8')`
+                    // works on native but errors on WASM — a silent
+                    // cross-engine divergence we don't want to ship.
+                    "utf8" | "utf-8" => String::from_utf8_lossy(&bytes).into_owned(),
                     other => {
                         record(
                             &mut caller,

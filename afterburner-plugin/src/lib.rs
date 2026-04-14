@@ -1179,6 +1179,13 @@ fn wrap_user_source(user: &str, input_json: &str) -> String {
     // in the plugin config) and write the resolved value through a
     // `.then`. The envelope's top-level expression therefore yields
     // the Promise itself, which Javy pumps to completion.
+    // Javy compiles this envelope as an ES module. Top-level await
+    // turns unhandled rejections into module-evaluation errors that
+    // `module.eval()` surfaces as Err — which the plugin's `_start`
+    // propagates as a trap. Without the `await`, a rejecting Promise
+    // fires as an unhandled-rejection microtask and leaves stdout
+    // empty; the host then decodes that as JSON `null` and hides the
+    // failure entirely.
     format!(
         r#"
         function __ab_write_stdout(s) {{
@@ -1189,14 +1196,11 @@ fn wrap_user_source(user: &str, input_json: &str) -> String {
         const __ab_user = new Function('module', 'exports', 'require', {user_lit});
         __ab_user(__ab_module, __ab_module.exports, globalThis.require);
         const __ab_fn = __ab_module.exports;
-        const __ab_result = (typeof __ab_fn === 'function') ? __ab_fn(__ab_data) : __ab_fn;
-        if (__ab_result !== null && typeof __ab_result === 'object' && typeof __ab_result.then === 'function') {{
-            __ab_result.then(function(v) {{
-                __ab_write_stdout(JSON.stringify(v === undefined ? null : v));
-            }});
-        }} else {{
-            __ab_write_stdout(JSON.stringify(__ab_result === undefined ? null : __ab_result));
-        }}
+        const __ab_maybe = (typeof __ab_fn === 'function') ? __ab_fn(__ab_data) : __ab_fn;
+        const __ab_result = (__ab_maybe !== null && typeof __ab_maybe === 'object' && typeof __ab_maybe.then === 'function')
+            ? await __ab_maybe
+            : __ab_maybe;
+        __ab_write_stdout(JSON.stringify(__ab_result === undefined ? null : __ab_result));
         "#
     )
 }

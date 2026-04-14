@@ -68,6 +68,20 @@ Severity: **Bug** (correctness) > **Pitfall** (will bite later) >
 - **Issue:** Error messages included the rejected path verbatim (e.g. `"fs write to /home/user/.ssh/id_rsa"`). Logs that capture errors — shared observability sinks, remote telemetry — could leak sensitive filenames even though the operation was correctly denied.
 - **Fix:** Stripped the path from every `PermissionDenied` message. `"fs read denied by manifold"` / `"fs write denied: read-only policy"` / `"fs write: path outside allowed roots"` all omit the path. Regression tests on both paths (`fs_permission_denied_message_does_not_leak_path`, `fs_write_outside_roots_message_does_not_leak_path`, `wasm_fs_permission_denied_message_does_not_leak_path`) assert that a probe path like `/root/.ssh/id_rsa` or `afterburner-leak-probe-xyz` never appears in the returned error text.
 
+### 15. WASM envelope silently swallowed unhandled Promise rejections **— FIXED**
+- **Issue:** After Phase E enabled the Javy event loop, scripts returning `Promise.reject(err)` without catching it produced `Ok(null)` instead of an error. The envelope wrapped the result in a `.then(cb)` without a rejection handler; the inner rejection fired as a QuickJS unhandled-rejection microtask and was silently discarded. Stdout was empty, so the host decoded the empty buffer as JSON `null`.
+- **Root cause:** Javy compiles the envelope as an ES module and calls `Module::eval()`; only errors from the module body itself propagate as `invoke` Err. The chained Promise's rejection wasn't part of that body.
+- **Fix:** Envelope in `afterburner-plugin/src/lib.rs::wrap_user_source` now uses top-level `await` (`const __ab_result = isThenable ? await __ab_maybe : __ab_maybe`) so any rejection becomes a module-evaluation error that surfaces as a trap from `_start`. Regression test `unhandled_rejection_surfaces_as_thrust_error` in `afterburner-wasi/tests/event_loop.rs` asserts both native (via `finish::<String>().map_err(...)`) and WASM paths return Err when a script returns an uncaught rejecting Promise.
+
+### 16. Native microtask-drain loop could spin indefinitely under fuel/interrupt **— FIXED**
+- **Issue:** Phase E's `while ctx.execute_pending_job() {}` in `afterburner-ignite/src/native_engine.rs::run_script` depended on the rquickjs interrupt handler to fire between opcodes and bound runaway microtask chains. In practice, a `queueMicrotask(step); step()` recursion does too few opcodes per iteration for the interrupt counter to accumulate past the fuel budget in bounded wall time — test runs hung for 30+ minutes.
+- **Fix:** Capped the drain loop with `MAX_PUMP_ITERATIONS = 1_000_000`. If the queue isn't empty after that many jobs we return `AfterburnerError::FuelExhausted`. Regression test `native_infinite_microtask_chain_is_bounded` verifies the cap fires in under a second for a script that schedules itself as a microtask forever.
+- **Not yet fixed on WASM:** the pump lives inside Javy's `Promise::finish`, not our code, and wasmtime's epoch deadline hasn't been reliably observed firing during that drain. Documented as Smell 18 below.
+
+### 17. Streaming hash `digest('utf8')` worked on native but errored on WASM **— FIXED**
+- **Issue:** `wrap_crypto_hash_streaming` in `afterburner-wasi/src/host_imports.rs` handled `hex`, `base64`, `binary`, `latin1` — but not `utf8`, even though `encode_bytes` on the native path did. A script running `crypto.createHash('sha256').update('x').digest('utf8')` produced a 32-byte utf8-lossy string on native and an error on WASM. Silent divergence.
+- **Fix:** Added the `"utf8" | "utf-8"` arm to the streaming hash digest encode match, mirroring native. Cross-engine parity restored.
+
 ### 14. WASM path was missing four fs host imports (`unlink_sync`, `rename_sync`, `mkdir_sync`, `readdir_sync`) **— FIXED**
 - **Issue:** The WASM `afterburner:host` import surface only wired read/write/exists/stat. The native path had the full set. Polyfills like `fs.createWriteStream({ flags: 'w' })` silently no-op'd their truncate step on WASM because the underlying `__host_fs_unlink_sync` was undefined (and the polyfill's `try { unlink } catch (_) {}` swallowed the missing-function exception). The regression test for flag=`'w'` truncation would have failed silently on WASM.
 - **Fix:** Added `host_fs_unlink_sync`, `host_fs_rename_sync`, `host_fs_mkdir_sync`, `host_fs_readdir_sync` to:
@@ -94,6 +108,29 @@ Severity: **Bug** (correctness) > **Pitfall** (will bite later) >
 ### 17. The `__HOST_ERR__:` sentinel string is a stringly-typed ABI convention
 - **Issue:** Error propagation from host → plugin JS → polyfill JS relies on string prefix. Works, but breaks if any host function ever legitimately produces output that starts with `__HOST_ERR__:`.
 - **Status:** Acknowledged; rename to something less collision-prone (e.g. a 0xFF byte prefix) if a future polyfill returns arbitrary user strings.
+
+### 18. WASM-path infinite microtask chain still bypasses fuel / epoch
+- **Issue:** Native is fixed via the `MAX_PUMP_ITERATIONS` cap (see Pitfall 16). On the WASM path the microtask drain lives inside Javy's `Promise::finish` — not our code — and wasmtime's `set_epoch_deadline` hasn't been reliably observed firing during that drain in ad-hoc testing. A hostile script that recursively schedules microtasks inside a non-resolving top-level `await` could wedge a thrust for longer than its configured `timeout_ms`.
+- **Risk:** HIGH in adversarial contexts (untrusted JS + generous fuel), LOW in the default trusted-UDF path.
+- **Mitigation options not yet landed:**
+  - Fork Javy's event-loop pump to insert explicit fuel/epoch checks between jobs.
+  - Fire epoch at higher frequency than the current 1 ms tick and rely on Cranelift-generated safepoints.
+  - Patch `javy-plugin-api` upstream with a pump-iteration cap.
+- **Regression test to add once mitigation lands:** wasm counterpart of `native_infinite_microtask_chain_is_bounded` in `afterburner-wasi/tests/event_loop.rs`.
+
+### 19. HostContext (`readColumn` / `emitRow` / `getEnv`) is not Manifold-gated
+- **Issue:** Added in Phase C. Scripts under `Manifold::sealed()` can still call `require('afterburner:host').readColumn('x')` unconditionally — the only check is whether a `HostContext` has been attached to the combustor at all. Embedders who attach a `HostContext` that reads sensitive data (cross-tenant columns, env secrets) implicitly exempt it from the sandbox's capability system.
+- **Risk:** MEDIUM — currently an embedder-contract issue; the combustor constructor documentation should warn that a `HostContext` is effectively unsealed access. Long-term, add `Manifold::host_ctx: bool` and gate the three imports on it.
+- **Mitigation:** Embedders implementing `HostContext` should themselves inspect the active `Manifold` and return empty / throw when the script isn't privileged.
+
+### 20. `emit_row` payload is unbounded
+- **Issue:** `host_emit_row` in `afterburner-wasi/src/host_imports.rs` and `__host_emit_row` in `afterburner-node-compat/src/native_install.rs` deserialize the row JSON without a prior size limit. A tight loop `for (let i = 0; i < 1_000_000; i++) host.emitRow({...})` forces the embedder's `HostContext::emit_row` implementation to absorb unbounded data in-process.
+- **Risk:** LOW-MEDIUM — fuel accounting bounds the loop iterations in practice, but a large per-row payload (say 10 MB) could still accumulate.
+- **Mitigation:** Document an upper per-row size (e.g. 1 MiB) in the `HostContext` trait, and have the host return an error past that threshold; OR require embedders to implement their own backpressure.
+
+### 21. Thread-local `host_context_active` assumes non-recursive native thrusts
+- **Issue:** `afterburner-node-compat/src/host_context_active.rs` uses a stack-based `ActiveGuard` that saves/restores the previous value on drop. If a thrust re-enters itself (e.g. a host function that calls back into the combustor on the same OS thread), the inner `activate` swaps the outer's context in. This hasn't been observed in any current call path but is a correctness landmine if someone adds re-entrant host semantics later.
+- **Risk:** LOW — no current callers re-enter. Flag for the module doc-comment so future contributors don't regress into it.
 
 ### 18. `README.md`'s Node.js compat table is out of sync with the new surface
 - **Issue:** Adds since the previous README refresh: `afterburner:state`, `fetch`, `AbortController`, richer Buffer, `fs.createReadStream`/`WriteStream`, AES ciphers, PBKDF2/scrypt, RSA/ECDSA sign/verify, `FlowEngine::load_bundle`.

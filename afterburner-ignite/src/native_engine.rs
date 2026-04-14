@@ -308,9 +308,26 @@ fn run_script(ctx: &Ctx<'_>, source: &str, input_json: &str) -> Result<String> {
     }
 
     // Slow path: result is a Promise. Pump microtasks until the queue
-    // drains, then resolve. Fuel accounting keeps runaway microtask
-    // chains bounded via the interrupt handler installed by the caller.
-    while ctx.execute_pending_job() {}
+    // drains, then resolve.
+    //
+    // Belt-and-suspenders iteration cap: the rquickjs interrupt
+    // handler should fire between bytecode ops within each job, which
+    // in theory bounds runaway microtask chains via fuel. In practice
+    // we've observed `queueMicrotask(step)` recursion where the
+    // per-job opcode count is so low that the interrupt handler
+    // rarely fires — scripts can run for minutes before the counter
+    // accumulates past the fuel budget. The MAX_PUMP_ITERATIONS cap
+    // guarantees we can never spin forever even if the interrupt
+    // path mis-fires.
+    const MAX_PUMP_ITERATIONS: usize = 1_000_000;
+    for _ in 0..MAX_PUMP_ITERATIONS {
+        if !ctx.execute_pending_job() {
+            break;
+        }
+    }
+    if ctx.execute_pending_job() {
+        return Err(AfterburnerError::FuelExhausted);
+    }
     let promise = rquickjs::Promise::from_value(result_val.clone())
         .map_err(|e| AfterburnerError::Engine(format!("Promise::from_value: {e}")))?;
     promise.finish::<String>().map_err(map_rquickjs_err)
