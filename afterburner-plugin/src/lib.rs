@@ -64,13 +64,17 @@ unsafe extern "C" {
     -> i32;
     fn host_fs_unlink_sync(path_ptr: *const u8, path_len: u32) -> i32;
     fn host_fs_rename_sync(
-        from_ptr: *const u8, from_len: u32,
-        to_ptr: *const u8, to_len: u32,
+        from_ptr: *const u8,
+        from_len: u32,
+        to_ptr: *const u8,
+        to_len: u32,
     ) -> i32;
     fn host_fs_mkdir_sync(path_ptr: *const u8, path_len: u32, recursive: i32) -> i32;
     fn host_fs_readdir_sync(
-        path_ptr: *const u8, path_len: u32,
-        out_ptr: *mut u8, out_cap: u32,
+        path_ptr: *const u8,
+        path_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
     ) -> i32;
 
     fn host_crypto_hash(
@@ -142,11 +146,7 @@ unsafe extern "C" {
     // `update` feeds a base64 chunk; `finalize` consumes the handle and
     // returns the signature (sign) or a 0/1 verdict (verify).
     fn host_crypto_sign_open(algo_ptr: *const u8, algo_len: u32) -> i64;
-    fn host_crypto_sign_update(
-        handle: i64,
-        data_ptr: *const u8,
-        data_len: u32,
-    ) -> i32;
+    fn host_crypto_sign_update(handle: i64, data_ptr: *const u8, data_len: u32) -> i32;
     fn host_crypto_sign_finalize(
         handle: i64,
         algo_ptr: *const u8,
@@ -175,11 +175,7 @@ unsafe extern "C" {
         key_ptr: *const u8,
         key_len: u32,
     ) -> i64;
-    fn host_crypto_hash_update(
-        handle: i64,
-        data_ptr: *const u8,
-        data_len: u32,
-    ) -> i32;
+    fn host_crypto_hash_update(handle: i64, data_ptr: *const u8, data_len: u32) -> i32;
     fn host_crypto_hash_digest(
         handle: i64,
         enc_ptr: *const u8,
@@ -189,19 +185,9 @@ unsafe extern "C" {
     ) -> i32;
 
     // Host context (ScramDB-facing hooks).
-    fn host_read_column(
-        name_ptr: *const u8,
-        name_len: u32,
-        out_ptr: *mut u8,
-        out_cap: u32,
-    ) -> i32;
+    fn host_read_column(name_ptr: *const u8, name_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
     fn host_emit_row(row_ptr: *const u8, row_len: u32) -> i32;
-    fn host_get_env(
-        key_ptr: *const u8,
-        key_len: u32,
-        out_ptr: *mut u8,
-        out_cap: u32,
-    ) -> i32;
+    fn host_get_env(key_ptr: *const u8, key_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
 
     // State store (afterburner:state).
     fn host_state_get(key_ptr: *const u8, key_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
@@ -448,10 +434,7 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
                 let fb = from.as_bytes();
                 let tb = to.as_bytes();
                 let code = unsafe {
-                    host_fs_rename_sync(
-                        fb.as_ptr(), fb.len() as u32,
-                        tb.as_ptr(), tb.len() as u32,
-                    )
+                    host_fs_rename_sync(fb.as_ptr(), fb.len() as u32, tb.as_ptr(), tb.len() as u32)
                 };
                 if code >= 0 {
                     String::new()
@@ -803,9 +786,7 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
             Func::from(|handle: f64, data_b64: String| -> String {
                 let h = handle as i64;
                 let db = data_b64.as_bytes();
-                let code = unsafe {
-                    host_crypto_sign_update(h, db.as_ptr(), db.len() as u32)
-                };
+                let code = unsafe { host_crypto_sign_update(h, db.as_ptr(), db.len() as u32) };
                 if code >= 0 {
                     String::new()
                 } else {
@@ -892,9 +873,7 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
             Func::from(|handle: f64, data_b64: String| -> String {
                 let h = handle as i64;
                 let db = data_b64.as_bytes();
-                let code = unsafe {
-                    host_crypto_hash_update(h, db.as_ptr(), db.len() as u32)
-                };
+                let code = unsafe { host_crypto_hash_update(h, db.as_ptr(), db.len() as u32) };
                 if code >= 0 {
                     String::new()
                 } else {
@@ -944,26 +923,22 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
             "__host_get_env",
             Func::from(|key: String| -> Option<String> {
                 let kb = key.as_bytes();
-                match call_read(|out, cap| unsafe {
-                    host_get_env(kb.as_ptr(), kb.len() as u32, out, cap)
-                }) {
-                    Ok(s) => Some(s),
-                    Err(_) => None,
-                }
+                call_read(|out, cap| unsafe { host_get_env(kb.as_ptr(), kb.len() as u32, out, cap) })
+                    .ok()
             }),
         );
 
-        // State store (afterburner:state).
+        // State store (afterburner:state). `call_read` returns `Err` on
+        // `-2 NotFound` (or any other negative code); mapping to None here
+        // surfaces the absence as JS `undefined`.
         let _ = globals.set(
             "__host_state_get",
             Func::from(|key: String| -> Option<String> {
                 let kb = key.as_bytes();
-                match call_read(|out, cap| unsafe {
+                call_read(|out, cap| unsafe {
                     host_state_get(kb.as_ptr(), kb.len() as u32, out, cap)
-                }) {
-                    Ok(s) => Some(s),
-                    Err(_) => None, // -2 NotFound or other -> undefined
-                }
+                })
+                .ok()
             }),
         );
 
@@ -1100,7 +1075,7 @@ fn config() -> Config {
 
 #[unsafe(export_name = "initialize-runtime")]
 pub extern "C" fn initialize_runtime() {
-    if let Err(_) = javy_plugin_api::initialize_runtime(config, modify_runtime) {
+    if javy_plugin_api::initialize_runtime(config, modify_runtime).is_err() {
         core::arch::wasm32::unreachable()
     }
 }

@@ -194,7 +194,10 @@ fn wasm_hash_streaming_surfaces_permission_denied() {
     "#;
     let out = run(src, Manifold::sealed());
     let msg = out["msg"].as_str().unwrap().to_lowercase();
-    assert!(msg.contains("permission denied"), "expected denial; got {msg}");
+    assert!(
+        msg.contains("permission denied"),
+        "expected denial; got {msg}"
+    );
     assert_eq!(out["code"], json!("EACCES"));
 }
 

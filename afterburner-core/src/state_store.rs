@@ -98,10 +98,17 @@ impl StateStore for InMemoryStateStore {
         let seed = self
             .bytes
             .get(key)
-            .and_then(|v| std::str::from_utf8(&v).ok().and_then(|s| s.parse::<i64>().ok()))
+            .and_then(|v| {
+                std::str::from_utf8(&v)
+                    .ok()
+                    .and_then(|s| s.parse::<i64>().ok())
+            })
             .unwrap_or(0);
         let fresh = Arc::new(AtomicI64::new(seed));
-        let counter = match self.counters.insert_if_absent(key.to_string(), fresh.clone()) {
+        let counter = match self
+            .counters
+            .insert_if_absent(key.to_string(), fresh.clone())
+        {
             None => fresh,
             Some(existing) => existing,
         };

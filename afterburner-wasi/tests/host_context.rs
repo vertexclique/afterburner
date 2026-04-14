@@ -24,9 +24,7 @@ struct TestContext {
 impl TestContext {
     fn emitted_rows(&self) -> Vec<Value> {
         let n = self.next_idx.load(Ordering::Relaxed);
-        (0..n)
-            .filter_map(|i| self.emitted.get(&i))
-            .collect()
+        (0..n).filter_map(|i| self.emitted.get(&i)).collect()
     }
 }
 

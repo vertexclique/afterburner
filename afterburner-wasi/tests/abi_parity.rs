@@ -24,10 +24,8 @@ fn workspace_root() -> PathBuf {
 /// Extract `host_xxx` names from string literals inside `func_wrap`
 /// registrations in host_imports.rs.
 fn wasi_imports() -> BTreeSet<String> {
-    let src = fs::read_to_string(
-        workspace_root().join("afterburner-wasi/src/host_imports.rs"),
-    )
-    .expect("read host_imports.rs");
+    let src = fs::read_to_string(workspace_root().join("afterburner-wasi/src/host_imports.rs"))
+        .expect("read host_imports.rs");
     let mut out = BTreeSet::new();
     for line in src.lines() {
         let line = line.trim();
@@ -49,10 +47,8 @@ fn wasi_imports() -> BTreeSet<String> {
 /// }
 /// ```
 fn plugin_imports() -> BTreeSet<String> {
-    let src = fs::read_to_string(
-        workspace_root().join("afterburner-plugin/src/lib.rs"),
-    )
-    .expect("read plugin/src/lib.rs");
+    let src = fs::read_to_string(workspace_root().join("afterburner-plugin/src/lib.rs"))
+        .expect("read plugin/src/lib.rs");
     let mut out = BTreeSet::new();
     let mut in_extern = false;
     for line in src.lines() {

@@ -143,10 +143,7 @@ impl NativeCombustor {
     /// `require('afterburner:host').readColumn` or `emitRow` dispatch
     /// through this context. Default (no context) returns empty
     /// column / swallows emitted rows.
-    pub fn with_host_context(
-        mut self,
-        ctx: Arc<dyn afterburner_core::HostContext>,
-    ) -> Self {
+    pub fn with_host_context(mut self, ctx: Arc<dyn afterburner_core::HostContext>) -> Self {
         self.host_context = Some(ctx);
         self
     }
@@ -198,9 +195,10 @@ impl Combustor for NativeCombustor {
             // Thread the engine's state store + optional host context
             // into the per-thrust slots.
             let _g = afterburner_node_compat::state_active::activate(self.state_store.clone());
-            let _hg = self.host_context.as_ref().map(|c| {
-                afterburner_node_compat::host_context_active::activate(c.clone())
-            });
+            let _hg = self
+                .host_context
+                .as_ref()
+                .map(|c| afterburner_node_compat::host_context_active::activate(c.clone()));
             do_thrust(rt, &source, &input_json, limits)
         })?;
         Ok(serde_json::from_str(&output_json)?)

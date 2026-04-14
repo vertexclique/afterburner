@@ -136,19 +136,28 @@ pub fn sign_finalize(
             let key = rsa::RsaPrivateKey::from_pkcs8_pem(key_pem)
                 .map_err(|e| AfterburnerError::Host(format!("RS256 key: {e}")))?;
             let signer: SigningKey<Sha256> = SigningKey::<Sha256>::new(key);
-            Ok(signer.sign_digest_with_rng(&mut rng, hasher).to_bytes().to_vec())
+            Ok(signer
+                .sign_digest_with_rng(&mut rng, hasher)
+                .to_bytes()
+                .to_vec())
         }
         ("RS384", DigestState::Sha384(hasher)) => {
             let key = rsa::RsaPrivateKey::from_pkcs8_pem(key_pem)
                 .map_err(|e| AfterburnerError::Host(format!("RS384 key: {e}")))?;
             let signer: SigningKey<Sha384> = SigningKey::<Sha384>::new(key);
-            Ok(signer.sign_digest_with_rng(&mut rng, hasher).to_bytes().to_vec())
+            Ok(signer
+                .sign_digest_with_rng(&mut rng, hasher)
+                .to_bytes()
+                .to_vec())
         }
         ("RS512", DigestState::Sha512(hasher)) => {
             let key = rsa::RsaPrivateKey::from_pkcs8_pem(key_pem)
                 .map_err(|e| AfterburnerError::Host(format!("RS512 key: {e}")))?;
             let signer: SigningKey<Sha512> = SigningKey::<Sha512>::new(key);
-            Ok(signer.sign_digest_with_rng(&mut rng, hasher).to_bytes().to_vec())
+            Ok(signer
+                .sign_digest_with_rng(&mut rng, hasher)
+                .to_bytes()
+                .to_vec())
         }
         ("ES256", DigestState::Sha256(hasher)) => {
             use p256::ecdsa::signature::DigestSigner;

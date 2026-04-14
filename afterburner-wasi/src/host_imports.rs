@@ -194,8 +194,10 @@ fn wrap_fs(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
             NS,
             "host_fs_rename_sync",
             |mut caller: Caller<'_, HostState>,
-             from_ptr: i32, from_len: i32,
-             to_ptr: i32, to_len: i32|
+             from_ptr: i32,
+             from_len: i32,
+             to_ptr: i32,
+             to_len: i32|
              -> i32 {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return E_OTHER;
@@ -221,10 +223,7 @@ fn wrap_fs(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         .func_wrap(
             NS,
             "host_fs_mkdir_sync",
-            |mut caller: Caller<'_, HostState>,
-             ptr: i32, len: i32,
-             recursive: i32|
-             -> i32 {
+            |mut caller: Caller<'_, HostState>, ptr: i32, len: i32, recursive: i32| -> i32 {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return E_OTHER;
                 };
@@ -246,8 +245,10 @@ fn wrap_fs(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
             NS,
             "host_fs_readdir_sync",
             |mut caller: Caller<'_, HostState>,
-             ptr: i32, len: i32,
-             out_ptr: i32, out_cap: i32|
+             ptr: i32,
+             len: i32,
+             out_ptr: i32,
+             out_cap: i32|
              -> i32 {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return E_OTHER;
@@ -948,17 +949,12 @@ fn wrap_crypto_signing(linker: &mut Linker<HostState>) -> Result<(), Afterburner
 
 // ---- streaming sign / verify --------------------------------------------
 
-fn wrap_crypto_signing_streaming(
-    linker: &mut Linker<HostState>,
-) -> Result<(), AfterburnerError> {
+fn wrap_crypto_signing_streaming(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
     linker
         .func_wrap(
             NS,
             "host_crypto_sign_open",
-            |mut caller: Caller<'_, HostState>,
-             algo_ptr: i32,
-             algo_len: i32|
-             -> i64 {
+            |mut caller: Caller<'_, HostState>, algo_ptr: i32, algo_len: i32| -> i64 {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return 0;
                 };
@@ -981,11 +977,7 @@ fn wrap_crypto_signing_streaming(
         .func_wrap(
             NS,
             "host_crypto_sign_update",
-            |mut caller: Caller<'_, HostState>,
-             handle: i64,
-             data_ptr: i32,
-             data_len: i32|
-             -> i32 {
+            |mut caller: Caller<'_, HostState>, handle: i64, data_ptr: i32, data_len: i32| -> i32 {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return E_OTHER;
                 };
@@ -1097,17 +1089,12 @@ fn wrap_crypto_signing_streaming(
 /// digests; `hmac_open` takes the key at open time (MAC is constructed
 /// once — HMAC doesn't accept a key change mid-stream). Both share the
 /// same handle id space, update, and finalize path.
-fn wrap_crypto_hash_streaming(
-    linker: &mut Linker<HostState>,
-) -> Result<(), AfterburnerError> {
+fn wrap_crypto_hash_streaming(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
     linker
         .func_wrap(
             NS,
             "host_crypto_hash_open",
-            |mut caller: Caller<'_, HostState>,
-             algo_ptr: i32,
-             algo_len: i32|
-             -> i64 {
+            |mut caller: Caller<'_, HostState>, algo_ptr: i32, algo_len: i32| -> i64 {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return 0;
                 };
@@ -1177,11 +1164,7 @@ fn wrap_crypto_hash_streaming(
         .func_wrap(
             NS,
             "host_crypto_hash_update",
-            |mut caller: Caller<'_, HostState>,
-             handle: i64,
-             data_ptr: i32,
-             data_len: i32|
-             -> i32 {
+            |mut caller: Caller<'_, HostState>, handle: i64, data_ptr: i32, data_len: i32| -> i32 {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return E_OTHER;
                 };
@@ -1334,11 +1317,7 @@ fn wrap_state(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         .func_wrap(
             NS,
             "host_state_increment",
-            |mut caller: Caller<'_, HostState>,
-             key_ptr: i32,
-             key_len: i32,
-             delta: i64|
-             -> i64 {
+            |mut caller: Caller<'_, HostState>, key_ptr: i32, key_len: i32, delta: i64| -> i64 {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return 0;
                 };
@@ -1441,8 +1420,7 @@ fn wrap_host_context(linker: &mut Linker<HostState>) -> Result<(), AfterburnerEr
                     Some(ctx) => ctx.read_column(&name),
                     None => Vec::new(),
                 };
-                let json = serde_json::to_string(&rows)
-                    .unwrap_or_else(|_| "[]".to_string());
+                let json = serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string());
                 write_out(&mut caller, &memory, out_ptr, out_cap, json.as_bytes())
             },
         )
@@ -1453,10 +1431,7 @@ fn wrap_host_context(linker: &mut Linker<HostState>) -> Result<(), AfterburnerEr
         .func_wrap(
             NS,
             "host_emit_row",
-            |mut caller: Caller<'_, HostState>,
-             row_ptr: i32,
-             row_len: i32|
-             -> i32 {
+            |mut caller: Caller<'_, HostState>, row_ptr: i32, row_len: i32| -> i32 {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return E_OTHER;
                 };
