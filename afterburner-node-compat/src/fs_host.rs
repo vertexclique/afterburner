@@ -135,12 +135,17 @@ pub struct FileStat {
 /// Resolve `path` to an absolute, normalized PathBuf and ensure it lives
 /// under one of the FS policy's roots. `None` / `ReadOnly` / `ReadWrite`
 /// all allow reads when the policy admits it.
+///
+/// Redaction policy: permission-denied messages never echo the caller's
+/// path. The user already knows what they asked for; logs captured in
+/// shared sinks must not leak sensitive paths (`/home/user/.ssh/*`,
+/// credential-file locations, etc.).
 fn validate_read(path: &str, access: &FsAccess) -> Result<PathBuf> {
     let roots: &[PathBuf] = match access {
         FsAccess::None => {
-            return Err(AfterburnerError::PermissionDenied(format!(
-                "fs read of {path}"
-            )));
+            return Err(AfterburnerError::PermissionDenied(
+                "fs read denied by manifold".into(),
+            ));
         }
         FsAccess::ReadOnly(r) | FsAccess::ReadWrite(r) => r.as_slice(),
     };
@@ -150,14 +155,14 @@ fn validate_read(path: &str, access: &FsAccess) -> Result<PathBuf> {
 fn validate_write(path: &str, access: &FsAccess) -> Result<PathBuf> {
     let roots: &[PathBuf] = match access {
         FsAccess::None => {
-            return Err(AfterburnerError::PermissionDenied(format!(
-                "fs write to {path}"
-            )));
+            return Err(AfterburnerError::PermissionDenied(
+                "fs write denied by manifold".into(),
+            ));
         }
         FsAccess::ReadOnly(_) => {
-            return Err(AfterburnerError::PermissionDenied(format!(
-                "fs write to {path} (read-only policy)"
-            )));
+            return Err(AfterburnerError::PermissionDenied(
+                "fs write denied: read-only policy".into(),
+            ));
         }
         FsAccess::ReadWrite(r) => r.as_slice(),
     };
@@ -184,7 +189,7 @@ fn resolve_within(path: &str, roots: &[PathBuf], op: &str) -> Result<PathBuf> {
 
     if !is_normalized(&canonical) {
         return Err(AfterburnerError::PermissionDenied(format!(
-            "{op}: path {path} has unresolved components"
+            "{op}: path has unresolved components"
         )));
     }
 
@@ -200,7 +205,7 @@ fn resolve_within(path: &str, roots: &[PathBuf], op: &str) -> Result<PathBuf> {
     }
 
     Err(AfterburnerError::PermissionDenied(format!(
-        "{op}: path {path} outside allowed roots"
+        "{op}: path outside allowed roots"
     )))
 }
 

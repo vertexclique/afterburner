@@ -17,6 +17,148 @@ type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
 type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 
+/// Incremental digest state for streaming sign / verify. `Clone`
+/// because the host exposes an `update` primitive that takes the
+/// current state, feeds the new chunk, and stores the new state back —
+/// cloning is how we avoid interior-mutability + sync primitives.
+#[derive(Clone)]
+pub enum DigestState {
+    Sha256(Sha256),
+    Sha384(Sha384),
+    Sha512(Sha512),
+}
+
+impl DigestState {
+    /// Build a fresh digest state for `algorithm`. `RS256`/`ES256`
+    /// share Sha-256; RSA also supports Sha-384/512.
+    pub fn new(algorithm: &str) -> Result<Self> {
+        match algorithm {
+            "RS256" | "ES256" => Ok(DigestState::Sha256(Sha256::new())),
+            "RS384" => Ok(DigestState::Sha384(Sha384::new())),
+            "RS512" => Ok(DigestState::Sha512(Sha512::new())),
+            other => Err(AfterburnerError::Host(format!(
+                "sign/verify: unsupported algorithm '{other}'"
+            ))),
+        }
+    }
+
+    pub fn update(&mut self, data: &[u8]) {
+        match self {
+            DigestState::Sha256(h) => h.update(data),
+            DigestState::Sha384(h) => h.update(data),
+            DigestState::Sha512(h) => h.update(data),
+        }
+    }
+}
+
+/// Finalize an accumulated digest with an RSA/ECDSA private key and
+/// produce a raw signature. The digest state is consumed.
+pub fn sign_finalize(
+    algorithm: &str,
+    key_pem: &str,
+    state: DigestState,
+    m: &Manifold,
+) -> Result<Vec<u8>> {
+    if !m.crypto {
+        return Err(AfterburnerError::PermissionDenied(format!(
+            "crypto.sign({algorithm})"
+        )));
+    }
+    use rsa::pkcs1v15::SigningKey;
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::signature::{RandomizedDigestSigner, SignatureEncoding};
+    let mut rng = rsa::rand_core::OsRng;
+    match (algorithm, state) {
+        ("RS256", DigestState::Sha256(hasher)) => {
+            let key = rsa::RsaPrivateKey::from_pkcs8_pem(key_pem)
+                .map_err(|e| AfterburnerError::Host(format!("RS256 key: {e}")))?;
+            let signer: SigningKey<Sha256> = SigningKey::<Sha256>::new(key);
+            Ok(signer.sign_digest_with_rng(&mut rng, hasher).to_bytes().to_vec())
+        }
+        ("RS384", DigestState::Sha384(hasher)) => {
+            let key = rsa::RsaPrivateKey::from_pkcs8_pem(key_pem)
+                .map_err(|e| AfterburnerError::Host(format!("RS384 key: {e}")))?;
+            let signer: SigningKey<Sha384> = SigningKey::<Sha384>::new(key);
+            Ok(signer.sign_digest_with_rng(&mut rng, hasher).to_bytes().to_vec())
+        }
+        ("RS512", DigestState::Sha512(hasher)) => {
+            let key = rsa::RsaPrivateKey::from_pkcs8_pem(key_pem)
+                .map_err(|e| AfterburnerError::Host(format!("RS512 key: {e}")))?;
+            let signer: SigningKey<Sha512> = SigningKey::<Sha512>::new(key);
+            Ok(signer.sign_digest_with_rng(&mut rng, hasher).to_bytes().to_vec())
+        }
+        ("ES256", DigestState::Sha256(hasher)) => {
+            use p256::ecdsa::signature::DigestSigner;
+            use p256::ecdsa::{Signature, SigningKey as EcdsaKey};
+            use p256::pkcs8::DecodePrivateKey as _;
+            let key = EcdsaKey::from_pkcs8_pem(key_pem)
+                .map_err(|e| AfterburnerError::Host(format!("ES256 key: {e}")))?;
+            let sig: Signature = key.sign_digest(hasher);
+            Ok(sig.to_bytes().to_vec())
+        }
+        (other, _) => Err(AfterburnerError::Host(format!(
+            "sign/verify: algorithm / digest mismatch for '{other}'"
+        ))),
+    }
+}
+
+/// Finalize an accumulated digest and verify against `sig_bytes`.
+pub fn verify_finalize(
+    algorithm: &str,
+    key_pem: &str,
+    state: DigestState,
+    sig_bytes: &[u8],
+    m: &Manifold,
+) -> Result<bool> {
+    if !m.crypto {
+        return Err(AfterburnerError::PermissionDenied(format!(
+            "crypto.verify({algorithm})"
+        )));
+    }
+    use rsa::pkcs1v15::{Signature as RsaSig, VerifyingKey};
+    use rsa::pkcs8::DecodePublicKey;
+    use rsa::signature::DigestVerifier;
+    match (algorithm, state) {
+        ("RS256", DigestState::Sha256(hasher)) => {
+            let key = rsa::RsaPublicKey::from_public_key_pem(key_pem)
+                .map_err(|e| AfterburnerError::Host(format!("RS256 key: {e}")))?;
+            let verifier: VerifyingKey<Sha256> = VerifyingKey::<Sha256>::new(key);
+            let sig = RsaSig::try_from(sig_bytes)
+                .map_err(|e| AfterburnerError::Host(format!("RS256 sig: {e}")))?;
+            Ok(verifier.verify_digest(hasher, &sig).is_ok())
+        }
+        ("RS384", DigestState::Sha384(hasher)) => {
+            let key = rsa::RsaPublicKey::from_public_key_pem(key_pem)
+                .map_err(|e| AfterburnerError::Host(format!("RS384 key: {e}")))?;
+            let verifier: VerifyingKey<Sha384> = VerifyingKey::<Sha384>::new(key);
+            let sig = RsaSig::try_from(sig_bytes)
+                .map_err(|e| AfterburnerError::Host(format!("RS384 sig: {e}")))?;
+            Ok(verifier.verify_digest(hasher, &sig).is_ok())
+        }
+        ("RS512", DigestState::Sha512(hasher)) => {
+            let key = rsa::RsaPublicKey::from_public_key_pem(key_pem)
+                .map_err(|e| AfterburnerError::Host(format!("RS512 key: {e}")))?;
+            let verifier: VerifyingKey<Sha512> = VerifyingKey::<Sha512>::new(key);
+            let sig = RsaSig::try_from(sig_bytes)
+                .map_err(|e| AfterburnerError::Host(format!("RS512 sig: {e}")))?;
+            Ok(verifier.verify_digest(hasher, &sig).is_ok())
+        }
+        ("ES256", DigestState::Sha256(hasher)) => {
+            use p256::ecdsa::signature::DigestVerifier;
+            use p256::ecdsa::{Signature, VerifyingKey};
+            use p256::pkcs8::DecodePublicKey as _;
+            let key = VerifyingKey::from_public_key_pem(key_pem)
+                .map_err(|e| AfterburnerError::Host(format!("ES256 key: {e}")))?;
+            let sig = Signature::from_slice(sig_bytes)
+                .map_err(|e| AfterburnerError::Host(format!("ES256 sig: {e}")))?;
+            Ok(key.verify_digest(hasher, &sig).is_ok())
+        }
+        (other, _) => Err(AfterburnerError::Host(format!(
+            "sign/verify: algorithm / digest mismatch for '{other}'"
+        ))),
+    }
+}
+
 /// Hash `data` with the named algorithm. Supported: `md5`, `sha1` (no —
 /// too weak, rejected), `sha256`, `sha384`, `sha512`.
 pub fn hash(algorithm: &str, data: &[u8], m: &Manifold) -> Result<Vec<u8>> {
@@ -295,7 +437,14 @@ pub fn scrypt_sync(
             "crypto.scryptSync".into(),
         ));
     }
-    let log_n = (n as f64).log2().round() as u8;
+    // `scrypt::Params` takes log2(N) as a u8. Reject non-power-of-2 N so
+    // we don't silently alter the user's requested work factor.
+    if n == 0 || (n & (n - 1)) != 0 {
+        return Err(AfterburnerError::Host(format!(
+            "scrypt: N must be a power of 2, got {n}"
+        )));
+    }
+    let log_n = n.trailing_zeros() as u8;
     let params = scrypt::Params::new(log_n, r, p, key_len)
         .map_err(|e| AfterburnerError::Host(format!("scrypt params: {e}")))?;
     let mut out = vec![0u8; key_len];

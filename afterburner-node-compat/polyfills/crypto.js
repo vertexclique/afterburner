@@ -214,32 +214,89 @@ __register_module('crypto', function(module, exports, require) {
             dataBuf.toString('base64'),
             sigBuf.toString('base64')
         );
-        // Native path returns bool; WASM path returns i32 (1/0/negative).
-        if (code === true || code === 1) return true;
-        if (code === false || code === 0) return false;
+        // Both paths now return i32 (1/0/negative). Accept bool too in
+        // case an embedder wires a host that returns it directly.
+        if (code === 1 || code === true) return true;
+        if (code === 0 || code === false) return false;
         throw new Error('crypto.verify: host error (code ' + code + ')');
     }
 
     exports.sign = signImpl;
     exports.verify = verifyImpl;
 
-    // Node's stream-style createSign / createVerify aliases.
+    // Node's stream-style createSign / createVerify. Streaming-backed:
+    // chunks are hashed incrementally on the host side, so memory is
+    // proportional to the digest state (~200 B) rather than the total
+    // payload size.
+    var ALGO_ALIASES = {
+        'RSA-SHA256': 'RS256', 'RSA-SHA384': 'RS384', 'RSA-SHA512': 'RS512',
+        'sha256WithRSAEncryption': 'RS256',
+        'sha384WithRSAEncryption': 'RS384',
+        'sha512WithRSAEncryption': 'RS512',
+    };
+    function canonicalAlgo(algo) { return ALGO_ALIASES[algo] || algo; }
+
+    function streamingHostPresent() {
+        return typeof globalThis.__host_crypto_sign_open === 'function'
+            && typeof globalThis.__host_crypto_sign_update === 'function';
+    }
+
     function makeSigner(algo) {
-        var algoToHash = { 'RSA-SHA256': 'RS256', 'RSA-SHA384': 'RS384', 'RSA-SHA512': 'RS512',
-                           'sha256WithRSAEncryption': 'RS256', 'sha384WithRSAEncryption': 'RS384',
-                           'sha512WithRSAEncryption': 'RS512' };
-        var canonical = algoToHash[algo] || algo;
+        var canonical = canonicalAlgo(algo);
+        if (streamingHostPresent()) {
+            var handle = globalThis.__host_crypto_sign_open(canonical);
+            if (!handle) throw new Error('crypto.createSign: ' + canonical + ' not supported');
+            return {
+                update: function(d) {
+                    var buf = Buffer.isBuffer(d) ? d : Buffer.from(String(d));
+                    var r = globalThis.__host_crypto_sign_update(handle, buf.toString('base64'));
+                    if (typeof r === 'string' && r.indexOf('__HOST_ERR__:') === 0) {
+                        throw new Error('crypto.sign.update: ' + r.slice('__HOST_ERR__:'.length));
+                    }
+                    return this;
+                },
+                sign: function(key) {
+                    var raw = globalThis.__host_crypto_sign_finalize(handle, canonical, String(key));
+                    if (typeof raw === 'string' && raw.indexOf('__HOST_ERR__:') === 0) {
+                        throw new Error('crypto.sign: ' + raw.slice('__HOST_ERR__:'.length));
+                    }
+                    return Buffer.from(raw, 'base64');
+                }
+            };
+        }
+        // Fallback for older plugins / embedders that haven't wired
+        // streaming: buffer everything and use the one-shot API.
         var chunks = [];
         return {
             update: function(d) { chunks.push(Buffer.isBuffer(d) ? d : Buffer.from(String(d))); return this; },
             sign:   function(key) { return signImpl(canonical, key, Buffer.concat(chunks)); }
         };
     }
+
     function makeVerifier(algo) {
-        var algoToHash = { 'RSA-SHA256': 'RS256', 'RSA-SHA384': 'RS384', 'RSA-SHA512': 'RS512',
-                           'sha256WithRSAEncryption': 'RS256', 'sha384WithRSAEncryption': 'RS384',
-                           'sha512WithRSAEncryption': 'RS512' };
-        var canonical = algoToHash[algo] || algo;
+        var canonical = canonicalAlgo(algo);
+        if (streamingHostPresent() && typeof globalThis.__host_crypto_verify_finalize === 'function') {
+            var handle = globalThis.__host_crypto_sign_open(canonical);
+            if (!handle) throw new Error('crypto.createVerify: ' + canonical + ' not supported');
+            return {
+                update: function(d) {
+                    var buf = Buffer.isBuffer(d) ? d : Buffer.from(String(d));
+                    var r = globalThis.__host_crypto_sign_update(handle, buf.toString('base64'));
+                    if (typeof r === 'string' && r.indexOf('__HOST_ERR__:') === 0) {
+                        throw new Error('crypto.verify.update: ' + r.slice('__HOST_ERR__:'.length));
+                    }
+                    return this;
+                },
+                verify: function(key, sig) {
+                    var sigBuf = Buffer.isBuffer(sig) ? sig : Buffer.from(String(sig));
+                    var code = globalThis.__host_crypto_verify_finalize(
+                        handle, canonical, String(key), sigBuf.toString('base64'));
+                    if (code === 1 || code === true) return true;
+                    if (code === 0 || code === false) return false;
+                    throw new Error('crypto.verify: host error (code ' + code + ')');
+                }
+            };
+        }
         var chunks = [];
         return {
             update: function(d) { chunks.push(Buffer.isBuffer(d) ? d : Buffer.from(String(d))); return this; },

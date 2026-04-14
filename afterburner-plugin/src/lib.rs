@@ -62,6 +62,16 @@ unsafe extern "C" {
     fn host_fs_exists_sync(path_ptr: *const u8, path_len: u32) -> i32;
     fn host_fs_stat_sync(path_ptr: *const u8, path_len: u32, out_ptr: *mut u8, out_cap: u32)
     -> i32;
+    fn host_fs_unlink_sync(path_ptr: *const u8, path_len: u32) -> i32;
+    fn host_fs_rename_sync(
+        from_ptr: *const u8, from_len: u32,
+        to_ptr: *const u8, to_len: u32,
+    ) -> i32;
+    fn host_fs_mkdir_sync(path_ptr: *const u8, path_len: u32, recursive: i32) -> i32;
+    fn host_fs_readdir_sync(
+        path_ptr: *const u8, path_len: u32,
+        out_ptr: *mut u8, out_cap: u32,
+    ) -> i32;
 
     fn host_crypto_hash(
         algo_ptr: *const u8,
@@ -128,6 +138,34 @@ unsafe extern "C" {
         sig_len: u32,
     ) -> i32;
 
+    // Streaming sign / verify. `open` returns a 64-bit handle (0 = err);
+    // `update` feeds a base64 chunk; `finalize` consumes the handle and
+    // returns the signature (sign) or a 0/1 verdict (verify).
+    fn host_crypto_sign_open(algo_ptr: *const u8, algo_len: u32) -> i64;
+    fn host_crypto_sign_update(
+        handle: i64,
+        data_ptr: *const u8,
+        data_len: u32,
+    ) -> i32;
+    fn host_crypto_sign_finalize(
+        handle: i64,
+        algo_ptr: *const u8,
+        algo_len: u32,
+        key_ptr: *const u8,
+        key_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    fn host_crypto_verify_finalize(
+        handle: i64,
+        algo_ptr: *const u8,
+        algo_len: u32,
+        key_ptr: *const u8,
+        key_len: u32,
+        sig_ptr: *const u8,
+        sig_len: u32,
+    ) -> i32;
+
     // State store (afterburner:state).
     fn host_state_get(key_ptr: *const u8, key_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
     fn host_state_set(
@@ -137,6 +175,7 @@ unsafe extern "C" {
         value_len: u32,
     ) -> i32;
     fn host_state_delete(key_ptr: *const u8, key_len: u32) -> i32;
+    fn host_state_increment(key_ptr: *const u8, key_len: u32, delta: i64) -> i64;
 
     // Chunked fs (createReadStream / createWriteStream backing).
     fn host_fs_read_chunk(
@@ -332,6 +371,65 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
                     }
                 },
             ),
+        );
+
+        let _ = globals.set(
+            "__host_fs_unlink_sync",
+            Func::from(|path: String| -> String {
+                let pb = path.as_bytes();
+                let code = unsafe { host_fs_unlink_sync(pb.as_ptr(), pb.len() as u32) };
+                if code >= 0 {
+                    String::new()
+                } else {
+                    format!("__HOST_ERR__:{}", read_last_error(code))
+                }
+            }),
+        );
+
+        let _ = globals.set(
+            "__host_fs_rename_sync",
+            Func::from(|from: String, to: String| -> String {
+                let fb = from.as_bytes();
+                let tb = to.as_bytes();
+                let code = unsafe {
+                    host_fs_rename_sync(
+                        fb.as_ptr(), fb.len() as u32,
+                        tb.as_ptr(), tb.len() as u32,
+                    )
+                };
+                if code >= 0 {
+                    String::new()
+                } else {
+                    format!("__HOST_ERR__:{}", read_last_error(code))
+                }
+            }),
+        );
+
+        let _ = globals.set(
+            "__host_fs_mkdir_sync",
+            Func::from(|path: String, recursive: Option<bool>| -> String {
+                let pb = path.as_bytes();
+                let flag = if recursive.unwrap_or(false) { 1 } else { 0 };
+                let code = unsafe { host_fs_mkdir_sync(pb.as_ptr(), pb.len() as u32, flag) };
+                if code >= 0 {
+                    String::new()
+                } else {
+                    format!("__HOST_ERR__:{}", read_last_error(code))
+                }
+            }),
+        );
+
+        let _ = globals.set(
+            "__host_fs_readdir_sync",
+            Func::from(|path: String| -> String {
+                let pb = path.as_bytes();
+                match call_read(|out, cap| unsafe {
+                    host_fs_readdir_sync(pb.as_ptr(), pb.len() as u32, out, cap)
+                }) {
+                    Ok(s) => s,
+                    Err(e) => format!("__HOST_ERR__:{e}"),
+                }
+            }),
         );
 
         let _ = globals.set(
@@ -629,6 +727,83 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
             ),
         );
 
+        // Streaming sign / verify. The JS polyfill opens a handle once,
+        // feeds chunks via `update`, and finalizes with the key. Handles
+        // are scoped to the host-side `SignHandleStore` (per-thrust in
+        // WASM, thread-local on the native path).
+        let _ = globals.set(
+            "__host_crypto_sign_open",
+            Func::from(|algo: String| -> f64 {
+                let ab = algo.as_bytes();
+                let h = unsafe { host_crypto_sign_open(ab.as_ptr(), ab.len() as u32) };
+                // 0 = error (JS falsy); the polyfill throws on that.
+                // Negative is also "not supported" — surface as 0 too.
+                if h <= 0 { 0.0 } else { h as f64 }
+            }),
+        );
+
+        let _ = globals.set(
+            "__host_crypto_sign_update",
+            Func::from(|handle: f64, data_b64: String| -> String {
+                let h = handle as i64;
+                let db = data_b64.as_bytes();
+                let code = unsafe {
+                    host_crypto_sign_update(h, db.as_ptr(), db.len() as u32)
+                };
+                if code >= 0 {
+                    String::new()
+                } else {
+                    format!("__HOST_ERR__:{}", read_last_error(code))
+                }
+            }),
+        );
+
+        let _ = globals.set(
+            "__host_crypto_sign_finalize",
+            Func::from(|handle: f64, algo: String, key_pem: String| -> String {
+                let h = handle as i64;
+                let ab = algo.as_bytes();
+                let kb = key_pem.as_bytes();
+                match call_read(|out, cap| unsafe {
+                    host_crypto_sign_finalize(
+                        h,
+                        ab.as_ptr(),
+                        ab.len() as u32,
+                        kb.as_ptr(),
+                        kb.len() as u32,
+                        out,
+                        cap,
+                    )
+                }) {
+                    Ok(s) => s,
+                    Err(e) => format!("__HOST_ERR__:{e}"),
+                }
+            }),
+        );
+
+        let _ = globals.set(
+            "__host_crypto_verify_finalize",
+            Func::from(
+                |handle: f64, algo: String, key_pem: String, sig_b64: String| -> i32 {
+                    let h = handle as i64;
+                    let ab = algo.as_bytes();
+                    let kb = key_pem.as_bytes();
+                    let sb = sig_b64.as_bytes();
+                    unsafe {
+                        host_crypto_verify_finalize(
+                            h,
+                            ab.as_ptr(),
+                            ab.len() as u32,
+                            kb.as_ptr(),
+                            kb.len() as u32,
+                            sb.as_ptr(),
+                            sb.len() as u32,
+                        )
+                    }
+                },
+            ),
+        );
+
         // State store (afterburner:state).
         let _ = globals.set(
             "__host_state_get",
@@ -659,6 +834,15 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
             Func::from(|key: String| -> i32 {
                 let kb = key.as_bytes();
                 unsafe { host_state_delete(kb.as_ptr(), kb.len() as u32) }
+            }),
+        );
+
+        let _ = globals.set(
+            "__host_state_increment",
+            Func::from(|key: String, delta: f64| -> f64 {
+                let kb = key.as_bytes();
+                let n = unsafe { host_state_increment(kb.as_ptr(), kb.len() as u32, delta as i64) };
+                n as f64
             }),
         );
 

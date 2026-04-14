@@ -27,3 +27,12 @@ fastrace.workspace = true
 afterburner-node-compat.workspace = true
 hex.workspace = true
 base64.workspace = true
+
+[dev-dependencies]
+afterburner-ignite.workspace = true
+rsa.workspace = true
+p256.workspace = true
+rand = "0.8"
+
+[build-dependencies]
+sha2.workspace = true

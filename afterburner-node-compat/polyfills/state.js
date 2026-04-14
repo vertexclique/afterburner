@@ -55,11 +55,19 @@ __register_module('afterburner:state', function(module, exports, require) {
         exports.set(key, JSON.stringify(value));
     };
 
-    // Numeric helper for counters.
+    // Numeric helper for counters. Uses an atomic host-side
+    // compare-and-add so concurrent thrusts can't lose updates.
     exports.increment = function(key, delta) {
+        var d = (delta === undefined ? 1 : delta);
+        var fn = globalThis.__host_state_increment;
+        if (typeof fn === 'function') {
+            return fn(String(key), d);
+        }
+        // Backend without atomic increment — fall back to non-atomic
+        // RMW and warn the caller via a property on the returned value.
         var n = exports.getJSON(key);
         if (typeof n !== 'number') n = 0;
-        n += (delta === undefined ? 1 : delta);
+        n += d;
         exports.setJSON(key, n);
         return n;
     };

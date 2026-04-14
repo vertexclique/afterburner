@@ -19,6 +19,7 @@ pub mod fs_host;
 pub mod http_host;
 pub mod native_install;
 pub mod os_host;
+pub mod sign_handles;
 pub mod state_active;
 pub mod zlib_host;
 

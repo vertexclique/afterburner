@@ -53,7 +53,10 @@
 
     function Response(body, init) {
         init = init || {};
-        this._body = body != null ? String(body) : '';
+        // Body storage: prefer `bodyB64` (authoritative bytes) if
+        // provided, fall back to `body` string (lossy-utf8 text view).
+        this._bodyText = body != null ? String(body) : '';
+        this._bodyB64 = init.bodyB64 || null;
         this.status = init.status !== undefined ? init.status : 200;
         this.statusText = init.statusText || '';
         this.ok = this.status >= 200 && this.status < 300;
@@ -64,19 +67,38 @@
     Response.prototype.text = function() {
         if (this.bodyUsed) return Promise.reject(new TypeError('Body already consumed'));
         this.bodyUsed = true;
-        return Promise.resolve(this._body);
+        // Decode base64 → utf8 when binary bytes are authoritative so
+        // text() sees proper decoded characters rather than the lossy
+        // roundtrip.
+        if (this._bodyB64 !== null) {
+            var Buffer = require('buffer').Buffer;
+            return Promise.resolve(Buffer.from(this._bodyB64, 'base64').toString('utf8'));
+        }
+        return Promise.resolve(this._bodyText);
     };
     Response.prototype.json = function() {
         return this.text().then(function(s) { return JSON.parse(s); });
     };
     Response.prototype.arrayBuffer = function() {
+        if (this.bodyUsed) return Promise.reject(new TypeError('Body already consumed'));
+        this.bodyUsed = true;
         var Buffer = require('buffer').Buffer;
-        return this.text().then(function(s) {
-            return Buffer.from(s, 'utf8').buffer;
-        });
+        // `bodyB64` roundtrips binary losslessly; fall back to utf8
+        // encode of the text view when the host didn't provide it.
+        if (this._bodyB64 !== null) {
+            var buf = Buffer.from(this._bodyB64, 'base64');
+            return Promise.resolve(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length));
+        }
+        return Promise.resolve(Buffer.from(this._bodyText, 'utf8').buffer);
     };
     Response.prototype.clone = function() {
-        var r = new Response(this._body, { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url });
+        var r = new Response(this._bodyText, {
+            status: this.status,
+            statusText: this.statusText,
+            headers: this.headers,
+            url: this.url,
+            bodyB64: this._bodyB64,
+        });
         return r;
     };
 
@@ -95,7 +117,11 @@
         if (typeof parsed.body === 'string' && parsed.body.indexOf('__HOST_ERR__:') === 0) {
             return Promise.reject(new Error('fetch: ' + parsed.body.slice('__HOST_ERR__:'.length)));
         }
-        var resp = new Response(parsed.body, { status: parsed.status, url: req.url });
+        var resp = new Response(parsed.body, {
+            status: parsed.status,
+            url: req.url,
+            bodyB64: parsed.body_b64 || null,
+        });
         return Promise.resolve(resp);
     }
 

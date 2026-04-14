@@ -9,6 +9,7 @@ description = "Afterburner Node.js compatibility layer — polyfill bundle (plen
 
 [dependencies]
 afterburner-core.workspace = true
+kovan-map.workspace = true
 rquickjs.workspace = true
 sha2.workspace = true
 hmac.workspace = true

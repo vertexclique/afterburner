@@ -313,6 +313,99 @@ fn rsa_sign_verify_roundtrip() {
 }
 
 #[test]
+fn rsa_streaming_sign_matches_one_shot() {
+    // RS256 (PKCS#1 v1.5) is deterministic, so feeding the same bytes
+    // through `createSign().update(...)` chunks MUST produce the exact
+    // signature as the one-shot `crypto.sign(...)`. This proves the
+    // host-side streaming digest accumulates the hash correctly across
+    // chunk boundaries.
+    let (priv_pem, pub_pem) = fresh_rsa_keypair();
+    let src = format!(
+        r#"
+        module.exports = () => {{
+            try {{
+                const crypto = require('crypto');
+                const parts = ['first-', 'second-', 'third-', 'LAST'];
+                const joined = parts.join('');
+
+                const signer = crypto.createSign('RS256');
+                for (const p of parts) signer.update(p);
+                const streamed = signer.sign({priv:?});
+
+                const oneShot = crypto.sign('RS256', {priv:?}, joined);
+
+                const verifier = crypto.createVerify('RS256');
+                for (const p of parts) verifier.update(p);
+
+                // `streamed.compare(oneShot)` is the instance-method form;
+                // we don't polyfill static `Buffer.compare`.
+                return {{
+                    equal: streamed.compare(oneShot) === 0,
+                    verifyStreamed: crypto.verify('RS256', {pub:?}, joined, streamed),
+                    streamedVerifier: verifier.verify({pub:?}, oneShot),
+                }};
+            }} catch (e) {{ return {{ err: e.message, stack: e.stack }}; }}
+        }};
+        "#,
+        priv = priv_pem,
+        pub = pub_pem,
+    );
+    let mut m = Manifold::sealed();
+    m.crypto = true;
+    let out = run(&src, m);
+    assert_eq!(
+        out,
+        json!({
+            "equal": true,
+            "verifyStreamed": true,
+            "streamedVerifier": true,
+        }),
+        "streaming mismatch: {out}"
+    );
+}
+
+#[test]
+fn ecdsa_streaming_verify_roundtrips_one_shot() {
+    // ECDSA signatures are non-deterministic (nonce), so we can't assert
+    // byte equality — but streaming sign ↔ one-shot verify (and the
+    // reverse) must both succeed if the digest streams correctly.
+    let (priv_pem, pub_pem) = fresh_p256_keypair();
+    let src = format!(
+        r#"
+        module.exports = () => {{
+            const crypto = require('crypto');
+            const parts = ['aaa', 'bbb', 'ccc'];
+            const joined = parts.join('');
+
+            const signer = crypto.createSign('ES256');
+            for (const p of parts) signer.update(p);
+            const streamed = signer.sign({priv:?});
+            const oneShot = crypto.sign('ES256', {priv:?}, joined);
+
+            const verifier = crypto.createVerify('ES256');
+            for (const p of parts) verifier.update(p);
+            const streamedVerified = verifier.verify({pub:?}, oneShot);
+
+            return {{
+                oneShotVerifiesStreamed: crypto.verify('ES256', {pub:?}, joined, streamed),
+                streamedVerifiesOneShot: streamedVerified,
+            }};
+        }};
+        "#,
+        priv = priv_pem,
+        pub = pub_pem,
+    );
+    let mut m = Manifold::sealed();
+    m.crypto = true;
+    let out = run(&src, m);
+    assert_eq!(
+        out,
+        json!({ "oneShotVerifiesStreamed": true, "streamedVerifiesOneShot": true }),
+        "ECDSA streaming mismatch: {out}"
+    );
+}
+
+#[test]
 fn ecdsa_p256_sign_verify_roundtrip() {
     let (priv_pem, pub_pem) = fresh_p256_keypair();
     let src = format!(
@@ -573,6 +666,71 @@ fn scrypt_known_vector() {
     let out = run(src, m);
     let hex = out.as_str().unwrap();
     assert!(hex.starts_with("77d6576238657b203b19"), "got {hex}");
+}
+
+#[test]
+fn fs_permission_denied_message_does_not_leak_path() {
+    // Regression: under sealed/readonly policy, the permission-denied
+    // error must NOT echo the user's requested path verbatim. Logs in
+    // shared sinks could otherwise leak sensitive filenames.
+    let src = r#"
+        module.exports = () => {
+            try { require('fs').readFileSync('/root/.ssh/id_rsa'); return 'unexpected'; }
+            catch (e) { return e.message; }
+        };
+    "#;
+    let msg = run(src, Manifold::sealed());
+    let lower = msg.as_str().unwrap().to_lowercase();
+    assert!(lower.contains("permission denied") || lower.contains("not available"));
+    assert!(
+        !lower.contains("id_rsa") && !lower.contains("/root/.ssh"),
+        "permission-denied message leaked the requested path: {lower}"
+    );
+}
+
+#[test]
+fn fs_write_outside_roots_message_does_not_leak_path() {
+    let root = temp_root();
+    let outside = std::env::temp_dir().join("afterburner-leak-probe-xyz");
+    let src = format!(
+        r#"
+        module.exports = () => {{
+            try {{ require('fs').writeFileSync({o:?}, 'x'); return 'unexpected'; }}
+            catch (e) {{ return e.message; }}
+        }};
+        "#,
+        o = outside.to_string_lossy()
+    );
+    let mut m = Manifold::sealed();
+    m.fs = FsAccess::ReadWrite(vec![root]);
+    let out = run(&src, m);
+    let lower = out.as_str().unwrap().to_lowercase();
+    assert!(lower.contains("outside allowed roots"));
+    assert!(
+        !lower.contains("afterburner-leak-probe-xyz"),
+        "outside-roots message leaked the path: {lower}"
+    );
+}
+
+#[test]
+fn scrypt_rejects_non_power_of_two_n() {
+    let src = r#"
+        module.exports = () => {
+            const crypto = require('crypto');
+            try {
+                crypto.scryptSync('pw', 'salt', 32, { N: 1000, r: 8, p: 1 });
+                return 'unexpected';
+            } catch (e) { return e.message; }
+        };
+    "#;
+    let mut m = Manifold::sealed();
+    m.crypto = true;
+    let out = run(src, m);
+    let lower = out.as_str().unwrap().to_lowercase();
+    assert!(
+        lower.contains("power of 2"),
+        "expected power-of-2 rejection; got {lower}"
+    );
 }
 
 #[test]

@@ -148,18 +148,17 @@ __register_module('fs', function(module, exports, require) {
     function createWriteStream(path, options) {
         options = options || {};
         var off = options.start || 0;
+        // Default flags='w' → overwrite, matching Node. Delete first so
+        // existing file contents past the written region don't linger.
         var truncateFirst = (options.flags === undefined) || options.flags === 'w';
         var ee = new EventEmitter();
         var writeFn = globalThis.__host_fs_write_chunk;
         if (typeof writeFn !== 'function') {
-            // Defer emission so callers can attach 'error' first.
-            Promise.resolve().then(function() {
-                ee.emit('error', new Error('fs.createWriteStream: not available'));
-            });
+            throw new Error('fs.createWriteStream: not available');
         }
-        if (truncateFirst) {
-            // Best-effort truncate: write zero bytes at offset 0.
-            try { writeFn(String(path), 0, ''); } catch (_) {}
+        if (truncateFirst && typeof globalThis.__host_fs_unlink_sync === 'function') {
+            // Ignore errors — file may not exist.
+            try { globalThis.__host_fs_unlink_sync(String(path)); } catch (_) {}
         }
         ee.write = function(chunk) {
             try {

@@ -36,6 +36,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_crypto_ciphers(linker)?;
     wrap_crypto_kdfs(linker)?;
     wrap_crypto_signing(linker)?;
+    wrap_crypto_signing_streaming(linker)?;
     wrap_os(linker)?;
     wrap_http(linker)?;
     wrap_dns(linker)?;
@@ -154,6 +155,116 @@ fn wrap_fs(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                             r#"{{"size":{},"isFile":{},"isDirectory":{},"mtimeMs":{}}}"#,
                             s.size, s.is_file, s.is_dir, s.mtime_ms
                         );
+                        write_out(&mut caller, &memory, out_ptr, out_cap, json.as_bytes())
+                    }
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    // Unlink / rename / mkdir / readdir — parity with the native path.
+    // Without these, `fs.createWriteStream(path, { flags: 'w' })` cannot
+    // truncate existing content before rewriting.
+    linker
+        .func_wrap(
+            NS,
+            "host_fs_unlink_sync",
+            |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let path = match read_str(&memory, &caller, ptr, len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let m = caller.data().manifold.clone();
+                match fs_host::unlink_sync(&path, &m) {
+                    Ok(()) => 0,
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_fs_rename_sync",
+            |mut caller: Caller<'_, HostState>,
+             from_ptr: i32, from_len: i32,
+             to_ptr: i32, to_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let from = match read_str(&memory, &caller, from_ptr, from_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let to = match read_str(&memory, &caller, to_ptr, to_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let m = caller.data().manifold.clone();
+                match fs_host::rename_sync(&from, &to, &m) {
+                    Ok(()) => 0,
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_fs_mkdir_sync",
+            |mut caller: Caller<'_, HostState>,
+             ptr: i32, len: i32,
+             recursive: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let path = match read_str(&memory, &caller, ptr, len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let m = caller.data().manifold.clone();
+                match fs_host::mkdir_sync(&path, recursive != 0, &m) {
+                    Ok(()) => 0,
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_fs_readdir_sync",
+            |mut caller: Caller<'_, HostState>,
+             ptr: i32, len: i32,
+             out_ptr: i32, out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let path = match read_str(&memory, &caller, ptr, len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let m = caller.data().manifold.clone();
+                match fs_host::readdir_sync(&path, &m) {
+                    Ok(names) => {
+                        let mut json = String::from("[");
+                        for (i, name) in names.iter().enumerate() {
+                            if i > 0 {
+                                json.push(',');
+                            }
+                            json.push_str(&js_string_literal(name));
+                        }
+                        json.push(']');
                         write_out(&mut caller, &memory, out_ptr, out_cap, json.as_bytes())
                     }
                     Err(e) => map_err(&mut caller, e),
@@ -303,10 +414,12 @@ fn wrap_http(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 match http_host::request(&method, &url, &[], body.as_deref(), &m) {
                     Ok(resp) => {
                         let body_text = String::from_utf8_lossy(&resp.body).into_owned();
+                        let body_b64 = B64.encode(&resp.body);
                         let json = format!(
-                            r#"{{"status":{},"body":{}}}"#,
+                            r#"{{"status":{},"body":{},"body_b64":{}}}"#,
                             resp.status,
-                            js_string_literal(&body_text)
+                            js_string_literal(&body_text),
+                            js_string_literal(&body_b64),
                         );
                         write_out(&mut caller, &memory, out_ptr, out_cap, json.as_bytes())
                     }
@@ -831,6 +944,153 @@ fn wrap_crypto_signing(linker: &mut Linker<HostState>) -> Result<(), Afterburner
     Ok(())
 }
 
+// ---- streaming sign / verify --------------------------------------------
+
+fn wrap_crypto_signing_streaming(
+    linker: &mut Linker<HostState>,
+) -> Result<(), AfterburnerError> {
+    linker
+        .func_wrap(
+            NS,
+            "host_crypto_sign_open",
+            |mut caller: Caller<'_, HostState>,
+             algo_ptr: i32,
+             algo_len: i32|
+             -> i64 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return 0;
+                };
+                let algo = match read_str(&memory, &caller, algo_ptr, algo_len) {
+                    Some(s) => s,
+                    None => return 0,
+                };
+                match caller.data().sign_handles.open(&algo) {
+                    Ok(id) => id as i64,
+                    Err(e) => {
+                        record(&mut caller, &e.to_string());
+                        0
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_crypto_sign_update",
+            |mut caller: Caller<'_, HostState>,
+             handle: i64,
+             data_ptr: i32,
+             data_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let data_b64 = match read_str(&memory, &caller, data_ptr, data_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let data = match B64.decode(data_b64.as_bytes()) {
+                    Ok(v) => v,
+                    Err(_) => return E_OTHER,
+                };
+                match caller.data().sign_handles.update(handle as u64, &data) {
+                    Ok(()) => 0,
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_crypto_sign_finalize",
+            |mut caller: Caller<'_, HostState>,
+             handle: i64,
+             algo_ptr: i32,
+             algo_len: i32,
+             key_ptr: i32,
+             key_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let algo = match read_str(&memory, &caller, algo_ptr, algo_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let key_pem = match read_str(&memory, &caller, key_ptr, key_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let state = match caller.data().sign_handles.take(handle as u64) {
+                    Ok(s) => s,
+                    Err(e) => return map_err(&mut caller, e),
+                };
+                let m = caller.data().manifold.clone();
+                match crypto_host::sign_finalize(&algo, &key_pem, state, &m) {
+                    Ok(sig) => {
+                        let encoded = B64.encode(&sig);
+                        write_out(&mut caller, &memory, out_ptr, out_cap, encoded.as_bytes())
+                    }
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_crypto_verify_finalize",
+            |mut caller: Caller<'_, HostState>,
+             handle: i64,
+             algo_ptr: i32,
+             algo_len: i32,
+             key_ptr: i32,
+             key_len: i32,
+             sig_ptr: i32,
+             sig_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let algo = match read_str(&memory, &caller, algo_ptr, algo_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let key_pem = match read_str(&memory, &caller, key_ptr, key_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let sig_b64 = match read_str(&memory, &caller, sig_ptr, sig_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let sig = match B64.decode(sig_b64.as_bytes()) {
+                    Ok(v) => v,
+                    Err(_) => return E_OTHER,
+                };
+                let state = match caller.data().sign_handles.take(handle as u64) {
+                    Ok(s) => s,
+                    Err(e) => return map_err(&mut caller, e),
+                };
+                let m = caller.data().manifold.clone();
+                match crypto_host::verify_finalize(&algo, &key_pem, state, &sig, &m) {
+                    Ok(true) => 1,
+                    Ok(false) => 0,
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+    Ok(())
+}
+
 // ---- state store --------------------------------------------------------
 
 fn wrap_state(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
@@ -908,6 +1168,27 @@ fn wrap_state(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 };
                 caller.data().state_store.delete(&key);
                 0
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_state_increment",
+            |mut caller: Caller<'_, HostState>,
+             key_ptr: i32,
+             key_len: i32,
+             delta: i64|
+             -> i64 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return 0;
+                };
+                let key = match read_str(&memory, &caller, key_ptr, key_len) {
+                    Some(s) => s,
+                    None => return 0,
+                };
+                caller.data().state_store.increment_i64(&key, delta)
             },
         )
         .map_err(link_err)?;

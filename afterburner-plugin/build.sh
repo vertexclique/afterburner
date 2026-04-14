@@ -38,4 +38,12 @@ trap 'rm -f "$tmp"' EXIT
 
 dest=../quickjs-provider/afterburner_plugin.wasm
 cp "$tmp" "$dest"
+
+# Record the SHA-256 of the plenum bundle the plugin was built against
+# so the host crate's build.rs can detect drift and fail cleanly.
+bundle=../afterburner-node-compat/generated/plenum_bundle.js
+sha=$(sha256sum "$bundle" | awk '{print $1}')
+printf '%s\n' "$sha" > "$dest.bundle-sha256"
+
 echo "wrote $(stat -c %s "$dest") bytes to $dest (Wizer-preinitialized)"
+echo "recorded bundle sha256: $sha → $dest.bundle-sha256"

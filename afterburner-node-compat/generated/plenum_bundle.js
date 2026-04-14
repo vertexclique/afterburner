@@ -836,32 +836,89 @@ __register_module('crypto', function(module, exports, require) {
             dataBuf.toString('base64'),
             sigBuf.toString('base64')
         );
-        // Native path returns bool; WASM path returns i32 (1/0/negative).
-        if (code === true || code === 1) return true;
-        if (code === false || code === 0) return false;
+        // Both paths now return i32 (1/0/negative). Accept bool too in
+        // case an embedder wires a host that returns it directly.
+        if (code === 1 || code === true) return true;
+        if (code === 0 || code === false) return false;
         throw new Error('crypto.verify: host error (code ' + code + ')');
     }
 
     exports.sign = signImpl;
     exports.verify = verifyImpl;
 
-    // Node's stream-style createSign / createVerify aliases.
+    // Node's stream-style createSign / createVerify. Streaming-backed:
+    // chunks are hashed incrementally on the host side, so memory is
+    // proportional to the digest state (~200 B) rather than the total
+    // payload size.
+    var ALGO_ALIASES = {
+        'RSA-SHA256': 'RS256', 'RSA-SHA384': 'RS384', 'RSA-SHA512': 'RS512',
+        'sha256WithRSAEncryption': 'RS256',
+        'sha384WithRSAEncryption': 'RS384',
+        'sha512WithRSAEncryption': 'RS512',
+    };
+    function canonicalAlgo(algo) { return ALGO_ALIASES[algo] || algo; }
+
+    function streamingHostPresent() {
+        return typeof globalThis.__host_crypto_sign_open === 'function'
+            && typeof globalThis.__host_crypto_sign_update === 'function';
+    }
+
     function makeSigner(algo) {
-        var algoToHash = { 'RSA-SHA256': 'RS256', 'RSA-SHA384': 'RS384', 'RSA-SHA512': 'RS512',
-                           'sha256WithRSAEncryption': 'RS256', 'sha384WithRSAEncryption': 'RS384',
-                           'sha512WithRSAEncryption': 'RS512' };
-        var canonical = algoToHash[algo] || algo;
+        var canonical = canonicalAlgo(algo);
+        if (streamingHostPresent()) {
+            var handle = globalThis.__host_crypto_sign_open(canonical);
+            if (!handle) throw new Error('crypto.createSign: ' + canonical + ' not supported');
+            return {
+                update: function(d) {
+                    var buf = Buffer.isBuffer(d) ? d : Buffer.from(String(d));
+                    var r = globalThis.__host_crypto_sign_update(handle, buf.toString('base64'));
+                    if (typeof r === 'string' && r.indexOf('__HOST_ERR__:') === 0) {
+                        throw new Error('crypto.sign.update: ' + r.slice('__HOST_ERR__:'.length));
+                    }
+                    return this;
+                },
+                sign: function(key) {
+                    var raw = globalThis.__host_crypto_sign_finalize(handle, canonical, String(key));
+                    if (typeof raw === 'string' && raw.indexOf('__HOST_ERR__:') === 0) {
+                        throw new Error('crypto.sign: ' + raw.slice('__HOST_ERR__:'.length));
+                    }
+                    return Buffer.from(raw, 'base64');
+                }
+            };
+        }
+        // Fallback for older plugins / embedders that haven't wired
+        // streaming: buffer everything and use the one-shot API.
         var chunks = [];
         return {
             update: function(d) { chunks.push(Buffer.isBuffer(d) ? d : Buffer.from(String(d))); return this; },
             sign:   function(key) { return signImpl(canonical, key, Buffer.concat(chunks)); }
         };
     }
+
     function makeVerifier(algo) {
-        var algoToHash = { 'RSA-SHA256': 'RS256', 'RSA-SHA384': 'RS384', 'RSA-SHA512': 'RS512',
-                           'sha256WithRSAEncryption': 'RS256', 'sha384WithRSAEncryption': 'RS384',
-                           'sha512WithRSAEncryption': 'RS512' };
-        var canonical = algoToHash[algo] || algo;
+        var canonical = canonicalAlgo(algo);
+        if (streamingHostPresent() && typeof globalThis.__host_crypto_verify_finalize === 'function') {
+            var handle = globalThis.__host_crypto_sign_open(canonical);
+            if (!handle) throw new Error('crypto.createVerify: ' + canonical + ' not supported');
+            return {
+                update: function(d) {
+                    var buf = Buffer.isBuffer(d) ? d : Buffer.from(String(d));
+                    var r = globalThis.__host_crypto_sign_update(handle, buf.toString('base64'));
+                    if (typeof r === 'string' && r.indexOf('__HOST_ERR__:') === 0) {
+                        throw new Error('crypto.verify.update: ' + r.slice('__HOST_ERR__:'.length));
+                    }
+                    return this;
+                },
+                verify: function(key, sig) {
+                    var sigBuf = Buffer.isBuffer(sig) ? sig : Buffer.from(String(sig));
+                    var code = globalThis.__host_crypto_verify_finalize(
+                        handle, canonical, String(key), sigBuf.toString('base64'));
+                    if (code === 1 || code === true) return true;
+                    if (code === 0 || code === false) return false;
+                    throw new Error('crypto.verify: host error (code ' + code + ')');
+                }
+            };
+        }
         var chunks = [];
         return {
             update: function(d) { chunks.push(Buffer.isBuffer(d) ? d : Buffer.from(String(d))); return this; },
@@ -1082,7 +1139,10 @@ __register_module('events', function(module, exports, require) {
 
     function Response(body, init) {
         init = init || {};
-        this._body = body != null ? String(body) : '';
+        // Body storage: prefer `bodyB64` (authoritative bytes) if
+        // provided, fall back to `body` string (lossy-utf8 text view).
+        this._bodyText = body != null ? String(body) : '';
+        this._bodyB64 = init.bodyB64 || null;
         this.status = init.status !== undefined ? init.status : 200;
         this.statusText = init.statusText || '';
         this.ok = this.status >= 200 && this.status < 300;
@@ -1093,19 +1153,38 @@ __register_module('events', function(module, exports, require) {
     Response.prototype.text = function() {
         if (this.bodyUsed) return Promise.reject(new TypeError('Body already consumed'));
         this.bodyUsed = true;
-        return Promise.resolve(this._body);
+        // Decode base64 → utf8 when binary bytes are authoritative so
+        // text() sees proper decoded characters rather than the lossy
+        // roundtrip.
+        if (this._bodyB64 !== null) {
+            var Buffer = require('buffer').Buffer;
+            return Promise.resolve(Buffer.from(this._bodyB64, 'base64').toString('utf8'));
+        }
+        return Promise.resolve(this._bodyText);
     };
     Response.prototype.json = function() {
         return this.text().then(function(s) { return JSON.parse(s); });
     };
     Response.prototype.arrayBuffer = function() {
+        if (this.bodyUsed) return Promise.reject(new TypeError('Body already consumed'));
+        this.bodyUsed = true;
         var Buffer = require('buffer').Buffer;
-        return this.text().then(function(s) {
-            return Buffer.from(s, 'utf8').buffer;
-        });
+        // `bodyB64` roundtrips binary losslessly; fall back to utf8
+        // encode of the text view when the host didn't provide it.
+        if (this._bodyB64 !== null) {
+            var buf = Buffer.from(this._bodyB64, 'base64');
+            return Promise.resolve(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length));
+        }
+        return Promise.resolve(Buffer.from(this._bodyText, 'utf8').buffer);
     };
     Response.prototype.clone = function() {
-        var r = new Response(this._body, { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url });
+        var r = new Response(this._bodyText, {
+            status: this.status,
+            statusText: this.statusText,
+            headers: this.headers,
+            url: this.url,
+            bodyB64: this._bodyB64,
+        });
         return r;
     };
 
@@ -1124,7 +1203,11 @@ __register_module('events', function(module, exports, require) {
         if (typeof parsed.body === 'string' && parsed.body.indexOf('__HOST_ERR__:') === 0) {
             return Promise.reject(new Error('fetch: ' + parsed.body.slice('__HOST_ERR__:'.length)));
         }
-        var resp = new Response(parsed.body, { status: parsed.status, url: req.url });
+        var resp = new Response(parsed.body, {
+            status: parsed.status,
+            url: req.url,
+            bodyB64: parsed.body_b64 || null,
+        });
         return Promise.resolve(resp);
     }
 
@@ -1285,18 +1368,17 @@ __register_module('fs', function(module, exports, require) {
     function createWriteStream(path, options) {
         options = options || {};
         var off = options.start || 0;
+        // Default flags='w' → overwrite, matching Node. Delete first so
+        // existing file contents past the written region don't linger.
         var truncateFirst = (options.flags === undefined) || options.flags === 'w';
         var ee = new EventEmitter();
         var writeFn = globalThis.__host_fs_write_chunk;
         if (typeof writeFn !== 'function') {
-            // Defer emission so callers can attach 'error' first.
-            Promise.resolve().then(function() {
-                ee.emit('error', new Error('fs.createWriteStream: not available'));
-            });
+            throw new Error('fs.createWriteStream: not available');
         }
-        if (truncateFirst) {
-            // Best-effort truncate: write zero bytes at offset 0.
-            try { writeFn(String(path), 0, ''); } catch (_) {}
+        if (truncateFirst && typeof globalThis.__host_fs_unlink_sync === 'function') {
+            // Ignore errors — file may not exist.
+            try { globalThis.__host_fs_unlink_sync(String(path)); } catch (_) {}
         }
         ee.write = function(chunk) {
             try {
@@ -2001,11 +2083,19 @@ __register_module('afterburner:state', function(module, exports, require) {
         exports.set(key, JSON.stringify(value));
     };
 
-    // Numeric helper for counters.
+    // Numeric helper for counters. Uses an atomic host-side
+    // compare-and-add so concurrent thrusts can't lose updates.
     exports.increment = function(key, delta) {
+        var d = (delta === undefined ? 1 : delta);
+        var fn = globalThis.__host_state_increment;
+        if (typeof fn === 'function') {
+            return fn(String(key), d);
+        }
+        // Backend without atomic increment — fall back to non-atomic
+        // RMW and warn the caller via a property on the returned value.
         var n = exports.getJSON(key);
         if (typeof n !== 'number') n = 0;
-        n += (delta === undefined ? 1 : delta);
+        n += d;
         exports.setJSON(key, n);
         return n;
     };

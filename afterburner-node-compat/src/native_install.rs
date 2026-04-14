@@ -7,10 +7,17 @@
 //! to the corresponding Rust `*_host` module, and translates errors
 //! into JS exceptions via `Exception::throw_message`.
 
+use crate::sign_handles::SignHandleStore;
 use crate::{
     active_manifold, child_process_host, crypto_host, dns_host, fs_host, http_host, os_host,
     state_active, zlib_host,
 };
+
+// Thread-local sign/verify handle store. Each thread-local
+// `ThreadRuntime` owns its own — handles never cross thread boundaries.
+thread_local! {
+    static SIGN_HANDLES: SignHandleStore = SignHandleStore::new();
+}
 use afterburner_core::AfterburnerError;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -394,7 +401,84 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
         .map_err(err_to_ab)?;
     }
 
-    // ---- crypto sign / verify (RSA + ECDSA) -----------------------------
+    // ---- crypto streaming sign / verify ---------------------------------
+    g.set(
+        "__host_crypto_sign_open",
+        Function::new(ctx.clone(), |ctx: Ctx<'_>, algo: String| {
+            let id = SIGN_HANDLES
+                .with(|s| s.open(&algo))
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+            Ok::<_, rquickjs::Error>(id as f64)
+        })
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_crypto_sign_update",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, handle: f64, data_b64: String| {
+                let data = B64
+                    .decode(data_b64.as_bytes())
+                    .map_err(|e| Exception::throw_message(&ctx, &format!("data b64: {e}")))?;
+                SIGN_HANDLES
+                    .with(|s| s.update(handle as u64, &data))
+                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                Ok::<_, rquickjs::Error>(())
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_crypto_sign_finalize",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, handle: f64, algo: String, key_pem: String| {
+                let state = SIGN_HANDLES
+                    .with(|s| s.take(handle as u64))
+                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                let sig = active_manifold::with(|m| {
+                    crypto_host::sign_finalize(&algo, &key_pem, state, m)
+                })
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                Ok::<_, rquickjs::Error>(B64.encode(&sig))
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_crypto_verify_finalize",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>,
+             handle: f64,
+             algo: String,
+             key_pem: String,
+             sig_b64: String|
+             -> rquickjs::Result<i32> {
+                let sig = B64
+                    .decode(sig_b64.as_bytes())
+                    .map_err(|e| Exception::throw_message(&ctx, &format!("sig b64: {e}")))?;
+                let state = SIGN_HANDLES
+                    .with(|s| s.take(handle as u64))
+                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                let ok = active_manifold::with(|m| {
+                    crypto_host::verify_finalize(&algo, &key_pem, state, &sig, m)
+                })
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                Ok(if ok { 1 } else { 0 })
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    // ---- crypto one-shot sign / verify (RSA + ECDSA) --------------------
     g.set(
         "__host_crypto_sign",
         Function::new(
@@ -416,7 +500,12 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
         "__host_crypto_verify",
         Function::new(
             ctx.clone(),
-            |ctx: Ctx<'_>, algo: String, key_pem: String, data_b64: String, sig_b64: String| {
+            |ctx: Ctx<'_>,
+             algo: String,
+             key_pem: String,
+             data_b64: String,
+             sig_b64: String|
+             -> rquickjs::Result<i32> {
                 let data = B64
                     .decode(data_b64.as_bytes())
                     .map_err(|e| Exception::throw_message(&ctx, &format!("data b64: {e}")))?;
@@ -426,7 +515,9 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
                 let ok =
                     active_manifold::with(|m| crypto_host::verify(&algo, &key_pem, &data, &sig, m))
                         .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
-                Ok::<_, rquickjs::Error>(ok)
+                // Return i32 (1/0) to match the WASM path's i32 ABI so
+                // the JS polyfill sees the same shape regardless of engine.
+                Ok(if ok { 1 } else { 0 })
             },
         )
         .map_err(err_to_ab)?,
@@ -474,6 +565,17 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
             })
             .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
             Ok::<_, rquickjs::Error>(())
+        })
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_state_increment",
+        Function::new(ctx.clone(), |ctx: Ctx<'_>, key: String, delta: f64| {
+            let new_value = state_active::with(|store| Ok(store.increment_i64(&key, delta as i64)))
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+            Ok::<_, rquickjs::Error>(new_value as f64)
         })
         .map_err(err_to_ab)?,
     )
@@ -627,8 +729,10 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
     )
     .map_err(err_to_ab)?;
 
-    // HTTP also returns JSON text (body is embedded as a JS string) for
-    // the same lifetime reason.
+    // HTTP returns JSON text with `body_b64` carrying the authoritative
+    // bytes (base64) and `body` left as lossy-UTF-8 for backward-compat
+    // with callers that want a string view. Binary responses roundtrip
+    // cleanly through `body_b64`.
     g.set(
         "__host_http_request",
         Function::new(
@@ -639,10 +743,12 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
                 })
                 .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
                 let body_text = String::from_utf8_lossy(&resp.body).into_owned();
+                let body_b64 = B64.encode(&resp.body);
                 Ok::<_, rquickjs::Error>(format!(
-                    r#"{{"status":{},"body":{}}}"#,
+                    r#"{{"status":{},"body":{},"body_b64":{}}}"#,
                     resp.status,
-                    js_string_literal(&body_text)
+                    js_string_literal(&body_text),
+                    js_string_literal(&body_b64),
                 ))
             },
         )
