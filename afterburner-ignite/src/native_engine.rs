@@ -258,6 +258,18 @@ fn do_thrust(
 
 /// Build + evaluate the envelope-wrapped script and return
 /// `JSON.stringify(result)`.
+///
+/// Fast path: the user function returns a non-Promise. We `eval` the
+/// envelope, get a `String` back, done — no pending-job pump, no extra
+/// allocation. This is the vast majority of scripts (UDFs,
+/// transforms, Directus flow ops).
+///
+/// Slow path: the user function returns a Promise (directly or via
+/// `async`). We detect that, drain pending microtasks until the
+/// Promise resolves, then JSON-stringify the resolved value. Matches
+/// the Javy `event_loop(true)` behavior on the WASM side so scripts
+/// that use `fetch().then(...)` or `await` work identically across
+/// engines.
 fn run_script(ctx: &Ctx<'_>, source: &str, input_json: &str) -> Result<String> {
     let stage = format!(
         r#"
@@ -271,14 +283,37 @@ fn run_script(ctx: &Ctx<'_>, source: &str, input_json: &str) -> Result<String> {
             }})();
             var __fn = module.exports;
             var __result = (typeof __fn === 'function') ? __fn(__input) : __fn;
-            return JSON.stringify(__result === undefined ? null : __result);
+            // If the user didn't return a thenable, hand back the
+            // stringified result directly — no Promise wrap, no pump.
+            if (__result === null || typeof __result !== 'object' || typeof __result.then !== 'function') {{
+                return JSON.stringify(__result === undefined ? null : __result);
+            }}
+            // Slow path: thenable. Return the Promise chain; caller
+            // will pump microtasks and `.finish::<String>()` on it.
+            return __result.then(function(v) {{
+                return JSON.stringify(v === undefined ? null : v);
+            }});
         }})()
         "#,
         input = js_string_literal(input_json),
         user_source = source,
     );
-    let result: String = ctx.eval(stage.as_bytes()).map_err(map_rquickjs_err)?;
-    Ok(result)
+    let result_val: rquickjs::Value<'_> = ctx.eval(stage.as_bytes()).map_err(map_rquickjs_err)?;
+
+    // Fast path: plain string result — done.
+    if let Some(s) = result_val.as_string() {
+        return s
+            .to_string()
+            .map_err(|e| AfterburnerError::Engine(format!("result to_string: {e}")));
+    }
+
+    // Slow path: result is a Promise. Pump microtasks until the queue
+    // drains, then resolve. Fuel accounting keeps runaway microtask
+    // chains bounded via the interrupt handler installed by the caller.
+    while ctx.execute_pending_job() {}
+    let promise = rquickjs::Promise::from_value(result_val.clone())
+        .map_err(|e| AfterburnerError::Engine(format!("Promise::from_value: {e}")))?;
+    promise.finish::<String>().map_err(map_rquickjs_err)
 }
 
 /// Convert rquickjs errors to the typed `AfterburnerError` set.

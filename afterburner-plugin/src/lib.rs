@@ -923,8 +923,10 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
             "__host_get_env",
             Func::from(|key: String| -> Option<String> {
                 let kb = key.as_bytes();
-                call_read(|out, cap| unsafe { host_get_env(kb.as_ptr(), kb.len() as u32, out, cap) })
-                    .ok()
+                call_read(|out, cap| unsafe {
+                    host_get_env(kb.as_ptr(), kb.len() as u32, out, cap)
+                })
+                .ok()
             }),
         );
 
@@ -1069,6 +1071,18 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
 
 fn config() -> Config {
     let mut c = Config::default();
+    // `event_loop(true)` makes Javy automatically drain pending microtasks
+    // after every `invoke` call — required for `fetch().then(...)`,
+    // `await`, `setTimeout(fn, 0)`, and any Promise chain. Without it,
+    // scheduling a microtask traps with "Pending jobs in the event
+    // queue. Scheduling events is not supported when the event-loop
+    // runtime config is not enabled."
+    //
+    // `event_loop` lives on the outer `javy_plugin_api::Config`;
+    // `text_encoding` / `javy_stream_io` are on the inner `javy::Config`
+    // reached through `DerefMut`. Two passes because the chain returns
+    // the inner config, not the outer one.
+    c.event_loop(true);
     c.text_encoding(true).javy_stream_io(true);
     c
 }
@@ -1160,6 +1174,11 @@ fn write_stderr(bytes: &[u8]) {
 fn wrap_user_source(user: &str, input_json: &str) -> String {
     let user_lit = js_string_literal(user);
     let input_lit = js_string_literal(input_json);
+    // If the user function returns a Promise, we let Javy's event loop
+    // drain it via `handle_maybe_promise` (requires `event_loop(true)`
+    // in the plugin config) and write the resolved value through a
+    // `.then`. The envelope's top-level expression therefore yields
+    // the Promise itself, which Javy pumps to completion.
     format!(
         r#"
         function __ab_write_stdout(s) {{
@@ -1171,7 +1190,13 @@ fn wrap_user_source(user: &str, input_json: &str) -> String {
         __ab_user(__ab_module, __ab_module.exports, globalThis.require);
         const __ab_fn = __ab_module.exports;
         const __ab_result = (typeof __ab_fn === 'function') ? __ab_fn(__ab_data) : __ab_fn;
-        __ab_write_stdout(JSON.stringify(__ab_result === undefined ? null : __ab_result));
+        if (__ab_result !== null && typeof __ab_result === 'object' && typeof __ab_result.then === 'function') {{
+            __ab_result.then(function(v) {{
+                __ab_write_stdout(JSON.stringify(v === undefined ? null : v));
+            }});
+        }} else {{
+            __ab_write_stdout(JSON.stringify(__ab_result === undefined ? null : __ab_result));
+        }}
         "#
     )
 }
