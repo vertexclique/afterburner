@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="art/png/afterburner-bg-2000x500.png" alt="Afterburner" width="100%"/>
+  <img src="https://raw.githubusercontent.com/vertexclique/afterburner/main/art/png/afterburner-bg-2000x500.png" alt="Afterburner" width="100%"/>
 </p>
 
 <p align="center">
-  <strong>Run user-supplied JS at native speed via <code>rquickjs</code>, or fully sandboxed via Wasmtime — same API, same capability gates.</strong>
+  <strong>A sandboxed JavaScript VM for Rust. Execute untrusted scripts with memory limits, timeouts, capability-gated I/O, and threading.</strong>
 </p>
 
 <p align="center">
@@ -15,7 +15,7 @@
 
 ---
 
-Afterburner exposes a single `Combustor` trait backed by two interchangeable engines — native `rquickjs` for sub-microsecond throughput, and Wasmtime + QuickJS-in-WASM for untrusted isolation. Node.js built-ins (`fs`, `crypto`, `http`, `zlib`, `child_process`, …) are gated behind **`Manifold`** capability controls.
+Afterburner lets you load, execute, and unload JavaScript from Rust with hard resource limits and fine-grained permission controls. Node.js built-ins — `fs`, `crypto`, `http`, `zlib`, `child_process`, and more — are available but locked behind capability gates you configure per-script.
 
 ```rust
 use afterburner_flow::FlowEngine;
