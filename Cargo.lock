@@ -136,6 +136,7 @@ dependencies = [
 name = "afterburner-plugin"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "javy-plugin-api",
  "serde_json",
 ]

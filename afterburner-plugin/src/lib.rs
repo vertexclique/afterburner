@@ -300,6 +300,11 @@ unsafe extern "C" {
     ) -> i32;
 
     fn host_last_error(out_ptr: *mut u8, out_cap: u32) -> i32;
+
+    /// Bytecode-cache invoke path: returns the per-thrust input JSON
+    /// bytes from `HostState::pending_input`. JS callers use the
+    /// `__AB_GET_INPUT__` global installed in `modify_runtime`.
+    fn host_get_input(out_ptr: *mut u8, out_cap: u32) -> i32;
 }
 
 /// Default buffer size for variable-length host responses. The retry
@@ -367,6 +372,37 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
                     String::from_utf8_lossy(&buf).into_owned()
                 } else {
                     String::new()
+                }
+            }),
+        );
+
+        // Bytecode-cache invoke path: pulls the per-thrust input JSON
+        // bytes from `HostState::pending_input`. The cached wrapped
+        // source calls this at the top of every invocation, replacing
+        // what would otherwise be a per-thrust preamble compile.
+        let _ = globals.set(
+            "__AB_GET_INPUT__",
+            Func::from(|| -> String {
+                // 64 KiB initial buffer covers the vast majority of
+                // typical UDF inputs in one call. The host returns
+                // `E_BUF_TOO_SMALL = -4` if more is needed; we retry
+                // doubling.
+                let mut buf = vec![0u8; 64 * 1024];
+                loop {
+                    let n = unsafe { host_get_input(buf.as_mut_ptr(), buf.len() as u32) };
+                    if n >= 0 {
+                        buf.truncate(n as usize);
+                        return String::from_utf8_lossy(&buf).into_owned();
+                    }
+                    if n == -4 {
+                        // BufTooSmall — double and retry.
+                        let new_cap = buf.len().saturating_mul(2);
+                        buf.resize(new_cap, 0);
+                        continue;
+                    }
+                    // Any other error → empty input. Caller's
+                    // JSON.parse will surface the failure clearly.
+                    return String::new();
                 }
             }),
         );
@@ -1094,13 +1130,31 @@ pub extern "C" fn initialize_runtime() {
     }
 }
 
-// ---- custom _start that reads (source, input) from stdin --------------
+// ---- custom _start: dispatcher over compile / invoke / legacy modes ----
 
-/// Reads the whole envelope from stdin. Envelope format:
-///   `{"source": "...js...", "input": <any json>}`
-/// Wraps `source` with the I/O envelope and drives
-/// `compile_src` + `invoke`. The wrapped source writes the JSON result
-/// of the user function to stdout.
+/// `_start` reads a JSON envelope from stdin and dispatches by `mode`:
+///
+/// | mode        | envelope shape                              | output                       |
+/// |-------------|---------------------------------------------|------------------------------|
+/// | `"compile"` | `{ mode, source: "..." }`                   | base64(bytecode) on stdout   |
+/// | `"invoke"`  | `{ mode, bytecode_b64: "...", input: <any> }` | wrapped script's JSON output |
+/// | (omitted)   | `{ source: "...", input: <any> }`           | wrapped script's JSON output |
+///
+/// **Compile mode** wraps the user source with the input-via-global
+/// template and runs `javy_plugin_api::compile_src`. The host caches
+/// the returned bytecode by `ScriptId.hash`, so repeated thrusts of
+/// the same script never re-pay the compile cost.
+///
+/// **Invoke mode** decodes the cached bytecode, runs a tiny preamble
+/// that publishes `globalThis.__AB_INPUT_STR__` (JS sees it, the
+/// wrapped script `JSON.parse`s it), then runs the cached bytecode.
+/// Two `invoke` calls share the same Javy `Runtime` for the duration
+/// of this Store, so the preamble's global is visible to the main
+/// bytecode.
+///
+/// **Legacy mode** is the original compile-then-run-source-and-input
+/// shape, retained for back-compat with callers that haven't migrated
+/// to the cached envelope.
 #[unsafe(export_name = "_start")]
 pub extern "C" fn start() {
     let envelope = match read_stdin() {
@@ -1113,8 +1167,64 @@ pub extern "C" fn start() {
         Err(_) => core::arch::wasm32::unreachable(),
     };
 
-    let source = parsed.get("source").and_then(|v| v.as_str()).unwrap_or("");
-    let input = parsed
+    let mode = parsed.get("mode").and_then(|v| v.as_str());
+    match mode {
+        Some("compile") => run_compile_mode(&parsed),
+        Some("invoke") => run_invoke_mode(&parsed),
+        _ => run_legacy_mode(&parsed),
+    }
+}
+
+fn run_compile_mode(envelope: &serde_json::Value) {
+    let source = envelope
+        .get("source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let wrapped = wrap_user_source_with_input_global(source);
+    let bytecode = match javy_plugin_api::compile_src(wrapped.as_bytes()) {
+        Ok(bc) => bc,
+        Err(e) => {
+            let msg = format!("compile_src: {e}\n");
+            write_stderr(msg.as_bytes());
+            core::arch::wasm32::unreachable()
+        }
+    };
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytecode);
+    write_stdout(b64.as_bytes());
+}
+
+fn run_invoke_mode(envelope: &serde_json::Value) {
+    use base64::Engine;
+    let b64 = envelope
+        .get("bytecode_b64")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let bytecode = match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => {
+            let msg = format!("invoke: bytecode_b64 decode: {e}\n");
+            write_stderr(msg.as_bytes());
+            core::arch::wasm32::unreachable()
+        }
+    };
+
+    // Input is delivered via the `host_get_input` import (called from
+    // JS via `__AB_GET_INPUT__()`); not via the envelope. That keeps
+    // this path a single `invoke` — no per-call preamble compile.
+    if let Err(e) = javy_plugin_api::invoke(&bytecode, None) {
+        let msg = format!("invoke: cached bytecode: {e}\n");
+        write_stderr(msg.as_bytes());
+        core::arch::wasm32::unreachable()
+    }
+}
+
+fn run_legacy_mode(envelope: &serde_json::Value) {
+    let source = envelope
+        .get("source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let input = envelope
         .get("input")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
@@ -1136,6 +1246,16 @@ pub extern "C" fn start() {
         write_stderr(msg.as_bytes());
         core::arch::wasm32::unreachable()
     }
+}
+
+fn write_stdout(bytes: &[u8]) {
+    let iov = wasi::Ciovec {
+        buf: bytes.as_ptr(),
+        buf_len: bytes.len(),
+    };
+    let iov_arr = [iov];
+    let mut nwritten: usize = 0;
+    let _ = unsafe { wasi::fd_write_raw(1, iov_arr.as_ptr(), 1, &mut nwritten) };
 }
 
 fn read_stdin() -> Result<Vec<u8>, ()> {
@@ -1192,6 +1312,34 @@ fn wrap_user_source(user: &str, input_json: &str) -> String {
             Javy.IO.writeSync(1, new TextEncoder().encode(s));
         }}
         const __ab_data = JSON.parse({input_lit});
+        const __ab_module = {{ exports: undefined }};
+        const __ab_user = new Function('module', 'exports', 'require', {user_lit});
+        __ab_user(__ab_module, __ab_module.exports, globalThis.require);
+        const __ab_fn = __ab_module.exports;
+        const __ab_maybe = (typeof __ab_fn === 'function') ? __ab_fn(__ab_data) : __ab_fn;
+        const __ab_result = (__ab_maybe !== null && typeof __ab_maybe === 'object' && typeof __ab_maybe.then === 'function')
+            ? await __ab_maybe
+            : __ab_maybe;
+        __ab_write_stdout(JSON.stringify(__ab_result === undefined ? null : __ab_result));
+        "#
+    )
+}
+
+/// Bytecode-cache variant of [`wrap_user_source`]. The compiled
+/// bytecode is *input-agnostic* — it pulls the per-call input JSON
+/// directly from the host via the `__AB_GET_INPUT__` global installed
+/// in `modify_runtime`. Identical Promise / await semantics to the
+/// inlined-input version above; the only difference is the input
+/// source. Skipping the per-call preamble compile cuts ~150 µs from
+/// the hot path.
+fn wrap_user_source_with_input_global(user: &str) -> String {
+    let user_lit = js_string_literal(user);
+    format!(
+        r#"
+        function __ab_write_stdout(s) {{
+            Javy.IO.writeSync(1, new TextEncoder().encode(s));
+        }}
+        const __ab_data = JSON.parse(__AB_GET_INPUT__());
         const __ab_module = {{ exports: undefined }};
         const __ab_user = new Function('module', 'exports', 'require', {user_lit});
         __ab_user(__ab_module, __ab_module.exports, globalThis.require);

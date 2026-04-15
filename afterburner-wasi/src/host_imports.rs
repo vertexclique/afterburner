@@ -45,6 +45,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_state(linker)?;
     wrap_host_context(linker)?;
     wrap_last_error(linker)?;
+    wrap_input(linker)?;
     Ok(())
 }
 
@@ -1506,6 +1507,34 @@ fn wrap_last_error(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErro
                 };
                 let msg = caller.data().last_error.clone();
                 write_out(&mut caller, &memory, out_ptr, out_cap, msg.as_bytes())
+            },
+        )
+        .map_err(link_err)?;
+    Ok(())
+}
+
+// ---- input slot (bytecode-cache invoke path) ----------------------------
+//
+// The plugin's bytecode-cache `invoke` mode reads the per-thrust input
+// JSON from `HostState::pending_input` via this import — which lets us
+// skip the per-thrust preamble compile that would otherwise publish
+// the input as a JS global. The cached wrapped source calls
+// `__AB_GET_INPUT__()` (installed in `modify_runtime`) which routes
+// here.
+fn wrap_input(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    linker
+        .func_wrap(
+            NS,
+            "host_get_input",
+            |mut caller: Caller<'_, HostState>, out_ptr: i32, out_cap: i32| -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                // Clone is required because `write_out` borrows the
+                // store mutably for the memory write; we can't hold a
+                // shared borrow on `pending_input` simultaneously.
+                let input = caller.data().pending_input.clone();
+                write_out(&mut caller, &memory, out_ptr, out_cap, &input)
             },
         )
         .map_err(link_err)?;

@@ -13,3 +13,8 @@ crate-type = ["cdylib"]
 [dependencies]
 javy-plugin-api.workspace = true
 serde_json.workspace = true
+# `base64` is needed for the bytecode-cache envelope: ignite() compiles
+# user source via the plugin's `compile` mode and gets QuickJS bytecode
+# back as base64 on stdout; thrust() ships the cached bytecode back via
+# the `invoke` mode envelope. `default-features = false` keeps it no_std.
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }

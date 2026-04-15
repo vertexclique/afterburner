@@ -36,6 +36,11 @@ pub struct HostState {
     /// this via the `host_last_error` import when a syscall returned a
     /// negative error code, and the JS glue surfaces it to the user.
     pub last_error: String,
+    /// JSON-serialized input bytes for the bytecode-cache invoke path.
+    /// Plugin reads this via the `host_get_input` import; lets us skip
+    /// the per-thrust preamble compile that would otherwise publish the
+    /// input as a JS global. Empty if the call uses the legacy envelope.
+    pub pending_input: Vec<u8>,
 }
 
 impl HostState {
@@ -78,7 +83,32 @@ impl HostState {
             sign_handles: SignHandleStore::new(),
             hash_handles: HashHandleStore::new(),
             last_error: String::new(),
+            pending_input: Vec::new(),
         }
+    }
+
+    /// Like `new` but pre-populates `pending_input` for the bytecode-
+    /// cache invoke path. The plugin reads this via `host_get_input`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_input(
+        envelope: &[u8],
+        input_json: Vec<u8>,
+        memory_bytes: Option<usize>,
+        stdout_capacity: usize,
+        manifold: Manifold,
+        state_store: SharedStateStore,
+        host_context: Option<Arc<dyn HostContext>>,
+    ) -> Self {
+        let mut s = Self::new(
+            envelope,
+            memory_bytes,
+            stdout_capacity,
+            manifold,
+            state_store,
+            host_context,
+        );
+        s.pending_input = input_json;
+        s
     }
 
     pub fn limiter(&mut self) -> &mut dyn ResourceLimiter {
