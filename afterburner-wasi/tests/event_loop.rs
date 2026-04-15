@@ -291,3 +291,73 @@ fn wasm_infinite_microtask_chain_is_bounded() {
         "expected Timeout or FuelExhausted from the WASM pump; got {out:?}"
     );
 }
+
+#[test]
+fn wasm_microtask_pump_bounded_by_fuel_alone() {
+    // P8 defense-in-depth: prove *fuel* — without any wall-clock
+    // timeout — also bounds the microtask pump. If the epoch mechanism
+    // ever silently broke on a new wasmtime version, fuel is still a
+    // hard cap.
+    //
+    // We set `timeout_ms = None` (wall clock disabled), `fuel =
+    // 100_000_000` (moderate but finite), and assert the pump
+    // terminates with `FuelExhausted` in bounded wall time.
+    let src = r#"
+        module.exports = () => new Promise(() => {
+            function step() { queueMicrotask(step); }
+            step();
+        });
+    "#;
+    let lim = FuelGauge {
+        fuel: Some(100_000_000),
+        timeout_ms: None,
+        manifold: Manifold::sealed(),
+        ..FuelGauge::default()
+    };
+    let c = wasm();
+    let id = c.ignite(src).unwrap();
+    let start = std::time::Instant::now();
+    let out = c.thrust(&id, &json!(null), &lim);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "fuel-only pump cap did not terminate within 10s (elapsed={elapsed:?})"
+    );
+    assert!(
+        matches!(out, Err(afterburner_core::AfterburnerError::FuelExhausted)),
+        "expected FuelExhausted, got {out:?}"
+    );
+}
+
+#[test]
+fn wasm_microtask_pump_bounded_by_timeout_alone() {
+    // P8 defense-in-depth (the other belt): prove *timeout* — without
+    // any fuel cap — also bounds the pump. Pairs with
+    // `wasm_microtask_pump_bounded_by_fuel_alone` so we know each
+    // mechanism stands on its own.
+    let src = r#"
+        module.exports = () => new Promise(() => {
+            function step() { queueMicrotask(step); }
+            step();
+        });
+    "#;
+    let lim = FuelGauge {
+        fuel: None,
+        timeout_ms: Some(500),
+        manifold: Manifold::sealed(),
+        ..FuelGauge::default()
+    };
+    let c = wasm();
+    let id = c.ignite(src).unwrap();
+    let start = std::time::Instant::now();
+    let out = c.thrust(&id, &json!(null), &lim);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "timeout-only pump cap did not terminate within 5s (elapsed={elapsed:?})"
+    );
+    assert!(
+        matches!(out, Err(afterburner_core::AfterburnerError::Timeout)),
+        "expected Timeout, got {out:?}"
+    );
+}
