@@ -47,7 +47,7 @@ use serde_json::Value;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -119,6 +119,18 @@ pub struct ThrustEngineConfig {
     /// `None`.
     pub admission_burst_tokens: u64,
 
+    /// Soft cap on a worker's local backlog before `thrust()` falls
+    /// through to the global injector. Plan §5.1 baseline is 256
+    /// (covers ~12 ms of 50 µs work). `0` falls back to that default.
+    pub local_queue_capacity: usize,
+
+    /// Hard cap on the global injector before `thrust()` returns
+    /// `AfterburnerError::Overloaded`. Sized at 16× the per-worker cap
+    /// by default — represents the system-wide in-flight ceiling that
+    /// keeps the pooling-allocator + reply-channel memory growth
+    /// bounded under burst.
+    pub injector_capacity: usize,
+
     /// WasmCombustor configuration shared across every worker. Cloned per
     /// worker construction; each worker adds its own `HostState` per call.
     pub wasm_config: WasmConfig,
@@ -131,6 +143,8 @@ impl Default for ThrustEngineConfig {
             io_workers: 0,
             admission_tokens_per_sec: None,
             admission_burst_tokens: 0,
+            local_queue_capacity: 256,
+            injector_capacity: 4096,
             wasm_config: WasmConfig::default(),
         }
     }
@@ -145,7 +159,68 @@ impl fmt::Debug for ThrustEngineConfig {
             .field("io_workers", &self.io_workers)
             .field("admission_tokens_per_sec", &self.admission_tokens_per_sec)
             .field("admission_burst_tokens", &self.admission_burst_tokens)
+            .field("local_queue_capacity", &self.local_queue_capacity)
+            .field("injector_capacity", &self.injector_capacity)
             .field("wasm_config", &"<opaque>")
+            .finish()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Bounded queue: depth-tracked unbounded channel
+// ─────────────────────────────────────────────────────────────────────────
+//
+// kovan-channel's bounded `send` blocks when full and there's no
+// `try_send` API. To get production-grade backpressure we layer an
+// `AtomicUsize` depth counter on top of an unbounded channel: enqueue
+// reserves a slot via `fetch_add` and rolls back on overflow; workers
+// `fetch_sub` after dequeue. Concurrent enqueues against a near-full
+// queue can momentarily overshoot `cap` by the number of in-flight
+// enqueuers — bounded and acceptable.
+
+struct BoundedQueue<T: 'static> {
+    sender: Sender<T>,
+    receiver: Receiver<T>,
+    depth: AtomicUsize,
+    cap: usize,
+}
+
+impl<T: 'static> BoundedQueue<T> {
+    fn new(cap: usize) -> Self {
+        let (tx, rx) = unbounded::<T>();
+        Self {
+            sender: tx,
+            receiver: rx,
+            depth: AtomicUsize::new(0),
+            cap,
+        }
+    }
+
+    /// Try to push. Returns `Err(item)` if the queue's depth has hit
+    /// the cap, leaving the item with the caller for re-routing.
+    fn try_push(&self, item: T) -> std::result::Result<(), T> {
+        let prev = self.depth.fetch_add(1, Ordering::AcqRel);
+        if prev >= self.cap {
+            self.depth.fetch_sub(1, Ordering::Release);
+            return Err(item);
+        }
+        self.sender.send(item);
+        Ok(())
+    }
+
+    /// Non-blocking pop. Pairs every `Some` with a depth decrement.
+    fn try_pop(&self) -> Option<T> {
+        let item = self.receiver.try_recv()?;
+        self.depth.fetch_sub(1, Ordering::Release);
+        Some(item)
+    }
+}
+
+impl<T: 'static> fmt::Debug for BoundedQueue<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BoundedQueue")
+            .field("depth", &self.depth.load(Ordering::Relaxed))
+            .field("cap", &self.cap)
             .finish()
     }
 }
@@ -161,6 +236,8 @@ pub struct ThrustEngineStats {
     pub thrusts_queued: u64,
     pub thrusts_completed: u64,
     pub thrusts_rejected: u64,
+    pub thrusts_overloaded: u64,
+    pub thrusts_via_injector: u64,
 }
 
 // Raw atomic counters kept on the engine — cloned into `ThrustEngineStats`
@@ -170,6 +247,8 @@ struct StatsCounters {
     thrusts_queued: AtomicU64,
     thrusts_completed: AtomicU64,
     thrusts_rejected: AtomicU64,
+    thrusts_overloaded: AtomicU64,
+    thrusts_via_injector: AtomicU64,
 }
 
 impl StatsCounters {
@@ -178,6 +257,8 @@ impl StatsCounters {
             thrusts_queued: self.thrusts_queued.load(Ordering::Relaxed),
             thrusts_completed: self.thrusts_completed.load(Ordering::Relaxed),
             thrusts_rejected: self.thrusts_rejected.load(Ordering::Relaxed),
+            thrusts_overloaded: self.thrusts_overloaded.load(Ordering::Relaxed),
+            thrusts_via_injector: self.thrusts_via_injector.load(Ordering::Relaxed),
         }
     }
 }
@@ -312,20 +393,26 @@ fn resolve_worker_count(requested: usize) -> usize {
 
 /// Multi-worker thrust engine.
 ///
-/// **T2 state:** N worker threads, each with its own kovan-channel
-/// unbounded queue. `thrust()` picks a worker via `hash(script_id) % N`
-/// for affinity, then pushes onto that worker's queue. Workers share a
-/// single `Arc<WasmCombustor>`, which owns the wasmtime `Engine` and
-/// pre-compiled plugin `Module`.
+/// **Production state:** N worker threads, each with its own
+/// depth-bounded queue (plan §5.1, cap = `local_queue_capacity`). A
+/// shared global injector (cap = `injector_capacity`) holds overflow
+/// when a worker's local queue is at the cap. `thrust()` routes by
+/// `hash(script_id) % N` for affinity; on local-full it falls through
+/// to the injector, and on injector-full it returns
+/// `AfterburnerError::Overloaded` immediately. Workers consume in
+/// order: own queue → injector → steal from peers → exp-backoff park.
 pub struct ThrustEngine {
     config: ThrustEngineConfig,
     combustor: Arc<WasmCombustor>,
     stats: Arc<StatsCounters>,
-    /// One sender per worker; index = worker id. `Option`-wrapped so
-    /// `Drop` can `take()` + drop all senders in one sweep, closing
-    /// every worker's queue.
-    worker_senders: Option<Vec<Sender<Job>>>,
-    /// Cached worker count — avoids re-reading `worker_senders.len()`
+    /// Per-worker bounded queues. Indexed by worker id. Shared with
+    /// workers via `Arc` so each worker can also steal from peers.
+    /// `Option`-wrapped so `Drop` can take ownership before joining.
+    worker_queues: Option<Arc<Vec<BoundedQueue<Job>>>>,
+    /// Global overflow queue. Filled when a worker's local queue is
+    /// at cap; drained by workers as a between-pop poll target.
+    injector: Option<Arc<BoundedQueue<Job>>>,
+    /// Cached worker count — avoids re-reading `worker_queues.len()`
     /// on the hot path.
     n_workers: usize,
     /// Token-bucket admission (T4). `None` disables the layer entirely —
@@ -354,23 +441,30 @@ impl ThrustEngine {
             .map(|rate| TokenBucketAdmission::new(rate, config.admission_burst_tokens));
 
         let n_workers = resolve_worker_count(config.compute_workers);
-        let mut senders = Vec::with_capacity(n_workers);
-        let mut receivers: Vec<Receiver<Job>> = Vec::with_capacity(n_workers);
+        let local_cap = if config.local_queue_capacity == 0 {
+            256
+        } else {
+            config.local_queue_capacity
+        };
+        let injector_cap = if config.injector_capacity == 0 {
+            local_cap.saturating_mul(16).max(1024)
+        } else {
+            config.injector_capacity
+        };
+
+        let mut queues: Vec<BoundedQueue<Job>> = Vec::with_capacity(n_workers);
         for _ in 0..n_workers {
-            let (tx, rx) = unbounded::<Job>();
-            senders.push(tx);
-            receivers.push(rx);
+            queues.push(BoundedQueue::new(local_cap));
         }
-        // Each worker carries the full receiver vector so it can
-        // try_recv any peer's queue when its own is empty (T3
-        // steal-when-idle). kovan-channel Receiver is Clone + MPMC.
-        let shared_receivers: Arc<Vec<Receiver<Job>>> = Arc::new(receivers);
+        let worker_queues: Arc<Vec<BoundedQueue<Job>>> = Arc::new(queues);
+        let injector: Arc<BoundedQueue<Job>> = Arc::new(BoundedQueue::new(injector_cap));
 
         let mut handles = Vec::with_capacity(n_workers);
         for worker_id in 0..n_workers {
             handles.push(spawn_worker(
                 worker_id,
-                shared_receivers.clone(),
+                worker_queues.clone(),
+                injector.clone(),
                 combustor.clone(),
                 stats.clone(),
                 shutdown.clone(),
@@ -381,7 +475,8 @@ impl ThrustEngine {
             config,
             combustor,
             stats,
-            worker_senders: Some(senders),
+            worker_queues: Some(worker_queues),
+            injector: Some(injector),
             n_workers,
             admission,
             shutdown,
@@ -410,9 +505,9 @@ impl ThrustEngine {
 
         // Engine shut down? Pre-resolve with a typed error so callers
         // don't hang on recv().
-        let senders = match self.worker_senders.as_ref() {
-            Some(s) => s,
-            None => {
+        let (queues, injector) = match (self.worker_queues.as_ref(), self.injector.as_ref()) {
+            (Some(q), Some(i)) => (q, i),
+            _ => {
                 self.stats.thrusts_rejected.fetch_add(1, Ordering::Relaxed);
                 reply_tx.send(Err(AfterburnerError::Engine(
                     "thrust engine is shut down".into(),
@@ -436,7 +531,7 @@ impl ThrustEngine {
 
         let worker_idx = route_worker(&id.hash, self.n_workers);
 
-        let job = Job {
+        let mut job = Job {
             id: *id,
             input,
             limits,
@@ -444,8 +539,34 @@ impl ThrustEngine {
             reply: reply_tx,
         };
 
-        self.stats.thrusts_queued.fetch_add(1, Ordering::Relaxed);
-        senders[worker_idx].send(job);
+        // Try local first (affinity). On overflow, try the global
+        // injector. On both full, return Overloaded — production-grade
+        // backpressure prevents memory/queue blow-up under burst.
+        match queues[worker_idx].try_push(job) {
+            Ok(()) => {
+                self.stats.thrusts_queued.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(returned) => {
+                job = returned;
+                match injector.try_push(job) {
+                    Ok(()) => {
+                        self.stats.thrusts_queued.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .thrusts_via_injector
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(returned) => {
+                        // Both queues at cap. Caller must back off.
+                        self.stats
+                            .thrusts_overloaded
+                            .fetch_add(1, Ordering::Relaxed);
+                        let reply = returned.reply;
+                        reply.send(Err(AfterburnerError::Overloaded));
+                        return ThrustHandle { rx: reply_rx };
+                    }
+                }
+            }
+        }
 
         ThrustHandle { rx: reply_rx }
     }
@@ -505,13 +626,16 @@ impl ThrustEngine {
 
 impl Drop for ThrustEngine {
     fn drop(&mut self) {
+        // Set the shutdown flag — workers poll it between iterations
+        // and exit on the next park. They don't block on `recv` (we
+        // use `try_pop`), so we don't need to close any channels to
+        // wake them.
         self.shutdown.store(true, Ordering::Release);
 
-        // Drop every worker's sender so all workers' `rx.recv()` calls
-        // return `None` and their loops fall through. Field-drop order
-        // alone wouldn't save us — custom Drop runs *before* any field
-        // drops.
-        drop(self.worker_senders.take());
+        // Drop the queue Arcs we own. Worker copies survive long
+        // enough to drain through their loops.
+        let _ = self.worker_queues.take();
+        let _ = self.injector.take();
 
         if let Some(workers) = self.workers.take() {
             for w in workers {
@@ -541,7 +665,8 @@ impl fmt::Debug for ThrustEngine {
 
 fn spawn_worker(
     worker_id: usize,
-    receivers: Arc<Vec<Receiver<Job>>>,
+    queues: Arc<Vec<BoundedQueue<Job>>>,
+    injector: Arc<BoundedQueue<Job>>,
     combustor: Arc<WasmCombustor>,
     stats: Arc<StatsCounters>,
     shutdown: Arc<AtomicBool>,
@@ -549,61 +674,89 @@ fn spawn_worker(
     thread::Builder::new()
         .name(format!("afterburner-thrust-{worker_id}"))
         .spawn(move || {
-            worker_loop(worker_id, receivers, combustor, stats, shutdown);
+            worker_loop(worker_id, queues, injector, combustor, stats, shutdown);
         })
         .expect("failed to spawn thrust worker")
 }
 
-/// Worker loop with steal-when-idle (T3, plan §5.2).
+/// Plan §5.2 worker loop (Tokio's poll-injector-every-N pattern at
+/// `INJECTOR_POLL_MASK + 1` = 64 local pops):
 ///
-/// 1. **Owner pop:** `try_recv` on this worker's queue (cheapest path).
-/// 2. **Steal sweep:** if local empty, `try_recv` each peer's queue
-///    starting at `(worker_id + 1) % n` to spread initial steal load
-///    around the ring rather than dogpiling worker 0 every time.
-/// 3. **Park:** if every queue is empty, sleep with exponential backoff
-///    (50 µs → 2 ms cap) and retry. Bounded idle-CPU; no dependency on
-///    a wakeup mechanism, no signals or futexes (Docker-cap-safe).
+/// 1. **Injector tick** (every 64th iter): `try_pop` the global
+///    injector first. Keeps overflow-shed thrusts from starving when
+///    locals are persistently busy.
+/// 2. **Owner pop** of this worker's local queue — fast path.
+/// 3. **Steal** half-search of peers' queues — drains imbalanced
+///    routing.
+/// 4. **Park** with exponential backoff (50 µs → 2 ms) when all
+///    queues are empty. No signals, no futexes — capability-safe.
+const INJECTOR_POLL_MASK: u64 = 63; // 64 = 1<<6
+
 fn worker_loop(
     worker_id: usize,
-    receivers: Arc<Vec<Receiver<Job>>>,
+    queues: Arc<Vec<BoundedQueue<Job>>>,
+    injector: Arc<BoundedQueue<Job>>,
     combustor: Arc<WasmCombustor>,
     stats: Arc<StatsCounters>,
     shutdown: Arc<AtomicBool>,
 ) {
-    let n = receivers.len();
-    let local = &receivers[worker_id];
+    let n = queues.len();
+    let local = &queues[worker_id];
 
     let initial_park = Duration::from_micros(50);
     let park_cap = Duration::from_millis(2);
     let mut park = initial_park;
+    let mut iter: u64 = 0;
 
     'outer: loop {
-        // Shutdown poll happens here so we don't add a check inside the
-        // hot-path branches below.
         if shutdown.load(Ordering::Acquire) {
             break;
         }
 
-        // 1. Owner pop.
-        if let Some(job) = local.try_recv() {
+        // 1. Injector tick — every 64 iterations, regardless of local
+        //    backlog. Without this, a steady stream of local hits would
+        //    pin injector overflow indefinitely.
+        if (iter & INJECTOR_POLL_MASK) == 0
+            && let Some(job) = injector.try_pop()
+        {
             execute(job, &combustor, &stats);
             park = initial_park;
+            iter = iter.wrapping_add(1);
             continue 'outer;
         }
 
-        // 2. Steal sweep — start at (id+1)%n and visit every peer once.
+        // 2. Owner pop.
+        if let Some(job) = local.try_pop() {
+            execute(job, &combustor, &stats);
+            park = initial_park;
+            iter = iter.wrapping_add(1);
+            continue 'outer;
+        }
+
+        // 3. Steal sweep — start at (id+1)%n and visit every peer once,
+        //    plus a second injector poll at the end (covers the case
+        //    where the iter mask hasn't ticked but the injector
+        //    just got fed by a thrust() overflow).
         for offset in 1..n {
             let idx = (worker_id + offset) % n;
-            if let Some(job) = receivers[idx].try_recv() {
+            if let Some(job) = queues[idx].try_pop() {
                 execute(job, &combustor, &stats);
                 park = initial_park;
+                iter = iter.wrapping_add(1);
                 continue 'outer;
             }
         }
+        if let Some(job) = injector.try_pop() {
+            execute(job, &combustor, &stats);
+            park = initial_park;
+            iter = iter.wrapping_add(1);
+            continue 'outer;
+        }
 
-        // 3. Idle: park with exponential backoff capped at 2 ms.
+        // 4. Park.
         thread::sleep(park);
         park = (park * 2).min(park_cap);
+        iter = iter.wrapping_add(1);
     }
 }
 
