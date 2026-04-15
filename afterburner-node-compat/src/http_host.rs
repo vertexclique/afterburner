@@ -3,8 +3,22 @@
 //!
 //! Gated behind `Manifold::net`. Hosts outside the policy allow-list
 //! (when present) are rejected before the request is even constructed.
+//!
+//! ### Per-call timeouts (T6.2 stopgap)
+//!
+//! Every call has a 30-second hard deadline applied via `ureq::Request::timeout`.
+//! That bounds the worst case of a compute worker wedging on a slow URL.
+//! The proper fix — moving HTTP to a dirty I/O pool with async-Wasmtime host
+//! imports — is plan §7.1 / T6.1. Until then, this timeout is the only thing
+//! between a slow upstream and a thrust hanging beyond its `FuelGauge::timeout_ms`.
 
 use afterburner_core::{AfterburnerError, Manifold, NetAccess, Result};
+use std::time::Duration;
+
+/// Hard ceiling on per-request wall clock. Below this every individual
+/// thrust's `FuelGauge::timeout_ms` is the active bound; above this we
+/// trip the ureq timeout and surface a host error.
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
@@ -41,7 +55,7 @@ pub fn request(
         }
     }
 
-    let mut req = ureq::request(method, url);
+    let mut req = ureq::request(method, url).timeout(HTTP_REQUEST_TIMEOUT);
     for (k, v) in headers {
         req = req.set(k, v);
     }

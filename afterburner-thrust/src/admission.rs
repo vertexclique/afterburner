@@ -133,9 +133,13 @@ mod tests {
 
     #[test]
     fn allows_up_to_burst_then_rejects() {
-        // 1000 tokens/sec, burst 5: five immediate allowances, then
-        // reject until refill kicks in.
-        let adm = TokenBucketAdmission::new(1_000, 5);
+        // 100 tokens/sec, burst 5 → period 10 ms, burst window 50 ms.
+        // Five tight-loop acquires complete in <1 ms even on a loaded
+        // box, well inside the 50 ms window — so the 6th deterministically
+        // rejects. Earlier the test used 1 000 tokens/sec (1 ms period,
+        // 5 ms window), which raced with debug-mode HopscotchMap
+        // lookups under CI load and occasionally allowed the 6th call.
+        let adm = TokenBucketAdmission::new(100, 5);
         let t = tid(1);
         for i in 0..5 {
             adm.try_acquire(t)
