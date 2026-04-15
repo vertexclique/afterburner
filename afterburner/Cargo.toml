@@ -1,0 +1,44 @@
+[package]
+name = "afterburner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Sandboxed JavaScript runtime for Rust. WASM (Wasmtime) + native (QuickJS) backends, multi-threaded scheduler, capability-gated host I/O — one ergonomic entry point."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "burn"
+path = "src/bin/burn.rs"
+required-features = ["bin"]
+
+[dependencies]
+afterburner-core = { workspace = true }
+afterburner-node-compat = { workspace = true }
+afterburner-wasi = { workspace = true, optional = true }
+afterburner-ignite = { workspace = true, optional = true }
+afterburner-adaptive = { workspace = true, optional = true }
+afterburner-flow = { workspace = true, optional = true }
+afterburner-thrust = { workspace = true, optional = true }
+serde_json = { workspace = true }
+# bin-only — gated behind `bin` feature so library consumers don't pull them.
+clap = { version = "4", features = ["derive"], optional = true }
+rustyline = { version = "14", optional = true }
+anyhow = { version = "1", optional = true }
+
+[features]
+default = ["wasm", "native", "thrust"]
+wasm = ["dep:afterburner-wasi"]
+native = ["dep:afterburner-ignite"]
+adaptive = ["dep:afterburner-adaptive", "wasm", "native"]
+thrust = ["dep:afterburner-thrust", "wasm"]
+flow = ["dep:afterburner-flow", "wasm"]
+# host-http propagates to afterburner-wasi only today; node-compat compiles
+# all host backends unconditionally (no feature block there).
+host-http = ["afterburner-wasi?/host-http"]
+# `bin` pulls in the CLI deps + selects the default modes that `burn`
+# assumes (adaptive for auto-tier, thrust for --workers).
+bin = ["dep:clap", "dep:rustyline", "dep:anyhow", "adaptive", "thrust"]

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "afterburner",
     "afterburner-core",
     "afterburner-wasi",
     "afterburner-ignite",
@@ -15,6 +16,7 @@ members = [
 # Keep it out of `cargo build --workspace` by trimming default-members;
 # the plugin is built explicitly via `afterburner-plugin/build.sh`.
 default-members = [
+    "afterburner",
     "afterburner-core",
     "afterburner-wasi",
     "afterburner-ignite",
@@ -24,6 +26,11 @@ default-members = [
     "afterburner-thrust",
 ]
 
+# `examples/*` are standalone Cargo projects (each with its own
+# [workspace] root). Exclude the directory defensively in case a
+# user drops a new example without the stanza.
+exclude = ["examples"]
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
@@ -32,6 +39,7 @@ authors = ["Theo Bulut <vertexclique@gmail.com>"]
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+afterburner = { path = "afterburner" }
 afterburner-core = { path = "afterburner-core" }
 afterburner-wasi = { path = "afterburner-wasi" }
 afterburner-ignite = { path = "afterburner-ignite" }
