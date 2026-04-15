@@ -1,13 +1,21 @@
-# Afterburner
+<p align="center">
+  <img src="art/png/afterburner-bg-2000x500.png" alt="Afterburner" width="100%"/>
+</p>
 
-A Rust workspace for running user-supplied JavaScript with two execution
-paths sharing one API: a trusted `rquickjs` path for sub-microsecond
-throughput and a fully sandboxed Wasmtime + QuickJS-in-WASM path for
-untrusted code. Every Node.js built-in an embedder needs — `path`,
-`fs`, `crypto`, `http`, `events`, `buffer`, `zlib`, `child_process`, …
-— is reachable through a capability gate called `Manifold`.
+<p align="center">
+  <strong>Run user-supplied JS at native speed via <code>rquickjs</code>, or fully sandboxed via Wasmtime — same API, same capability gates.</strong>
+</p>
 
-Two backends, one `Combustor` trait, one `FlowEngine`:
+<p align="center">
+  <a href="https://crates.io/crates/afterburner-core"><img src="https://img.shields.io/crates/v/afterburner-core?style=flat-square&color=e6832e" alt="crates.io"/></a>
+  <a href="https://docs.rs/afterburner-core"><img src="https://img.shields.io/docsrs/afterburner-core?style=flat-square&color=2a9d8f" alt="docs.rs"/></a>
+  <img src="https://img.shields.io/badge/rust-1.90%2B_(2024_ed)-blue?style=flat-square&logo=rust&logoColor=white" alt="MSRV"/>
+  <img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-green?style=flat-square" alt="License"/>
+</p>
+
+---
+
+Afterburner exposes a single `Combustor` trait backed by two interchangeable engines — native `rquickjs` for sub-microsecond throughput, and Wasmtime + QuickJS-in-WASM for untrusted isolation. Node.js built-ins (`fs`, `crypto`, `http`, `zlib`, `child_process`, …) are gated behind **`Manifold`** capability controls.
 
 ```rust
 use afterburner_flow::FlowEngine;
@@ -30,17 +38,21 @@ let id = engine.load(r#"
 let body = engine.execute(&id, &json!({ "key": "x.json" }))?;
 ```
 
-## Crates
+---
 
-| Crate                       | Purpose                                                   |
-|-----------------------------|-----------------------------------------------------------|
-| `afterburner-core`          | `Combustor` trait, `Manifold`, `FuelGauge`, `BurnCache`, level-gated logging |
-| `afterburner-ignite`        | Native QuickJS via `rquickjs`, thread-local runtimes      |
-| `afterburner-wasi`          | Wasmtime + Javy plugin sandbox with host-function imports |
-| `afterburner-node-compat`   | `plenum.js` polyfill bundle + Rust-backed host impls      |
-| `afterburner-flow`          | High-level `FlowEngine::load/execute/unload` API          |
-| `afterburner-adaptive`      | Flying Start: native → WASM tier switch                   |
-| `afterburner-plugin`        | WASM-side Javy plugin (`wasm32-wasip1`)                   |
+## Workspace Crates
+
+| Crate | Purpose |
+|:------|:--------|
+| **`afterburner-core`** | `Combustor` trait, `Manifold`, `FuelGauge`, `BurnCache`, level-gated logging |
+| **`afterburner-ignite`** | Native QuickJS via `rquickjs`, thread-local runtimes |
+| **`afterburner-wasi`** | Wasmtime + Javy plugin sandbox with host-function imports |
+| **`afterburner-node-compat`** | `plenum.js` polyfill bundle + Rust-backed host impls |
+| **`afterburner-flow`** | High-level `FlowEngine::load/execute/unload` API |
+| **`afterburner-adaptive`** | Flying Start: native → WASM tier switch |
+| **`afterburner-plugin`** | WASM-side Javy plugin (`wasm32-wasip1`) |
+
+---
 
 ## Requirements
 
@@ -53,23 +65,23 @@ Wizer-preinitialized `.wasm` at
 
 ### Build (default workspace)
 
-| Tool       | Version          | Notes                                          |
-|------------|------------------|------------------------------------------------|
-| Rust       | 1.90+ (2024 ed)  | `rustup install stable` on most systems        |
-| Cargo      | shipped with Rust| `cargo build` / `cargo test` work unmodified   |
-| libclang   | any recent       | required by `rquickjs-sys` bindgen             |
-| C compiler | any recent       | required by `rquickjs-sys` / QuickJS           |
+| Tool | Version | Notes |
+|:-----|:--------|:------|
+| Rust | 1.90+ (2024 ed) | `rustup install stable` on most systems |
+| Cargo | shipped with Rust | `cargo build` / `cargo test` work unmodified |
+| libclang | any recent | required by `rquickjs-sys` bindgen |
+| C compiler | any recent | required by `rquickjs-sys` / QuickJS |
 
-### Build (plugin regeneration only — optional)
+### Build (plugin regeneration — optional)
 
 Only needed when changing plugin Rust code, the WIT interface, or the
 plenum polyfill bundle. The committed `.wasm` is otherwise authoritative.
 
-| Tool              | Version      | How to get it                                                                 |
-|-------------------|--------------|-------------------------------------------------------------------------------|
-| `wasm32-wasip1`   | via rustup   | `rustup target add wasm32-wasip1`                                             |
-| `javy` CLI        | 8.1.1+       | `cargo install javy-cli` or download from https://github.com/bytecodealliance/javy/releases |
-| Node bundler      | not required | Plenum bundle is produced by a pure-Rust `build.rs` (concat + include_str!)    |
+| Tool | Version | How to get it |
+|:-----|:--------|:--------------|
+| `wasm32-wasip1` | via rustup | `rustup target add wasm32-wasip1` |
+| `javy` CLI | 8.1.1+ | `cargo install javy-cli` or [releases](https://github.com/bytecodealliance/javy/releases) |
+| Node bundler | not required | Plenum bundle is produced by a pure-Rust `build.rs` (concat + include_str!) |
 
 Regenerate the plugin:
 
@@ -84,24 +96,28 @@ cd afterburner-plugin
 ./build.sh     # writes to ../quickjs-provider/afterburner_plugin.wasm
 ```
 
+---
+
 ## Runbook
 
-| Command                                                       | What it does                                    |
-|---------------------------------------------------------------|-------------------------------------------------|
-| `cargo build`                                                 | Builds the six host crates (skips the plugin).  |
-| `cargo test --workspace --exclude afterburner-plugin`         | Runs the full 99-test suite.                    |
-| `cargo clippy --workspace --exclude afterburner-plugin --all-targets` | Linter check.                                   |
-| `cargo test -p afterburner-ignite --release perf_smoke`       | Native throughput smoke.                        |
-| `cargo test -p afterburner-wasi --release perf_smoke`         | WASM throughput smoke.                          |
-| `afterburner-plugin/build.sh`                                 | Rebuild + Wizer-preinit the plugin.             |
+| Command | What it does |
+|:--------|:-------------|
+| `cargo build` | Builds the six host crates (skips the plugin). |
+| `cargo test --workspace --exclude afterburner-plugin` | Runs the full 99-test suite. |
+| `cargo clippy --workspace --exclude afterburner-plugin --all-targets` | Linter check. |
+| `cargo test -p afterburner-ignite --release perf_smoke` | Native throughput smoke. |
+| `cargo test -p afterburner-wasi --release perf_smoke` | WASM throughput smoke. |
+| `afterburner-plugin/build.sh` | Rebuild + Wizer-preinit the plugin. |
 
-## Environment variables
+---
 
-| Variable                       | Default    | Purpose                                                    |
-|--------------------------------|------------|------------------------------------------------------------|
-| `AFTERBURNER_LOG`              | `warn`     | Level filter: `off` / `error` / `warn` / `info` / `debug` / `trace` |
-| `AFTERBURNER_LOG_FORMAT`       | `text`     | Reporter format: `text` (stderr) or `json` (stdout NDJSON) |
-| `AFTERBURNER_REBUILD_PLENUM`   | unset      | Set to `1` to regenerate `generated/plenum_bundle.js`.     |
+## Environment Variables
+
+| Variable | Default | Purpose |
+|:---------|:--------|:--------|
+| `AFTERBURNER_LOG` | `warn` | Level filter: `off` / `error` / `warn` / `info` / `debug` / `trace` |
+| `AFTERBURNER_LOG_FORMAT` | `text` | Reporter format: `text` (stderr) or `json` (stdout NDJSON) |
+| `AFTERBURNER_REBUILD_PLENUM` | unset | Set to `1` to regenerate `generated/plenum_bundle.js`. |
 
 Applications opt in to logging with:
 
@@ -109,45 +125,56 @@ Applications opt in to logging with:
 afterburner_core::log::init();  // reads AFTERBURNER_LOG + AFTERBURNER_LOG_FORMAT
 ```
 
-## Node.js compat surface
+---
 
-| Group      | Modules                                                                                      | Gate                                                |
-|------------|----------------------------------------------------------------------------------------------|-----------------------------------------------------|
-| Pure JS    | `path`, `url`, `querystring`, `events`, `assert`, `buffer`, `util`, `string_decoder`, `punycode`, `timers`, `process` (EventEmitter), `console`, `stream` | none — always available           |
-| Web globals| `fetch`, `Request`, `Response`, `Headers`, `AbortController`, `AbortSignal`, `URL`, `URLSearchParams`, `TextEncoder`, `TextDecoder`, `btoa`/`atob`, `queueMicrotask`, `performance.now`, `structuredClone` | none |
-| Host-backed| `fs` (incl. `createReadStream` / `createWriteStream`, `fs.promises`)                         | `Manifold::fs` (`None` / `ReadOnly(roots)` / `ReadWrite(roots)`) |
-|            | `crypto` (hash, hmac, AES-GCM/CBC, PBKDF2, scrypt, RSA & ECDSA sign/verify, randomBytes/UUID)| `Manifold::crypto`                                  |
-|            | `http` / `https`                                                                             | `Manifold::net` (outbound only)                     |
-|            | `dns`                                                                                        | `Manifold::net`                                     |
-|            | `os`                                                                                         | always on (non-sensitive)                           |
-|            | `zlib` (deflate/inflate/gzip/gunzip via Rust `flate2`)                                       | always on (pure compute)                            |
-|            | `child_process`                                                                              | `Manifold::child_process` — **native path only**    |
-| Custom     | `afterburner:state` — cross-invocation key/value store                                       | implicit — host installs the `StateStore`           |
+## Node.js Compat Surface
+
+| Group | Modules | Gate |
+|:------|:--------|:-----|
+| **Pure JS** | `path`, `url`, `querystring`, `events`, `assert`, `buffer`, `util`, `string_decoder`, `punycode`, `timers`, `process` (EventEmitter), `console`, `stream` | none — always available |
+| **Web globals** | `fetch`, `Request`, `Response`, `Headers`, `AbortController`, `AbortSignal`, `URL`, `URLSearchParams`, `TextEncoder`, `TextDecoder`, `btoa`/`atob`, `queueMicrotask`, `performance.now`, `structuredClone` | none |
+| **Host-backed** | `fs` (incl. `createReadStream` / `createWriteStream`, `fs.promises`) | `Manifold::fs` (`None` / `ReadOnly(roots)` / `ReadWrite(roots)`) |
+| | `crypto` (hash, hmac, AES-GCM/CBC, PBKDF2, scrypt, RSA & ECDSA sign/verify, randomBytes/UUID) | `Manifold::crypto` |
+| | `http` / `https` | `Manifold::net` (outbound only) |
+| | `dns` | `Manifold::net` |
+| | `os` | always on (non-sensitive) |
+| | `zlib` (deflate/inflate/gzip/gunzip via Rust `flate2`) | always on (pure compute) |
+| | `child_process` | `Manifold::child_process` — **native path only** |
+| **Custom** | `afterburner:state` — cross-invocation key/value store | implicit — host installs the `StateStore` |
 
 Default manifold is `Manifold::sealed()` — safe to hand untrusted user
 scripts. `Manifold::open()` exists for trusted admin contexts.
 
+---
+
 ## FAQ
 
-### Why do I see a `quickjs-provider/afterburner_plugin.wasm` in the repo?
+<details>
+<summary><b>Why is <code>quickjs-provider/afterburner_plugin.wasm</code> in the repo?</b></summary>
 
 That is the committed Wizer-preinitialized Javy plugin, pulled in at
 compile time via `include_bytes!`. Storing it in the repo keeps
 `cargo build` reproducible and network-free.
+</details>
 
-### Does the runtime shell out to `javy`?
+<details>
+<summary><b>Does the runtime shell out to <code>javy</code>?</b></summary>
 
 No. The plugin compiles JS source to bytecode in-process via
 `javy_plugin_api::compile_src` and runs it via `javy_plugin_api::invoke`.
 `javy` is only used during plugin regeneration (`build.sh`).
+</details>
 
-### Can I swap in a newer Wasmtime?
+<details>
+<summary><b>Can I swap in a newer Wasmtime?</b></summary>
 
 Yes — pin the version in the workspace `Cargo.toml` and run tests. The
 workspace is already on Wasmtime 36; bumping further is mostly an
 import-path chore (we already live through the `p2::pipe` move).
+</details>
 
-### What about WASI Preview 2 / components?
+<details>
+<summary><b>What about WASI Preview 2 / components?</b></summary>
 
 The authoritative interface is specified in `wit/afterburner-host.wit`
 and `wit/README.md`. The runtime still uses the core-module path for
@@ -156,8 +183,10 @@ outputs a flattened core module even when given a component input, so
 the component-model host-side linker does not meaningfully simplify
 things today. The WIT file stays as source-of-truth for future
 migration.
+</details>
 
-### How do I bundle multiple JS files together?
+<details>
+<summary><b>How do I bundle multiple JS files together?</b></summary>
 
 `FlowEngine::load_bundle(entry, modules)` accepts an entry script plus
 a list of `(name, source)` helper modules. Inside the entry,
@@ -170,8 +199,10 @@ let id = engine.load_bundle(
     &[("./lib".into(), "module.exports = { double: (n) => n*2 };".into())],
 )?;
 ```
+</details>
 
-### Cross-invocation state
+<details>
+<summary><b>Cross-invocation state</b></summary>
 
 Pass a `SharedStateStore` to the engine. The default `InMemoryStateStore`
 (lock-free, in-process) ships with the workspace; embedders can plug in
@@ -194,7 +225,10 @@ const state = require('afterburner:state');
 state.setJSON('lastSeen', Date.now());
 const n = state.increment('hits');
 ```
+</details>
 
-## License
+---
 
-MIT OR Apache-2.0.
+<p align="center">
+  <sub>MIT OR Apache-2.0</sub>
+</p>

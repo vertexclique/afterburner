@@ -355,17 +355,26 @@ impl ThrustEngine {
 
         let n_workers = resolve_worker_count(config.compute_workers);
         let mut senders = Vec::with_capacity(n_workers);
+        let mut receivers: Vec<Receiver<Job>> = Vec::with_capacity(n_workers);
+        for _ in 0..n_workers {
+            let (tx, rx) = unbounded::<Job>();
+            senders.push(tx);
+            receivers.push(rx);
+        }
+        // Each worker carries the full receiver vector so it can
+        // try_recv any peer's queue when its own is empty (T3
+        // steal-when-idle). kovan-channel Receiver is Clone + MPMC.
+        let shared_receivers: Arc<Vec<Receiver<Job>>> = Arc::new(receivers);
+
         let mut handles = Vec::with_capacity(n_workers);
         for worker_id in 0..n_workers {
-            let (tx, rx) = unbounded::<Job>();
             handles.push(spawn_worker(
                 worker_id,
-                rx,
+                shared_receivers.clone(),
                 combustor.clone(),
                 stats.clone(),
                 shutdown.clone(),
             ));
-            senders.push(tx);
         }
 
         Ok(Arc::new(Self {
@@ -532,7 +541,7 @@ impl fmt::Debug for ThrustEngine {
 
 fn spawn_worker(
     worker_id: usize,
-    rx: Receiver<Job>,
+    receivers: Arc<Vec<Receiver<Job>>>,
     combustor: Arc<WasmCombustor>,
     stats: Arc<StatsCounters>,
     shutdown: Arc<AtomicBool>,
@@ -540,39 +549,77 @@ fn spawn_worker(
     thread::Builder::new()
         .name(format!("afterburner-thrust-{worker_id}"))
         .spawn(move || {
-            worker_loop(rx, combustor, stats, shutdown);
+            worker_loop(worker_id, receivers, combustor, stats, shutdown);
         })
         .expect("failed to spawn thrust worker")
 }
 
+/// Worker loop with steal-when-idle (T3, plan §5.2).
+///
+/// 1. **Owner pop:** `try_recv` on this worker's queue (cheapest path).
+/// 2. **Steal sweep:** if local empty, `try_recv` each peer's queue
+///    starting at `(worker_id + 1) % n` to spread initial steal load
+///    around the ring rather than dogpiling worker 0 every time.
+/// 3. **Park:** if every queue is empty, sleep with exponential backoff
+///    (50 µs → 2 ms cap) and retry. Bounded idle-CPU; no dependency on
+///    a wakeup mechanism, no signals or futexes (Docker-cap-safe).
 fn worker_loop(
-    rx: Receiver<Job>,
+    worker_id: usize,
+    receivers: Arc<Vec<Receiver<Job>>>,
     combustor: Arc<WasmCombustor>,
     stats: Arc<StatsCounters>,
     shutdown: Arc<AtomicBool>,
 ) {
-    while !shutdown.load(Ordering::Acquire) {
-        let job = match rx.recv() {
-            Some(j) => j,
-            // All senders dropped — engine shutting down.
-            None => break,
-        };
+    let n = receivers.len();
+    let local = &receivers[worker_id];
 
-        let Job {
-            id,
-            input,
-            limits,
-            reply,
-            tenant: _,
-        } = job;
+    let initial_park = Duration::from_micros(50);
+    let park_cap = Duration::from_millis(2);
+    let mut park = initial_park;
 
-        let result = combustor.thrust(&id, &input, &limits);
-        stats.thrusts_completed.fetch_add(1, Ordering::Relaxed);
+    'outer: loop {
+        // Shutdown poll happens here so we don't add a check inside the
+        // hot-path branches below.
+        if shutdown.load(Ordering::Acquire) {
+            break;
+        }
 
-        // If the receiver has been dropped, the send is a no-op — the
-        // caller abandoned their handle, which is their prerogative.
-        reply.send(result);
+        // 1. Owner pop.
+        if let Some(job) = local.try_recv() {
+            execute(job, &combustor, &stats);
+            park = initial_park;
+            continue 'outer;
+        }
+
+        // 2. Steal sweep — start at (id+1)%n and visit every peer once.
+        for offset in 1..n {
+            let idx = (worker_id + offset) % n;
+            if let Some(job) = receivers[idx].try_recv() {
+                execute(job, &combustor, &stats);
+                park = initial_park;
+                continue 'outer;
+            }
+        }
+
+        // 3. Idle: park with exponential backoff capped at 2 ms.
+        thread::sleep(park);
+        park = (park * 2).min(park_cap);
     }
+}
+
+#[inline]
+fn execute(job: Job, combustor: &WasmCombustor, stats: &StatsCounters) {
+    let Job {
+        id,
+        input,
+        limits,
+        reply,
+        tenant: _,
+    } = job;
+    let result = combustor.thrust(&id, &input, &limits);
+    stats.thrusts_completed.fetch_add(1, Ordering::Relaxed);
+    // If the caller dropped the handle, send is a no-op — fine.
+    reply.send(result);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
