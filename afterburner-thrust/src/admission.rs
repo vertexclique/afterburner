@@ -11,20 +11,41 @@
 //! `Instant::now()`. Safe under default Docker capability set. See
 //! project memory `project_docker_cap_constraint`.
 //!
-//! ### TODO
+//! ### Stale-tenant sweep (P3)
 //!
-//! * Periodic sweep of tenants that haven't been seen in a while
-//!   (the map grows unbounded today). Not in scope for T4.
+//! A dedicated background thread (`afterburner-admission-sweep`)
+//! periodically walks the bucket map and evicts tenants that haven't
+//! advanced their TAT in `IDLE_THRESHOLD` (default 5 minutes). Bounds
+//! map growth under multi-tenant churn — without it, a workload that
+//! cycles through millions of distinct tenants would leak indefinitely.
+//!
+//! Sweep cadence is 30 s; shutdown is interruptible (100 ms-granular
+//! sleep that re-checks the shutdown flag), so `Drop` returns within
+//! ~100 ms even when the sweep is mid-sleep.
 
 use kovan_map::HopscotchMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use crate::TenantId;
 
+/// How often the sweep thread runs.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Buckets idle for at least this long get evicted on the next sweep.
+/// Five minutes covers normal traffic gaps without being so short that
+/// periodically-active tenants pay the bucket-rebuild cost on every cycle.
+const IDLE_THRESHOLD: Duration = Duration::from_secs(300);
+
+/// Granularity of the interruptible sleep inside the sweep loop. Caps
+/// `Drop`-time wait at this value.
+const SHUTDOWN_POLL_GRANULARITY: Duration = Duration::from_millis(100);
+
 /// Lock-free per-tenant GCRA. Cheap to construct; one atomic RMW on
-/// the common accept path.
+/// the common accept path. Owns a background sweep thread that evicts
+/// tenants idle past [`IDLE_THRESHOLD`].
 pub(crate) struct TokenBucketAdmission {
     /// Nanoseconds per token (≈ 1 / rate).
     period_ns: u64,
@@ -36,7 +57,12 @@ pub(crate) struct TokenBucketAdmission {
     epoch: Instant,
     /// Per-tenant TAT (ns since `epoch`). `Arc<AtomicU64>` so every
     /// caller hitting the same tenant CASes the same slot.
-    buckets: HopscotchMap<TenantId, Arc<AtomicU64>>,
+    /// `Arc<HopscotchMap<…>>` so the sweep thread can hold a clone.
+    buckets: Arc<HopscotchMap<TenantId, Arc<AtomicU64>>>,
+    /// Set on `Drop` to ask the sweep thread to exit at its next poll.
+    sweep_shutdown: Arc<AtomicBool>,
+    /// Joined on `Drop`. `Option` so `Drop` can `take()` it.
+    sweep_thread: Option<JoinHandle<()>>,
 }
 
 impl TokenBucketAdmission {
@@ -45,16 +71,52 @@ impl TokenBucketAdmission {
     /// that arrives exactly on the refill boundary isn't falsely
     /// rejected by rounding.
     pub fn new(tokens_per_sec: u64, burst_tokens: u64) -> Self {
+        Self::new_with_intervals(tokens_per_sec, burst_tokens, IDLE_THRESHOLD, SWEEP_INTERVAL)
+    }
+
+    /// Same as [`Self::new`] but lets the caller override the sweep
+    /// timing knobs. Used by tests that can't wait the production 5-minute
+    /// idle threshold + 30-second cadence.
+    pub fn new_with_intervals(
+        tokens_per_sec: u64,
+        burst_tokens: u64,
+        idle_threshold: Duration,
+        sweep_interval: Duration,
+    ) -> Self {
         let tokens_per_sec = tokens_per_sec.max(1);
         let burst_tokens = burst_tokens.max(1);
         let period_ns = 1_000_000_000u64 / tokens_per_sec;
         let burst_ns = burst_tokens.saturating_mul(period_ns);
+        let epoch = Instant::now();
+        let buckets: Arc<HopscotchMap<TenantId, Arc<AtomicU64>>> = Arc::new(HopscotchMap::new());
+        let sweep_shutdown = Arc::new(AtomicBool::new(false));
+
+        let sweep_thread = {
+            let buckets = buckets.clone();
+            let shutdown = sweep_shutdown.clone();
+            let idle_threshold_ns = idle_threshold.as_nanos() as u64;
+            thread::Builder::new()
+                .name("afterburner-admission-sweep".into())
+                .spawn(move || {
+                    sweep_loop(buckets, epoch, idle_threshold_ns, sweep_interval, shutdown)
+                })
+                .ok()
+        };
+
         Self {
             period_ns,
             burst_ns,
-            epoch: Instant::now(),
-            buckets: HopscotchMap::new(),
+            epoch,
+            buckets,
+            sweep_shutdown,
+            sweep_thread,
         }
+    }
+
+    /// Number of currently-tracked tenant buckets. Useful for tests
+    /// and for ops dashboards (memory pressure proxy).
+    pub fn bucket_count(&self) -> usize {
+        self.buckets.len()
     }
 
     #[inline]
@@ -117,7 +179,78 @@ impl std::fmt::Debug for TokenBucketAdmission {
         f.debug_struct("TokenBucketAdmission")
             .field("period_ns", &self.period_ns)
             .field("burst_ns", &self.burst_ns)
+            .field("buckets", &self.buckets.len())
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for TokenBucketAdmission {
+    fn drop(&mut self) {
+        self.sweep_shutdown.store(true, Ordering::Release);
+        if let Some(h) = self.sweep_thread.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// Walks the bucket map at [`SWEEP_INTERVAL`] and evicts entries whose
+/// TAT lies more than `idle_threshold_ns` behind `now`. Re-checks the
+/// TAT just before removal so a bucket that became active in the
+/// interval isn't dropped — small races may still flap a freshly
+/// rebuilt bucket, with the only effect being one full burst budget
+/// for that tenant. Acceptable for a 5-minute idle window.
+fn sweep_loop(
+    buckets: Arc<HopscotchMap<TenantId, Arc<AtomicU64>>>,
+    epoch: Instant,
+    idle_threshold_ns: u64,
+    sweep_interval: Duration,
+    shutdown: Arc<AtomicBool>,
+) {
+    while !shutdown.load(Ordering::Acquire) {
+        sleep_interruptible(sweep_interval, &shutdown);
+        if shutdown.load(Ordering::Acquire) {
+            break;
+        }
+
+        let now_ns = epoch.elapsed().as_nanos() as u64;
+        let cutoff = now_ns.saturating_sub(idle_threshold_ns);
+
+        // Collect candidates first (the iterator borrows the map; we
+        // can't mutate while iterating).
+        let stale: Vec<TenantId> = buckets
+            .iter()
+            .filter_map(|(t, tat)| {
+                if tat.load(Ordering::Relaxed) < cutoff {
+                    Some(t)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for t in stale {
+            // Re-check before remove — bucket may have woken up.
+            if let Some(tat) = buckets.get(&t)
+                && tat.load(Ordering::Relaxed) < cutoff
+            {
+                buckets.remove(&t);
+            }
+        }
+    }
+}
+
+/// Sleep for `total` but wake up every [`SHUTDOWN_POLL_GRANULARITY`]
+/// to re-check the shutdown flag. Bounds `Drop`-time wait at the
+/// granularity, not the full sweep interval.
+fn sleep_interruptible(total: Duration, shutdown: &AtomicBool) {
+    let mut elapsed = Duration::ZERO;
+    while elapsed < total {
+        if shutdown.load(Ordering::Acquire) {
+            return;
+        }
+        let chunk = SHUTDOWN_POLL_GRANULARITY.min(total - elapsed);
+        thread::sleep(chunk);
+        elapsed += chunk;
     }
 }
 
@@ -194,5 +327,79 @@ mod tests {
         // First call allowed (single burst slot). Second rejected.
         adm.try_acquire(t).unwrap();
         assert!(adm.try_acquire(t).is_err());
+    }
+
+    #[test]
+    fn stale_tenants_are_evicted_by_sweep() {
+        // 100ms idle threshold + 50ms sweep cadence so the test runs
+        // in well under a second. Production defaults are 5min/30s.
+        let adm = TokenBucketAdmission::new_with_intervals(
+            1_000,
+            5,
+            Duration::from_millis(100),
+            Duration::from_millis(50),
+        );
+        // Touch three tenants — each gets a bucket entry.
+        adm.try_acquire(tid(101)).unwrap();
+        adm.try_acquire(tid(102)).unwrap();
+        adm.try_acquire(tid(103)).unwrap();
+        assert_eq!(adm.bucket_count(), 3);
+
+        // Wait long enough for the bucket TATs to be older than the
+        // 100ms idle threshold, then for at least one sweep cycle to
+        // run. 300ms covers idle + 1-2 sweep ticks comfortably.
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            adm.bucket_count(),
+            0,
+            "sweep should have evicted all idle tenants"
+        );
+    }
+
+    #[test]
+    fn active_tenants_are_not_evicted() {
+        let adm = TokenBucketAdmission::new_with_intervals(
+            1_000,
+            5,
+            Duration::from_millis(100),
+            Duration::from_millis(50),
+        );
+        let t = tid(201);
+        adm.try_acquire(t).unwrap();
+
+        // Re-touch the bucket continuously so its TAT stays fresh.
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(300) {
+            // Keep TAT current. Some calls will be rate-limited (only 5
+            // burst slots); we don't care about the result, just the
+            // TAT advance side-effect.
+            let _ = adm.try_acquire(t);
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        assert_eq!(
+            adm.bucket_count(),
+            1,
+            "active tenant must survive sweep cycles"
+        );
+    }
+
+    #[test]
+    fn drop_joins_sweep_thread_promptly() {
+        let adm = TokenBucketAdmission::new_with_intervals(
+            10,
+            1,
+            Duration::from_secs(60),
+            // Long sweep — Drop must interrupt the sleep, not wait it out.
+            Duration::from_secs(60),
+        );
+        adm.try_acquire(tid(301)).unwrap();
+        let t0 = Instant::now();
+        drop(adm);
+        let took = t0.elapsed();
+        assert!(
+            took < Duration::from_secs(1),
+            "Drop took too long ({took:?}); interruptible sleep failed"
+        );
     }
 }

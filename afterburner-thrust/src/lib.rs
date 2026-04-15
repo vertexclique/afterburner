@@ -238,6 +238,10 @@ pub struct ThrustEngineStats {
     pub thrusts_rejected: u64,
     pub thrusts_overloaded: u64,
     pub thrusts_via_injector: u64,
+    /// Number of tenant buckets currently tracked by the admission
+    /// layer. `0` when admission is disabled. A useful pressure-watch
+    /// signal; the sweep evicts buckets idle past 5 minutes (P3).
+    pub tenant_buckets_tracked: usize,
 }
 
 // Raw atomic counters kept on the engine — cloned into `ThrustEngineStats`
@@ -259,6 +263,9 @@ impl StatsCounters {
             thrusts_rejected: self.thrusts_rejected.load(Ordering::Relaxed),
             thrusts_overloaded: self.thrusts_overloaded.load(Ordering::Relaxed),
             thrusts_via_injector: self.thrusts_via_injector.load(Ordering::Relaxed),
+            // Filled in by `ThrustEngine::stats` from the admission
+            // layer; the raw counters don't see it.
+            tenant_buckets_tracked: 0,
         }
     }
 }
@@ -598,7 +605,9 @@ impl ThrustEngine {
 
     /// Snapshot of operational counters.
     pub fn stats(&self) -> ThrustEngineStats {
-        self.stats.snapshot()
+        let mut snap = self.stats.snapshot();
+        snap.tenant_buckets_tracked = self.admission.as_ref().map_or(0, |a| a.bucket_count());
+        snap
     }
 
     /// Graceful shutdown — drop the sender, signal workers, join.
