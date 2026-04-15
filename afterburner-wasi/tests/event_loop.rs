@@ -240,3 +240,54 @@ fn native_infinite_microtask_chain_is_bounded() {
         "expected FuelExhausted from the pump cap; got {out:?}"
     );
 }
+
+#[test]
+fn wasm_infinite_microtask_chain_is_bounded() {
+    // T5 gate (plan §6, REVIEW.md Pitfall 18): the WASM counterpart of
+    // the native pump-cap test. A script that schedules itself forever
+    // as a microtask must not wedge the worker — we expect Timeout or
+    // FuelExhausted, *never* a hang.
+    //
+    // The mechanism is wasmtime epoch interruption: the shared engine
+    // ticker bumps the epoch every 10 ms; Cranelift-emitted safepoints
+    // inside Javy's Promise::finish pump re-read the epoch on each
+    // iteration and surface a Trap::Interrupt when the deadline elapses.
+    // Fuel is the secondary guard — if safepoints are sparse enough
+    // that epoch misses the pump, fuel still exhausts eventually.
+    let src = r#"
+        module.exports = () => new Promise(() => {
+            function step() { queueMicrotask(step); }
+            step();
+        });
+    "#;
+    let lim = FuelGauge {
+        // Large-but-finite fuel so exhaustion is a real outcome, not a
+        // liveness workaround.
+        fuel: Some(5_000_000_000),
+        // 3-second wall clock is comfortable above the 10 ms tick
+        // resolution — the pump must terminate well before we'd notice
+        // in CI.
+        timeout_ms: Some(3_000),
+        manifold: Manifold::sealed(),
+        ..FuelGauge::default()
+    };
+    let c = wasm();
+    let id = c.ignite(src).unwrap();
+    let start = std::time::Instant::now();
+    let out = c.thrust(&id, &json!(null), &lim);
+    let elapsed = start.elapsed();
+    // Upper bound: something caught it. Elapsed is bounded by fuel OR
+    // epoch, and we gave both finite budgets.
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "WASM microtask pump did not terminate within 10s (elapsed={elapsed:?})"
+    );
+    assert!(
+        matches!(
+            out,
+            Err(afterburner_core::AfterburnerError::Timeout)
+                | Err(afterburner_core::AfterburnerError::FuelExhausted)
+        ),
+        "expected Timeout or FuelExhausted from the WASM pump; got {out:?}"
+    );
+}
