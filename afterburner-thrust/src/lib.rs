@@ -37,12 +37,14 @@
 #![deny(missing_debug_implementations)]
 
 mod admission;
+mod numa;
 
 use admission::TokenBucketAdmission;
 use afterburner_core::{AfterburnerError, Combustor, FuelGauge, Result, ScriptId};
 use afterburner_wasi::{WasmCombustor, WasmConfig};
 use kovan_channel::flavors::unbounded::{Receiver, Sender};
 use kovan_channel::unbounded;
+use numa::{NumaTopology, pin_current_thread_to_worker};
 use serde_json::Value;
 use std::fmt;
 use std::num::NonZeroU32;
@@ -263,6 +265,11 @@ pub struct ThrustEngineStats {
     /// layer. `0` when admission is disabled. A useful pressure-watch
     /// signal; the sweep evicts buckets idle past 5 minutes (P3).
     pub tenant_buckets_tracked: usize,
+    /// NUMA nodes detected at engine-startup time (Linux only — all
+    /// other platforms report `1`). Workers are round-robined across
+    /// nodes and pinned to their node's CPU set via
+    /// `sched_setaffinity`.
+    pub numa_nodes: usize,
 }
 
 // Raw atomic counters kept on the engine — cloned into `ThrustEngineStats`
@@ -291,6 +298,8 @@ impl StatsCounters {
             // Filled in by `ThrustEngine::stats` from the admission
             // layer; the raw counters don't see it.
             tenant_buckets_tracked: 0,
+            // Likewise filled in from the NumaTopology.
+            numa_nodes: 1,
         }
     }
 }
@@ -447,6 +456,9 @@ pub struct ThrustEngine {
     /// Cached worker count — avoids re-reading `worker_queues.len()`
     /// on the hot path.
     n_workers: usize,
+    /// NUMA topology — cached so stats() can surface it and the steal
+    /// sweep can order peer visits by locality.
+    numa: Arc<NumaTopology>,
     /// Token-bucket admission (T4). `None` disables the layer entirely —
     /// `tenant`-bearing thrusts skip straight to the queue.
     admission: Option<TokenBucketAdmission>,
@@ -490,6 +502,7 @@ impl ThrustEngine {
         }
         let worker_queues: Arc<Vec<BoundedQueue<Job>>> = Arc::new(queues);
         let injector: Arc<BoundedQueue<Job>> = Arc::new(BoundedQueue::new(injector_cap));
+        let numa = Arc::new(NumaTopology::detect(n_workers));
 
         let mut handles = Vec::with_capacity(n_workers);
         for worker_id in 0..n_workers {
@@ -500,6 +513,7 @@ impl ThrustEngine {
                 combustor.clone(),
                 stats.clone(),
                 shutdown.clone(),
+                numa.clone(),
             ));
         }
 
@@ -510,6 +524,7 @@ impl ThrustEngine {
             worker_queues: Some(worker_queues),
             injector: Some(injector),
             n_workers,
+            numa,
             admission,
             shutdown,
             workers: Some(handles),
@@ -632,7 +647,15 @@ impl ThrustEngine {
     pub fn stats(&self) -> ThrustEngineStats {
         let mut snap = self.stats.snapshot();
         snap.tenant_buckets_tracked = self.admission.as_ref().map_or(0, |a| a.bucket_count());
+        snap.numa_nodes = self.numa.node_count;
         snap
+    }
+
+    /// Number of NUMA nodes the engine detected at construction time.
+    /// `1` on single-socket boxes and on non-Linux platforms where
+    /// detection isn't implemented.
+    pub fn numa_node_count(&self) -> usize {
+        self.numa.node_count
     }
 
     /// Graceful shutdown — flip to drain mode, let workers finish
@@ -721,6 +744,7 @@ fn spawn_worker(
     combustor: Arc<WasmCombustor>,
     stats: Arc<StatsCounters>,
     shutdown: Arc<AtomicU8>,
+    numa: Arc<NumaTopology>,
 ) -> JoinHandle<()> {
     // Track liveness so `Drop` can poll for natural drain completion
     // before forcing exit. Increment happens on the *parent* thread so
@@ -728,9 +752,14 @@ fn spawn_worker(
     // thread decrements when it's done.
     stats.workers_alive.fetch_add(1, Ordering::AcqRel);
     let stats_for_loop = stats.clone();
+    let numa_for_pin = numa.clone();
     thread::Builder::new()
         .name(format!("afterburner-thrust-{worker_id}"))
         .spawn(move || {
+            // Pin to our NUMA node's CPU set on Linux multi-socket
+            // boxes; no-op elsewhere. Done inside the worker thread so
+            // sched_setaffinity applies to the right kernel task.
+            pin_current_thread_to_worker(&numa_for_pin, worker_id);
             worker_loop(
                 worker_id,
                 queues,
@@ -738,6 +767,7 @@ fn spawn_worker(
                 combustor,
                 stats_for_loop,
                 shutdown,
+                numa_for_pin,
             );
             stats.workers_alive.fetch_sub(1, Ordering::AcqRel);
         })
@@ -764,9 +794,16 @@ fn worker_loop(
     combustor: Arc<WasmCombustor>,
     stats: Arc<StatsCounters>,
     shutdown: Arc<AtomicU8>,
+    numa: Arc<NumaTopology>,
 ) {
     let n = queues.len();
     let local = &queues[worker_id];
+
+    // Build the steal-peer list ordered by NUMA locality: same-node
+    // peers first, cross-node second. On single-node boxes this
+    // degenerates to the old `(worker_id + 1..)` ring order, same
+    // work.
+    let steal_order: Vec<usize> = build_steal_order(worker_id, n, &numa);
 
     let initial_park = Duration::from_micros(50);
     let park_cap = Duration::from_millis(2);
@@ -803,9 +840,9 @@ fn worker_loop(
             continue 'outer;
         }
 
-        // 3. Steal sweep + post-sweep injector poll.
-        for offset in 1..n {
-            let idx = (worker_id + offset) % n;
+        // 3. Steal sweep (NUMA-locality-preferring) + post-sweep
+        //    injector poll.
+        for &idx in &steal_order {
             if let Some(job) = queues[idx].try_pop() {
                 execute(job, &combustor, &stats);
                 park = initial_park;
@@ -832,6 +869,27 @@ fn worker_loop(
         park = (park * 2).min(park_cap);
         iter = iter.wrapping_add(1);
     }
+}
+
+/// Produce the order in which `worker_id` should visit peers when
+/// stealing. Same-NUMA-node peers come first (ordered by distance in
+/// the ring), then cross-node peers (same ring ordering). On
+/// single-node systems this is identical to the old `(id+1..)` ring.
+fn build_steal_order(worker_id: usize, n: usize, numa: &NumaTopology) -> Vec<usize> {
+    let my_node = numa.worker_to_node.get(worker_id).copied().unwrap_or(0);
+    let mut same_node = Vec::new();
+    let mut other_node = Vec::new();
+    for offset in 1..n {
+        let idx = (worker_id + offset) % n;
+        let peer_node = numa.worker_to_node.get(idx).copied().unwrap_or(0);
+        if peer_node == my_node {
+            same_node.push(idx);
+        } else {
+            other_node.push(idx);
+        }
+    }
+    same_node.extend(other_node);
+    same_node
 }
 
 #[inline]

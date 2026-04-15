@@ -17,5 +17,10 @@ kovan-channel.workspace = true
 kovan-map.workspace = true
 serde_json.workspace = true
 
+# Linux-only: NUMA topology (sysfs parse) + sched_setaffinity pinning.
+# Gated by target_os cfg in the crate so non-Linux builds skip entirely.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 serde_json.workspace = true
