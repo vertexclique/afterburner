@@ -4,21 +4,22 @@
 //! Gated behind `Manifold::net`. Hosts outside the policy allow-list
 //! (when present) are rejected before the request is even constructed.
 //!
-//! ### Per-call timeouts (T6.2 stopgap)
+//! ### Per-call timeouts (configurable)
 //!
-//! Every call has a 30-second hard deadline applied via `ureq::Request::timeout`.
-//! That bounds the worst case of a compute worker wedging on a slow URL.
-//! The proper fix — moving HTTP to a dirty I/O pool with async-Wasmtime host
-//! imports — is plan §7.1 / T6.1. Until then, this timeout is the only thing
-//! between a slow upstream and a thrust hanging beyond its `FuelGauge::timeout_ms`.
+//! Every call has a wall-clock deadline applied via `ureq::Request::timeout`.
+//! The default is 30 s (`DEFAULT_HTTP_REQUEST_TIMEOUT`); callers can
+//! override per-script via `Manifold::http_timeout_ms` so SLA-strict
+//! scripts can tighten the budget and batch jobs can loosen it.
+//!
+//! This is the only thing between a slow upstream and a thrust hanging
+//! beyond its `FuelGauge::timeout_ms` while host I/O blocks.
 
 use afterburner_core::{AfterburnerError, Manifold, NetAccess, Result};
 use std::time::Duration;
 
-/// Hard ceiling on per-request wall clock. Below this every individual
-/// thrust's `FuelGauge::timeout_ms` is the active bound; above this we
-/// trip the ureq timeout and surface a host error.
-const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default per-request wall-clock cap when `Manifold::http_timeout_ms`
+/// is `None`.
+const DEFAULT_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
@@ -55,7 +56,11 @@ pub fn request(
         }
     }
 
-    let mut req = ureq::request(method, url).timeout(HTTP_REQUEST_TIMEOUT);
+    let timeout = m
+        .http_timeout_ms
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_HTTP_REQUEST_TIMEOUT);
+    let mut req = ureq::request(method, url).timeout(timeout);
     for (k, v) in headers {
         req = req.set(k, v);
     }
@@ -110,5 +115,71 @@ fn host_matches(host: &str, pattern: &str) -> bool {
         host == suffix || host.ends_with(&format!(".{suffix}"))
     } else {
         host == pattern
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::time::Instant;
+
+    #[test]
+    fn extract_host_handles_common_shapes() {
+        assert_eq!(
+            extract_host("https://api.example.com/v1/x").as_deref(),
+            Some("api.example.com")
+        );
+        assert_eq!(
+            extract_host("http://localhost:8080/foo").as_deref(),
+            Some("localhost")
+        );
+        assert_eq!(extract_host("https://x.y.z?q=1").as_deref(), Some("x.y.z"));
+        assert!(extract_host("not-a-url").is_some()); // best-effort
+    }
+
+    #[test]
+    fn host_matches_handles_wildcards() {
+        assert!(host_matches("api.example.com", "*.example.com"));
+        assert!(host_matches("example.com", "*.example.com"));
+        assert!(!host_matches("api.example.org", "*.example.com"));
+        assert!(host_matches("exact.host", "exact.host"));
+    }
+
+    #[test]
+    fn http_timeout_ms_overrides_default() {
+        // P4 gate: the per-call HTTP timeout knob on Manifold actually
+        // wires through to ureq. We verify by:
+        // 1. Spinning up a TCP listener that accepts but never responds.
+        // 2. Requesting it with a 250ms Manifold-supplied timeout.
+        // 3. Asserting the call returns Err in well under the default
+        //    30s and within ~1.5s of the configured cap.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind localhost");
+        let port = listener.local_addr().unwrap().port();
+        // Background acceptor that holds the connection open.
+        // Detached: we don't join — the listener drops with the test.
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(1) {
+                let _ = stream; // hold open
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            }
+        });
+
+        let mut m = Manifold::open();
+        m.http_timeout_ms = Some(250);
+
+        let url = format!("http://127.0.0.1:{port}/probe");
+        let t0 = Instant::now();
+        let result = request("GET", &url, &[], None, &m);
+        let elapsed = t0.elapsed();
+
+        assert!(
+            result.is_err(),
+            "expected timeout error, got Ok({result:?})"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "timeout fired late ({elapsed:?}) — Manifold knob not respected"
+        );
     }
 }

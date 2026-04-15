@@ -71,6 +71,11 @@ pub struct Manifold {
     /// `process.exit(code)` throws instead, so the host always receives
     /// a trap-or-value result.
     pub allow_exit: bool,
+    /// Per-call HTTP-request wall-clock cap, in milliseconds. `None`
+    /// uses the host implementation's default (currently 30 s). Lets
+    /// callers tighten the budget for SLA-strict scripts or loosen
+    /// it for batch jobs.
+    pub http_timeout_ms: Option<u64>,
 }
 
 impl Manifold {
@@ -85,6 +90,7 @@ impl Manifold {
             child_process: false,
             env: EnvAccess::None,
             allow_exit: false,
+            http_timeout_ms: None,
         }
     }
 
@@ -98,6 +104,7 @@ impl Manifold {
             child_process: true,
             env: EnvAccess::Full,
             allow_exit: true,
+            http_timeout_ms: None,
         }
     }
 }
