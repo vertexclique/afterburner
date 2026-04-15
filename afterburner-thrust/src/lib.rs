@@ -11,18 +11,28 @@
 //!
 //! See `docs/IMPL_PLAN_THREADING.md` for the design and phase breakdown.
 //!
-//! ## Phase T1 (this module)
+//! ## Phase T2 (this module)
 //!
-//! T1 ships a **single real worker** sitting behind an unbounded
-//! kovan-channel job queue. Every `thrust()` enqueues a `Job`, the worker
-//! thread pulls jobs in order, and each job is executed via an
-//! `Arc<WasmCombustor>` shared with the engine. `register()` delegates to
-//! `Combustor::ignite`.
+//! T2 fans out to **N worker threads** with per-worker kovan-channel
+//! queues. `thrust()` picks a worker via `hash(script_id) % N` — plan §5.1
+//! affinity — and pushes the job onto that worker's dedicated queue. A
+//! shared `Arc<WasmCombustor>` still handles the execution; fan-out wins
+//! us parallelism across distinct scripts without duplicating the
+//! wasmtime `Engine` / plugin `Module`.
 //!
-//! Pooling allocator + `InstancePre` (part of the original T1 gate) is
-//! deferred to T3, where it pairs naturally with the slot-affinity work.
+//! Not yet in this phase:
+//!
+//! * **Global injector queue + poll-every-64** — belongs with bounded
+//!   per-worker queues in T3 where it's actually load-bearing (overflow
+//!   destination for `try_send` failures). T2's unbounded queues never
+//!   need it.
+//! * **Steal-when-idle** (Chase-Lev) — T3.
+//! * **Pooling allocator + `InstancePre`** — T3 (pairs naturally with
+//!   slot affinity).
+//!
 //! Today's per-call `Store::new` path already clears the 100 k/sec
-//! single-core target, so there is no hidden perf regression.
+//! single-core target, so throughput is bounded by the underlying wasm
+//! runtime, not by the channel/queue plumbing.
 
 #![deny(missing_debug_implementations)]
 
@@ -89,8 +99,10 @@ impl fmt::Display for TenantId {
 /// doesn't carry over.
 #[derive(Clone)]
 pub struct ThrustEngineConfig {
-    /// Compute workers. T1 pins this to `1` regardless of the value here;
-    /// T2 honors the full number. `0` is treated as `1`.
+    /// Compute workers. `0` → auto-probe via
+    /// [`std::thread::available_parallelism`] (which is logical CPUs,
+    /// SMT-inclusive; a future refinement is to fall back to a
+    /// physical-core count per plan §14).
     pub compute_workers: usize,
 
     /// I/O pool size. `0` disables dirty-scheduler offload (T6).
@@ -262,21 +274,57 @@ fn hex8(hash: &[u8; 32]) -> String {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Worker routing
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Affinity routing — same `ScriptId` always lands on the same worker so
+/// its compiled state stays warm on that worker's caches (plan §5.1).
+///
+/// Reads the first 8 bytes of the SHA-256 hash and reduces modulo worker
+/// count. This is a byte-level operation — no allocation, no hashing.
+#[inline]
+fn route_worker(hash: &[u8; 32], n_workers: usize) -> usize {
+    debug_assert!(n_workers > 0, "route_worker called with zero workers");
+    let bytes = [
+        hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
+    ];
+    (u64::from_le_bytes(bytes) as usize) % n_workers
+}
+
+fn resolve_worker_count(requested: usize) -> usize {
+    if requested > 0 {
+        return requested;
+    }
+    // Logical-CPU probe; SMT-inclusive. Plan §14 flags a preference for
+    // physical cores — a future knob can substitute `num_cpus::get_physical`
+    // without changing the public surface.
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // The engine itself
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Multi-worker thrust engine.
 ///
-/// **T1 state:** constructs one `WasmCombustor` and one worker thread.
-/// `thrust()` enqueues onto an unbounded kovan-channel; the worker pulls
-/// and runs `WasmCombustor::thrust` per job. T2 fans out to N workers.
+/// **T2 state:** N worker threads, each with its own kovan-channel
+/// unbounded queue. `thrust()` picks a worker via `hash(script_id) % N`
+/// for affinity, then pushes onto that worker's queue. Workers share a
+/// single `Arc<WasmCombustor>`, which owns the wasmtime `Engine` and
+/// pre-compiled plugin `Module`.
 pub struct ThrustEngine {
     config: ThrustEngineConfig,
     combustor: Arc<WasmCombustor>,
     stats: Arc<StatsCounters>,
-    /// `Option` so `Drop` can explicitly drop the sender — closing the
-    /// queue wakes workers out of `rx.recv()` cleanly.
-    job_tx: Option<Sender<Job>>,
+    /// One sender per worker; index = worker id. `Option`-wrapped so
+    /// `Drop` can `take()` + drop all senders in one sweep, closing
+    /// every worker's queue.
+    worker_senders: Option<Vec<Sender<Job>>>,
+    /// Cached worker count — avoids re-reading `worker_senders.len()`
+    /// on the hot path.
+    n_workers: usize,
     shutdown: Arc<AtomicBool>,
     /// `Option` so `Drop` can `.take()` the `Vec<JoinHandle>` and join
     /// workers before the engine fully goes away.
@@ -288,33 +336,42 @@ impl ThrustEngine {
     ///
     /// Returns `Arc<Self>` per the usability-plan §8 commitment: the
     /// facade crate shares one engine across clones of `Afterburner`.
+    ///
+    /// `config.compute_workers == 0` auto-probes the host parallelism.
     pub fn new(config: ThrustEngineConfig) -> Result<Arc<Self>> {
         let combustor = Arc::new(WasmCombustor::new(config.wasm_config.clone())?);
         let stats = Arc::new(StatsCounters::default());
         let shutdown = Arc::new(AtomicBool::new(false));
-        let (job_tx, job_rx) = unbounded::<Job>();
 
-        // T1: always one worker regardless of config. T2 lifts this.
-        let worker = spawn_worker(
-            0,
-            job_rx,
-            combustor.clone(),
-            stats.clone(),
-            shutdown.clone(),
-        );
+        let n_workers = resolve_worker_count(config.compute_workers);
+        let mut senders = Vec::with_capacity(n_workers);
+        let mut handles = Vec::with_capacity(n_workers);
+        for worker_id in 0..n_workers {
+            let (tx, rx) = unbounded::<Job>();
+            handles.push(spawn_worker(
+                worker_id,
+                rx,
+                combustor.clone(),
+                stats.clone(),
+                shutdown.clone(),
+            ));
+            senders.push(tx);
+        }
 
         Ok(Arc::new(Self {
             config,
             combustor,
             stats,
-            job_tx: Some(job_tx),
+            worker_senders: Some(senders),
+            n_workers,
             shutdown,
-            workers: Some(vec![worker]),
+            workers: Some(handles),
         }))
     }
 
     /// Queue a thrust. Non-blocking — the caller gets a handle back
-    /// immediately and the work happens on a worker thread.
+    /// immediately and the work happens on the worker thread this
+    /// script's hash routes to.
     pub fn thrust(
         &self,
         id: &ScriptId,
@@ -326,8 +383,8 @@ impl ThrustEngine {
 
         // Engine shut down? Pre-resolve with a typed error so callers
         // don't hang on recv().
-        let tx = match self.job_tx.as_ref() {
-            Some(tx) => tx,
+        let senders = match self.worker_senders.as_ref() {
+            Some(s) => s,
             None => {
                 self.stats.thrusts_rejected.fetch_add(1, Ordering::Relaxed);
                 reply_tx.send(Err(AfterburnerError::Engine(
@@ -336,6 +393,8 @@ impl ThrustEngine {
                 return ThrustHandle { rx: reply_rx };
             }
         };
+
+        let worker_idx = route_worker(&id.hash, self.n_workers);
 
         let job = Job {
             id: *id,
@@ -346,9 +405,15 @@ impl ThrustEngine {
         };
 
         self.stats.thrusts_queued.fetch_add(1, Ordering::Relaxed);
-        tx.send(job);
+        senders[worker_idx].send(job);
 
         ThrustHandle { rx: reply_rx }
+    }
+
+    /// Returns how many worker threads the engine is running. Useful for
+    /// tests + tuning; not load-bearing for the API.
+    pub fn worker_count(&self) -> usize {
+        self.n_workers
     }
 
     /// Blocking convenience. Equivalent to `self.thrust(...).recv()` but
@@ -402,10 +467,11 @@ impl Drop for ThrustEngine {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
 
-        // Drop the sender so workers' `rx.recv()` returns `None` and the
-        // loop falls through. Field-drop ordering alone won't save us —
-        // our custom Drop runs *before* any field drops.
-        drop(self.job_tx.take());
+        // Drop every worker's sender so all workers' `rx.recv()` calls
+        // return `None` and their loops fall through. Field-drop order
+        // alone wouldn't save us — custom Drop runs *before* any field
+        // drops.
+        drop(self.worker_senders.take());
 
         if let Some(workers) = self.workers.take() {
             for w in workers {
@@ -418,7 +484,7 @@ impl Drop for ThrustEngine {
 impl fmt::Debug for ThrustEngine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ThrustEngine")
-            .field("compute_workers", &self.config.compute_workers)
+            .field("n_workers", &self.n_workers)
             .field("io_workers", &self.config.io_workers)
             .field(
                 "admission_tokens_per_sec",
