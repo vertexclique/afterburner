@@ -36,6 +36,9 @@
 
 #![deny(missing_debug_implementations)]
 
+mod admission;
+
+use admission::TokenBucketAdmission;
 use afterburner_core::{AfterburnerError, Combustor, FuelGauge, Result, ScriptId};
 use afterburner_wasi::{WasmCombustor, WasmConfig};
 use kovan_channel::flavors::unbounded::{Receiver, Sender};
@@ -325,6 +328,9 @@ pub struct ThrustEngine {
     /// Cached worker count — avoids re-reading `worker_senders.len()`
     /// on the hot path.
     n_workers: usize,
+    /// Token-bucket admission (T4). `None` disables the layer entirely —
+    /// `tenant`-bearing thrusts skip straight to the queue.
+    admission: Option<TokenBucketAdmission>,
     shutdown: Arc<AtomicBool>,
     /// `Option` so `Drop` can `.take()` the `Vec<JoinHandle>` and join
     /// workers before the engine fully goes away.
@@ -342,6 +348,10 @@ impl ThrustEngine {
         let combustor = Arc::new(WasmCombustor::new(config.wasm_config.clone())?);
         let stats = Arc::new(StatsCounters::default());
         let shutdown = Arc::new(AtomicBool::new(false));
+
+        let admission = config
+            .admission_tokens_per_sec
+            .map(|rate| TokenBucketAdmission::new(rate, config.admission_burst_tokens));
 
         let n_workers = resolve_worker_count(config.compute_workers);
         let mut senders = Vec::with_capacity(n_workers);
@@ -364,6 +374,7 @@ impl ThrustEngine {
             stats,
             worker_senders: Some(senders),
             n_workers,
+            admission,
             shutdown,
             workers: Some(handles),
         }))
@@ -372,6 +383,13 @@ impl ThrustEngine {
     /// Queue a thrust. Non-blocking — the caller gets a handle back
     /// immediately and the work happens on the worker thread this
     /// script's hash routes to.
+    ///
+    /// **Admission** (T4): if the engine was built with
+    /// `admission_tokens_per_sec = Some(rate)` *and* the caller passed a
+    /// `tenant`, the tenant's GCRA bucket is decremented before
+    /// queueing. If the bucket is empty, the handle resolves
+    /// immediately with `AfterburnerError::RateLimited`. `tenant == None`
+    /// (the trusted in-process path) always bypasses the bucket.
     pub fn thrust(
         &self,
         id: &ScriptId,
@@ -393,6 +411,19 @@ impl ThrustEngine {
                 return ThrustHandle { rx: reply_rx };
             }
         };
+
+        // Admission check runs before enqueue so rejected thrusts don't
+        // occupy queue slots behind workers.
+        if let (Some(adm), Some(tid)) = (self.admission.as_ref(), tenant)
+            && let Err(retry_ms) = adm.try_acquire(tid)
+        {
+            self.stats.thrusts_rejected.fetch_add(1, Ordering::Relaxed);
+            reply_tx.send(Err(AfterburnerError::RateLimited {
+                tenant: Some(tid.get()),
+                retry_after_ms: retry_ms,
+            }));
+            return ThrustHandle { rx: reply_rx };
+        }
 
         let worker_idx = route_worker(&id.hash, self.n_workers);
 

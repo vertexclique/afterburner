@@ -147,6 +147,7 @@ dependencies = [
  "afterburner-core",
  "afterburner-wasi",
  "kovan-channel",
+ "kovan-map",
  "serde_json",
 ]
 

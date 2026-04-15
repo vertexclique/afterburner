@@ -14,6 +14,7 @@ path = "src/lib.rs"
 afterburner-core.workspace = true
 afterburner-wasi.workspace = true
 kovan-channel.workspace = true
+kovan-map.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
