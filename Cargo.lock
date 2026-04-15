@@ -141,6 +141,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "afterburner-thrust"
+version = "0.1.0"
+dependencies = [
+ "afterburner-core",
+ "afterburner-wasi",
+ "kovan-channel",
+ "serde_json",
+]
+
+[[package]]
 name = "afterburner-wasi"
 version = "0.1.0"
 dependencies = [

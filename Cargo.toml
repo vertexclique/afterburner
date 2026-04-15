@@ -8,6 +8,7 @@ members = [
     "afterburner-adaptive",
     "afterburner-node-compat",
     "afterburner-plugin",
+    "afterburner-thrust",
 ]
 # `afterburner-plugin` targets `wasm32-wasip1`. Building it on the host
 # triple fails because `javy-plugin-api` assumes a WASI environment.
@@ -20,6 +21,7 @@ default-members = [
     "afterburner-flow",
     "afterburner-adaptive",
     "afterburner-node-compat",
+    "afterburner-thrust",
 ]
 
 [workspace.package]
@@ -36,6 +38,7 @@ afterburner-ignite = { path = "afterburner-ignite" }
 afterburner-flow = { path = "afterburner-flow" }
 afterburner-adaptive = { path = "afterburner-adaptive" }
 afterburner-node-compat = { path = "afterburner-node-compat" }
+afterburner-thrust = { path = "afterburner-thrust" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

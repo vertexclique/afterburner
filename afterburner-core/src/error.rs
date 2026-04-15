@@ -53,6 +53,24 @@ pub enum AfterburnerError {
     #[error("permission denied: {0}")]
     PermissionDenied(String),
 
+    /// The admission layer rejected this thrust because the associated
+    /// tenant's token bucket is empty. Retry after `retry_after_ms`.
+    ///
+    /// `tenant` is the raw `u32` from `TenantId` (or `None` for the
+    /// unrestricted path). Callers can wrap back into `TenantId` if
+    /// they need the newtype.
+    #[error("rate limited (tenant={tenant:?}, retry after {retry_after_ms}ms)")]
+    RateLimited {
+        tenant: Option<u32>,
+        retry_after_ms: u64,
+    },
+
+    /// The thrust engine refused the job because its global in-flight
+    /// cap is reached (pooling-allocator slot exhaustion). This is a
+    /// backpressure signal: slow down or provision more workers.
+    #[error("engine overloaded (in-flight cap reached)")]
+    Overloaded,
+
     /// Generic engine-internal failure that doesn't fit a specific variant.
     /// Use sparingly — prefer adding a typed variant.
     #[error("engine error: {0}")]
