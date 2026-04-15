@@ -47,9 +47,21 @@ use serde_json::Value;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+// ─────────────────────────────────────────────────────────────────────────
+// Shutdown signaling (3-state)
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Runtime states the worker loop checks. `Drop` walks Run → Drain →
+// Force, giving up to `config.shutdown_drain_deadline` for in-flight
+// queues to drain naturally before forcing immediate exit.
+
+const STATE_RUN: u8 = 0;
+const STATE_DRAIN: u8 = 1;
+const STATE_FORCE: u8 = 2;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Tenant identity
@@ -131,6 +143,13 @@ pub struct ThrustEngineConfig {
     /// bounded under burst.
     pub injector_capacity: usize,
 
+    /// Maximum time `Drop` waits for workers to drain queued jobs
+    /// before flipping to a force-exit. `Duration::ZERO` skips drain
+    /// entirely (workers exit on the next iteration). Default 5 s
+    /// covers a backlog of ~2500 thrusts at 200/sec/worker; production
+    /// clusters with sticky long-tail jobs may bump this.
+    pub shutdown_drain_deadline: Duration,
+
     /// WasmCombustor configuration shared across every worker. Cloned per
     /// worker construction; each worker adds its own `HostState` per call.
     pub wasm_config: WasmConfig,
@@ -145,6 +164,7 @@ impl Default for ThrustEngineConfig {
             admission_burst_tokens: 0,
             local_queue_capacity: 256,
             injector_capacity: 4096,
+            shutdown_drain_deadline: Duration::from_secs(5),
             wasm_config: WasmConfig::default(),
         }
     }
@@ -161,6 +181,7 @@ impl fmt::Debug for ThrustEngineConfig {
             .field("admission_burst_tokens", &self.admission_burst_tokens)
             .field("local_queue_capacity", &self.local_queue_capacity)
             .field("injector_capacity", &self.injector_capacity)
+            .field("shutdown_drain_deadline", &self.shutdown_drain_deadline)
             .field("wasm_config", &"<opaque>")
             .finish()
     }
@@ -253,6 +274,10 @@ struct StatsCounters {
     thrusts_rejected: AtomicU64,
     thrusts_overloaded: AtomicU64,
     thrusts_via_injector: AtomicU64,
+    /// Live worker-thread count. Each worker increments at start and
+    /// decrements on exit; `Drop` polls this to decide when the drain
+    /// has finished naturally.
+    workers_alive: AtomicUsize,
 }
 
 impl StatsCounters {
@@ -425,7 +450,7 @@ pub struct ThrustEngine {
     /// Token-bucket admission (T4). `None` disables the layer entirely —
     /// `tenant`-bearing thrusts skip straight to the queue.
     admission: Option<TokenBucketAdmission>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<AtomicU8>,
     /// `Option` so `Drop` can `.take()` the `Vec<JoinHandle>` and join
     /// workers before the engine fully goes away.
     workers: Option<Vec<JoinHandle<()>>>,
@@ -441,7 +466,7 @@ impl ThrustEngine {
     pub fn new(config: ThrustEngineConfig) -> Result<Arc<Self>> {
         let combustor = Arc::new(WasmCombustor::new(config.wasm_config.clone())?);
         let stats = Arc::new(StatsCounters::default());
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(AtomicU8::new(STATE_RUN));
 
         let admission = config
             .admission_tokens_per_sec
@@ -610,24 +635,21 @@ impl ThrustEngine {
         snap
     }
 
-    /// Graceful shutdown — drop the sender, signal workers, join.
-    /// After this the engine rejects further thrusts with
-    /// `Err(Engine("shut down"))`.
+    /// Graceful shutdown — flip to drain mode, let workers finish
+    /// pending queued jobs (up to `config.shutdown_drain_deadline`),
+    /// then join.
     ///
-    /// Shutdown is also automatic via `Drop` when the last `Arc<Self>`
-    /// goes away; this method is the explicit form for tests and for
-    /// operator-driven teardown.
+    /// Shutdown also runs automatically via `Drop` when the last
+    /// `Arc<Self>` goes away; this method is the explicit form for
+    /// tests and operator-driven teardown.
     pub fn shutdown(self: Arc<Self>) {
-        // Everything happens in `Drop`; we need `&mut self` for
-        // `job_tx.take()` / `workers.take()`, and we only get that when
-        // the final `Arc` reference drops. `try_unwrap` is the graceful
-        // path — if anyone else still holds a clone, Drop fires later.
         match Arc::try_unwrap(self) {
-            Ok(engine) => drop(engine), // triggers Drop explicitly
-            Err(_arc) => {
-                // Some other holder still has a reference — signal them
-                // and let the last drop take care of joining workers.
-                _arc.shutdown.store(true, Ordering::Release);
+            Ok(engine) => drop(engine), // triggers full Drop drain+force+join
+            Err(arc) => {
+                // Other holders still reference us — signal drain so
+                // workers begin draining; the last Drop will continue
+                // through to force + join.
+                arc.shutdown.store(STATE_DRAIN, Ordering::Release);
             }
         }
     }
@@ -635,14 +657,34 @@ impl ThrustEngine {
 
 impl Drop for ThrustEngine {
     fn drop(&mut self) {
-        // Set the shutdown flag — workers poll it between iterations
-        // and exit on the next park. They don't block on `recv` (we
-        // use `try_pop`), so we don't need to close any channels to
-        // wake them.
-        self.shutdown.store(true, Ordering::Release);
+        // Phase 1: ask workers to drain remaining queued jobs.
+        self.shutdown.store(STATE_DRAIN, Ordering::Release);
 
-        // Drop the queue Arcs we own. Worker copies survive long
-        // enough to drain through their loops.
+        // Phase 2: wait for them to finish, capped at the configured
+        // deadline. Polling step granularity = 25 ms (cheap; 200 polls
+        // over 5 s of waiting). We drop the engine's queue Arcs *after*
+        // the wait so callers retrieving stats during the drain still
+        // see live counters.
+        let drain_deadline = Instant::now() + self.config.shutdown_drain_deadline;
+        let workers_count = self.workers.as_ref().map_or(0, Vec::len);
+        let active_after_drain = self.stats.workers_alive.load(Ordering::Acquire);
+        if active_after_drain > 0 {
+            let poll = Duration::from_millis(25);
+            while Instant::now() < drain_deadline {
+                if self.stats.workers_alive.load(Ordering::Acquire) == 0 {
+                    break;
+                }
+                thread::sleep(poll);
+            }
+        }
+        let _ = workers_count; // (kept here in case future tracing wants the original count)
+
+        // Phase 3: any worker still alive gets the immediate-exit
+        // signal. Workers exit at the top of their next iteration.
+        self.shutdown.store(STATE_FORCE, Ordering::Release);
+
+        // Drop our queue Arcs so worker copies can also drop after the
+        // workers exit — keeps no hidden roots alive.
         let _ = self.worker_queues.take();
         let _ = self.injector.take();
 
@@ -678,12 +720,26 @@ fn spawn_worker(
     injector: Arc<BoundedQueue<Job>>,
     combustor: Arc<WasmCombustor>,
     stats: Arc<StatsCounters>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<AtomicU8>,
 ) -> JoinHandle<()> {
+    // Track liveness so `Drop` can poll for natural drain completion
+    // before forcing exit. Increment happens on the *parent* thread so
+    // the count is accurate by the time `new()` returns; the spawned
+    // thread decrements when it's done.
+    stats.workers_alive.fetch_add(1, Ordering::AcqRel);
+    let stats_for_loop = stats.clone();
     thread::Builder::new()
         .name(format!("afterburner-thrust-{worker_id}"))
         .spawn(move || {
-            worker_loop(worker_id, queues, injector, combustor, stats, shutdown);
+            worker_loop(
+                worker_id,
+                queues,
+                injector,
+                combustor,
+                stats_for_loop,
+                shutdown,
+            );
+            stats.workers_alive.fetch_sub(1, Ordering::AcqRel);
         })
         .expect("failed to spawn thrust worker")
 }
@@ -707,7 +763,7 @@ fn worker_loop(
     injector: Arc<BoundedQueue<Job>>,
     combustor: Arc<WasmCombustor>,
     stats: Arc<StatsCounters>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<AtomicU8>,
 ) {
     let n = queues.len();
     let local = &queues[worker_id];
@@ -718,13 +774,18 @@ fn worker_loop(
     let mut iter: u64 = 0;
 
     'outer: loop {
-        if shutdown.load(Ordering::Acquire) {
+        let state = shutdown.load(Ordering::Acquire);
+        if state == STATE_FORCE {
+            // Force-exit immediately; any remaining queued jobs get
+            // their reply senders dropped (handle::recv → Err on
+            // closed channel).
             break;
         }
 
-        // 1. Injector tick — every 64 iterations, regardless of local
-        //    backlog. Without this, a steady stream of local hits would
-        //    pin injector overflow indefinitely.
+        // Work-finding sequence is identical regardless of state — only
+        // the empty-queue case differs (Drain → exit, Run → park).
+
+        // 1. Injector tick.
         if (iter & INJECTOR_POLL_MASK) == 0
             && let Some(job) = injector.try_pop()
         {
@@ -742,10 +803,7 @@ fn worker_loop(
             continue 'outer;
         }
 
-        // 3. Steal sweep — start at (id+1)%n and visit every peer once,
-        //    plus a second injector poll at the end (covers the case
-        //    where the iter mask hasn't ticked but the injector
-        //    just got fed by a thrust() overflow).
+        // 3. Steal sweep + post-sweep injector poll.
         for offset in 1..n {
             let idx = (worker_id + offset) % n;
             if let Some(job) = queues[idx].try_pop() {
@@ -762,7 +820,14 @@ fn worker_loop(
             continue 'outer;
         }
 
-        // 4. Park.
+        // 4. All queues empty.
+        if state == STATE_DRAIN {
+            // Drain complete from this worker's perspective. Any
+            // post-Drain thrust() pushes that race past this exit are
+            // either picked up by a still-alive peer or surface as a
+            // closed-reply-channel Err to the caller.
+            break;
+        }
         thread::sleep(park);
         park = (park * 2).min(park_cap);
         iter = iter.wrapping_add(1);
