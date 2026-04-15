@@ -3,6 +3,7 @@
 **Status:** Design Complete — Implementation Not Started
 **Workspace:** `afterburner/` (all member crates)
 **Depends on:** Phases A–G of `docs/IMPL_PLAN_REMAINING_WORK.md` (all shipped as of commit `3754159`)
+**Followed by:** `docs/IMPL_PLAN_USABILITY.md` — facade crate, `burn` binary, and `examples/` project land after T8. That plan's §8 calls out three API-shape commitments (`ThrustEngineConfig: Clone`; `ThrustHandle::recv_timeout`; `ThrustEngine::new -> Arc`) — honor those in T0/T2.
 **Research corpus:** `docs/papers/` (12 PDFs + 14 markdown summaries; see `docs/papers/INDEX.md`)
 **Target workload:** 10⁴–10⁵ thrusts/sec per box; each thrust 50 µs–10 ms of user CPU; scripts compiled once per workspace; fresh per-call JS state.
 
