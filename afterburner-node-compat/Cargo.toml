@@ -30,6 +30,7 @@ hex.workspace = true
 uuid.workspace = true
 ureq.workspace = true
 flate2.workspace = true
+kovan-channel.workspace = true
 
 [build-dependencies]
 # Phase 1 keeps the bundler in pure Rust (concatenation). Phase 2 pulls in
