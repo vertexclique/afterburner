@@ -13,6 +13,11 @@ default = []
 # scripts don't get ambient network access. Forwards to afterburner-core's
 # feature of the same name.
 host-http = ["afterburner-core/host-http"]
+# Daemon-mode HTTP server plumbing (http.createServer().listen()).
+# Pulls axum + tokio + hyper into the crate. The `burn` CLI enables
+# this; library consumers that only run UDF / one-shot scripts
+# leave it off and don't pay the cost.
+daemon = ["dep:axum", "dep:tokio", "dep:hyper", "dep:bytes"]
 
 [dependencies]
 afterburner-core.workspace = true
@@ -28,6 +33,10 @@ fastrace.workspace = true
 afterburner-node-compat.workspace = true
 hex.workspace = true
 base64.workspace = true
+axum = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
 
 [dev-dependencies]
 afterburner-ignite.workspace = true

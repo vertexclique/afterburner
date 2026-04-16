@@ -77,6 +77,15 @@ wasmtime = { version = "36", features = ["cranelift", "cache"] }
 wasmtime-wasi = "36"
 anyhow = "1"
 
+# B2 daemon-mode HTTP server plumbing. axum/tokio/hyper are only
+# pulled by `afterburner-wasi/daemon` (off by default) and the `burn`
+# CLI — library consumers who don't run `http.createServer().listen()`
+# don't pay the compile-time or binary-size cost.
+axum = "0.7"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "macros", "signal", "sync"] }
+hyper = "1"
+bytes = "1"
+
 rquickjs = { version = "0.11", features = ["bindgen"] }
 
 fastrace = { version = "0.7", features = ["enable"] }

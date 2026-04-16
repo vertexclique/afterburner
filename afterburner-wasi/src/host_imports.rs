@@ -1568,19 +1568,21 @@ fn wrap_envelope(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError>
 
 // ---- http server (daemon mode) ------------------------------------------
 //
-// `host_http_listen` / `host_http_reply` are stubbed in B2.1 — they
-// satisfy the plugin's import table so daemon mode can instantiate,
-// but return sentinel error codes. B2.4 wires the real axum listener
-// pool and request→reply plumbing.
+// `host_http_listen` calls into `DaemonHttp::bind_listener` which —
+// under the `daemon` feature — binds a real TCP socket and spawns an
+// axum task on the stored tokio runtime. Without the feature it
+// degrades to an accounting-only stub, matching pre-B2.4 behaviour.
+//
+// `host_http_reply` parses the JSON payload the JS polyfill handed
+// back from `res.end(body)` and forwards it through
+// `DaemonHttp::deliver_reply`, waking the per-request reply channel
+// the axum task is awaiting.
 fn wrap_http_server(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
     linker
         .func_wrap(
             NS,
             "host_http_listen",
             |mut caller: Caller<'_, HostState>, port: i32| -> i32 {
-                // Without a `DaemonHttp` attached, the coordinator
-                // isn't live — return E_PERM (caller is outside
-                // daemon mode). B2.4 wires real bind + axum spawn.
                 let Some(dh) = caller.data().daemon_http.clone() else {
                     caller.data_mut().last_error =
                         "http.createServer requires daemon mode; run via `burn foo.js` CLI".into();
@@ -1591,7 +1593,7 @@ fn wrap_http_server(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
                         format!("http.listen: invalid port {port}");
                     return E_OTHER;
                 }
-                dh.register_listener(port as u16)
+                dh.bind_listener(port as u16)
             },
         )
         .map_err(link_err)?;
@@ -1605,16 +1607,48 @@ fn wrap_http_server(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
              resp_ptr: i32,
              resp_len: i32|
              -> i32 {
-                // B2.1 stub — accept and drop. B2.4 correlates with
-                // the axum listener's per-req sender channel.
                 let Some(memory) = guest_memory(&mut caller) else {
                     return E_OTHER;
                 };
-                // Read-through to populate any stderr diagnostic path
-                // that might be useful when debugging. Ignore the
-                // payload for now.
-                let _ = read_bytes(&memory, &caller, resp_ptr, resp_len);
-                let _ = req_id;
+                let Some(dh) = caller.data().daemon_http.clone() else {
+                    return E_OTHER;
+                };
+                let Some(bytes) = read_bytes(&memory, &caller, resp_ptr, resp_len) else {
+                    return E_OTHER;
+                };
+                let parsed: serde_json::Value = match serde_json::from_slice(&bytes) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        caller.data_mut().last_error = format!("http_reply json: {e}");
+                        return E_OTHER;
+                    }
+                };
+                let status = parsed
+                    .get("status")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(500) as u16;
+                let headers: Vec<(String, String)> = parsed
+                    .get("headers")
+                    .and_then(|v| v.as_object())
+                    .map(|obj| {
+                        obj.iter()
+                            .filter_map(|(k, v)| {
+                                v.as_str().map(|s| (k.clone(), s.to_string()))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let body = parsed
+                    .get("body")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.as_bytes().to_vec())
+                    .unwrap_or_default();
+                let reply = crate::daemon_http::ReplyEnvelope {
+                    status,
+                    headers,
+                    body,
+                };
+                dh.deliver_reply(req_id, reply);
                 0
             },
         )

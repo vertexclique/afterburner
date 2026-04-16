@@ -236,19 +236,28 @@ impl WasmCombustor {
         &self.state_store
     }
 
-    /// Spawn a long-lived daemon runtime against this combustor's
-    /// engine + instance-pre + shared state. The returned
-    /// [`DaemonRuntime`] has already run `daemon-init` on the
-    /// supplied user source, so any `http.createServer(cb).listen(port)`
-    /// calls have registered their listeners on the shared
-    /// [`DaemonHttp`] coordinator.
-    ///
-    /// This is the entry point the `burn` CLI uses for top-level
-    /// scripts — B2.5 wires it in.
+    /// Spawn a long-lived daemon runtime with a stub `DaemonHttp`
+    /// coordinator — no real TCP binding, just accounting. Used by
+    /// tests that exercise the plugin ABI without needing a tokio
+    /// runtime or real sockets.
     pub fn spawn_daemon(
         &self,
         source: &str,
         manifold: Manifold,
+    ) -> Result<crate::daemon_runtime::DaemonRuntime> {
+        self.spawn_daemon_with(source, manifold, crate::daemon_http::DaemonHttp::shared())
+    }
+
+    /// Spawn a long-lived daemon runtime against an existing
+    /// [`DaemonHttp`] coordinator. The `burn` CLI constructs one via
+    /// [`DaemonHttp::with_runtime`] (under the `daemon` feature) so
+    /// `__host_http_listen` lands on a real axum listener. Library
+    /// callers pass [`DaemonHttp::shared`] for stub mode.
+    pub fn spawn_daemon_with(
+        &self,
+        source: &str,
+        manifold: Manifold,
+        daemon_http: Arc<crate::daemon_http::DaemonHttp>,
     ) -> Result<crate::daemon_runtime::DaemonRuntime> {
         crate::daemon_runtime::DaemonRuntime::new(
             &self.engine,
@@ -257,6 +266,7 @@ impl WasmCombustor {
             manifold,
             Some(self.state_store.clone()),
             self.host_context.clone(),
+            daemon_http,
         )
     }
 }

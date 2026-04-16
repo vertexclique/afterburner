@@ -60,8 +60,8 @@ impl DaemonRuntime {
         manifold: Manifold,
         state_store: Option<SharedStateStore>,
         host_context: Option<Arc<dyn HostContext>>,
+        daemon_http: Arc<DaemonHttp>,
     ) -> Result<Self> {
-        let daemon_http = DaemonHttp::shared();
         let state_store = state_store.unwrap_or_else(InMemoryStateStore::shared);
 
         // daemon-init envelope — same script-mode shape, just keyed
