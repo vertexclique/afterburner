@@ -67,6 +67,7 @@ dependencies = [
  "clap",
  "rustyline",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

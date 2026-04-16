@@ -28,6 +28,7 @@ serde_json = { workspace = true }
 clap = { version = "4", features = ["derive"], optional = true }
 rustyline = { version = "14", optional = true }
 anyhow = { version = "1", optional = true }
+tokio = { workspace = true, optional = true }
 
 [features]
 default = ["wasm", "native", "thrust"]
@@ -40,5 +41,15 @@ flow = ["dep:afterburner-flow", "wasm"]
 # all host backends unconditionally (no feature block there).
 host-http = ["afterburner-wasi?/host-http"]
 # `bin` pulls in the CLI deps + selects the default modes that `burn`
-# assumes (adaptive for auto-tier, thrust for --workers).
-bin = ["dep:clap", "dep:rustyline", "dep:anyhow", "adaptive", "thrust"]
+# assumes (adaptive for auto-tier, thrust for --workers, wasi/daemon
+# for http.createServer() support, tokio for the daemon event loop
+# and SIGINT handler).
+bin = [
+    "dep:clap",
+    "dep:rustyline",
+    "dep:anyhow",
+    "dep:tokio",
+    "adaptive",
+    "thrust",
+    "afterburner-wasi/daemon",
+]

@@ -10,7 +10,6 @@ use crate::{Afterburner, AfterburnerError, EnvAccess, ScriptInvocation};
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::Path;
 
 use super::args::Cli;
 use super::manifold::build_manifold;
@@ -82,11 +81,3 @@ pub fn execute(
     Ok(())
 }
 
-/// Resolve a user-supplied script path to an absolute path suitable
-/// for `process.argv[1]`. Falls back to the raw string if the path
-/// can't be canonicalised (e.g. not yet created).
-pub fn script_label(path: &Path) -> String {
-    path.canonicalize()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| path.to_string_lossy().into_owned())
-}

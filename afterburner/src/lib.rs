@@ -61,7 +61,7 @@ pub use afterburner_core::{
 #[cfg(feature = "wasm")]
 pub mod wasm {
     //! WASM backend — untrusted code via Wasmtime + QuickJS plugin.
-    pub use afterburner_wasi::{WasmCombustor, WasmConfig};
+    pub use afterburner_wasi::{DaemonHttp, DaemonRuntime, WasmCombustor, WasmConfig};
 }
 
 #[cfg(feature = "native")]

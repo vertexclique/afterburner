@@ -16,7 +16,8 @@
 use crate::daemon_http::DaemonHttp;
 use crate::host::HostState;
 use afterburner_core::{
-    AfterburnerError, HostContext, InMemoryStateStore, Manifold, Result, SharedStateStore,
+    AfterburnerError, HostContext, InMemoryStateStore, Manifold, Result, ScriptInvocation,
+    SharedStateStore,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -62,19 +63,58 @@ impl DaemonRuntime {
         host_context: Option<Arc<dyn HostContext>>,
         daemon_http: Arc<DaemonHttp>,
     ) -> Result<Self> {
+        let mut d = Self::instantiate(
+            engine,
+            instance_pre,
+            manifold,
+            state_store,
+            host_context,
+            daemon_http,
+        )?;
+        d.run_init(source, &ScriptInvocation::default())?;
+        Ok(d)
+    }
+
+    /// Variant that threads a [`ScriptInvocation`] (argv + env) into
+    /// `daemon-init`. The CLI uses this so `process.argv` /
+    /// `process.env` match what the user expected when they wrote
+    /// `burn server.js arg1 arg2`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_invocation(
+        engine: &Engine,
+        instance_pre: &InstancePre<HostState>,
+        source: &str,
+        invocation: &ScriptInvocation,
+        manifold: Manifold,
+        state_store: Option<SharedStateStore>,
+        host_context: Option<Arc<dyn HostContext>>,
+        daemon_http: Arc<DaemonHttp>,
+    ) -> Result<Self> {
+        let mut d = Self::instantiate(
+            engine,
+            instance_pre,
+            manifold,
+            state_store,
+            host_context,
+            daemon_http,
+        )?;
+        d.run_init(source, invocation)?;
+        Ok(d)
+    }
+
+    /// Build the long-lived Store + plugin instance WITHOUT running
+    /// daemon-init. Callers that need to inspect partial output on
+    /// init failure use `instantiate()` + [`run_init`] separately
+    /// instead of the convenience constructors.
+    pub fn instantiate(
+        engine: &Engine,
+        instance_pre: &InstancePre<HostState>,
+        manifold: Manifold,
+        state_store: Option<SharedStateStore>,
+        host_context: Option<Arc<dyn HostContext>>,
+        daemon_http: Arc<DaemonHttp>,
+    ) -> Result<Self> {
         let state_store = state_store.unwrap_or_else(InMemoryStateStore::shared);
-
-        // daemon-init envelope — same script-mode shape, just keyed
-        // "daemon-init" so the plugin knows to preserve the Store.
-        let envelope = serde_json::json!({
-            "mode": "daemon-init",
-            "source": source,
-        });
-        let envelope_bytes = serde_json::to_vec(&envelope)?;
-
-        // Stdin is unused in daemon mode (we use pending_envelope
-        // instead) — hand it an empty buffer so HostState::new's
-        // input pipe satisfies WASI.
         let mut state = HostState::new(
             b"",
             None,
@@ -83,14 +123,10 @@ impl DaemonRuntime {
             state_store,
             host_context,
         );
-        state.pending_envelope = envelope_bytes;
         state.daemon_http = Some(daemon_http.clone());
 
         let mut store = Store::new(engine, state);
         store.limiter(|s| &mut s.limits);
-        // Daemon mode is a long-lived process — no per-call fuel cap
-        // makes sense. Individual events can still be bounded by the
-        // dispatch_event caller (future work: per-event timeouts).
         store
             .set_fuel(u64::MAX)
             .map_err(|e| AfterburnerError::Engine(format!("set_fuel: {e}")))?;
@@ -103,15 +139,34 @@ impl DaemonRuntime {
             .get_typed_func::<(), ()>(&mut store, "daemon_step")
             .map_err(|e| AfterburnerError::Engine(format!("daemon_step lookup: {e}")))?;
 
-        daemon_step
-            .call(&mut store, ())
-            .map_err(|trap| map_daemon_trap("daemon-init", trap))?;
-
         Ok(Self {
             store,
             daemon_step,
             daemon_http,
         })
+    }
+
+    /// Evaluate the user source as daemon-init. On success, JS state
+    /// (handler tables, plenum caches, globals) persists in the
+    /// Store. On failure, `self` is still valid — callers can call
+    /// [`drain_stdout`] / [`drain_stderr`] to retrieve whatever the
+    /// script wrote before it threw.
+    pub fn run_init(
+        &mut self,
+        source: &str,
+        invocation: &ScriptInvocation,
+    ) -> Result<()> {
+        let envelope = serde_json::json!({
+            "mode": "daemon-init",
+            "source": source,
+            "argv": invocation.argv,
+            "env": invocation.env,
+        });
+        let envelope_bytes = serde_json::to_vec(&envelope)?;
+        self.store.data_mut().pending_envelope = envelope_bytes;
+        self.daemon_step
+            .call(&mut self.store, ())
+            .map_err(|trap| map_daemon_trap("daemon-init", trap))
     }
 
     /// Dispatch one event to the running daemon. Event shape:

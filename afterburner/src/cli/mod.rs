@@ -13,6 +13,7 @@ mod banner;
 mod bench;
 mod build;
 mod check;
+mod daemon;
 mod manifold;
 mod repl;
 mod run;

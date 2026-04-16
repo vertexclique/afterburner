@@ -236,6 +236,17 @@ impl WasmCombustor {
         &self.state_store
     }
 
+    /// Shared engine — DaemonRuntime::instantiate uses this when the
+    /// CLI constructs the daemon from combustor internals.
+    pub fn engine(&self) -> &Engine {
+        &self.engine
+    }
+
+    /// Pre-resolved plugin instance — shared between thrust + daemon.
+    pub fn instance_pre(&self) -> &Arc<InstancePre<HostState>> {
+        &self.instance_pre
+    }
+
     /// Spawn a long-lived daemon runtime with a stub `DaemonHttp`
     /// coordinator — no real TCP binding, just accounting. Used by
     /// tests that exercise the plugin ABI without needing a tokio
@@ -263,6 +274,29 @@ impl WasmCombustor {
             &self.engine,
             &self.instance_pre,
             source,
+            manifold,
+            Some(self.state_store.clone()),
+            self.host_context.clone(),
+            daemon_http,
+        )
+    }
+
+    /// Like [`spawn_daemon_with`] but threads a [`ScriptInvocation`]
+    /// (argv + env) through. Matches the script-mode CLI surface so
+    /// `process.argv` / `process.env` inside the daemon-init script
+    /// reflect what the user typed.
+    pub fn spawn_daemon_with_invocation(
+        &self,
+        source: &str,
+        invocation: &afterburner_core::ScriptInvocation,
+        manifold: Manifold,
+        daemon_http: Arc<crate::daemon_http::DaemonHttp>,
+    ) -> Result<crate::daemon_runtime::DaemonRuntime> {
+        crate::daemon_runtime::DaemonRuntime::new_with_invocation(
+            &self.engine,
+            &self.instance_pre,
+            source,
+            invocation,
             manifold,
             Some(self.state_store.clone()),
             self.host_context.clone(),
