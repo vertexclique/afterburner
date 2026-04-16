@@ -235,6 +235,30 @@ impl WasmCombustor {
     pub fn state_store(&self) -> &SharedStateStore {
         &self.state_store
     }
+
+    /// Spawn a long-lived daemon runtime against this combustor's
+    /// engine + instance-pre + shared state. The returned
+    /// [`DaemonRuntime`] has already run `daemon-init` on the
+    /// supplied user source, so any `http.createServer(cb).listen(port)`
+    /// calls have registered their listeners on the shared
+    /// [`DaemonHttp`] coordinator.
+    ///
+    /// This is the entry point the `burn` CLI uses for top-level
+    /// scripts — B2.5 wires it in.
+    pub fn spawn_daemon(
+        &self,
+        source: &str,
+        manifold: Manifold,
+    ) -> Result<crate::daemon_runtime::DaemonRuntime> {
+        crate::daemon_runtime::DaemonRuntime::new(
+            &self.engine,
+            &self.instance_pre,
+            source,
+            manifold,
+            Some(self.state_store.clone()),
+            self.host_context.clone(),
+        )
+    }
 }
 
 impl Drop for WasmCombustor {

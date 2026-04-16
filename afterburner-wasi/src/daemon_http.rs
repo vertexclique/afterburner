@@ -96,6 +96,15 @@ impl DaemonHttp {
         Arc::new(Self::new())
     }
 
+    /// Number of currently-registered listeners. B2.5 uses this to
+    /// decide whether `burn foo.js` should exit after running daemon-
+    /// init (no listeners → plain script) or enter the event loop
+    /// (listeners present → daemon).
+    pub fn listener_count(&self) -> usize {
+        let seen = self.next_server_id.load(Ordering::Relaxed);
+        (1..seen).filter(|id| self.listeners.get(id).is_some()).count()
+    }
+
     /// Reserve a fresh `server_id` and record the listener slot. The
     /// actual socket bind + axum spawn happens in B2.4; this just
     /// threads the accounting so the JS side gets a stable id back.
