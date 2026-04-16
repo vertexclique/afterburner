@@ -195,3 +195,120 @@ fn daemon_has_no_listeners_when_init_skips_listen() {
         .expect("spawn daemon");
     assert!(!daemon.has_listeners());
 }
+
+#[test]
+fn http_createserver_polyfill_end_to_end() {
+    // Full polyfill-driven path: user code calls
+    // `http.createServer(cb).listen(port)`. The polyfill registers
+    // the handler onto `globalThis.__ab_http_handlers` keyed by the
+    // `server_id` that `__host_http_listen` returned. A dispatched
+    // event reaches the user's `cb(req, res)` — `res.end(body)`
+    // flows back through `__host_http_reply` (stubbed in B2.1,
+    // real axum wiring lands in B2.4).
+    let c = fresh();
+    let mut daemon = c
+        .spawn_daemon(
+            r#"
+            const http = require('http');
+            const server = http.createServer(function(req, res) {
+                console.log('server got ' + req.method + ' ' + req.url);
+                res.setHeader('content-type', 'text/plain');
+                res.end('hello from burn\n');
+            });
+            server.listen(3000);
+            console.log('listening on port ' + server.address().port);
+            "#,
+            Manifold::open(),
+        )
+        .expect("spawn daemon");
+
+    assert!(daemon.has_listeners(), "createServer().listen() should register a listener");
+    let startup = String::from_utf8_lossy(&daemon.drain_stdout()).into_owned();
+    assert!(
+        startup.contains("listening on port 3000"),
+        "stdout = {startup:?}"
+    );
+
+    daemon
+        .dispatch_event(json!({
+            "kind": "http-request",
+            "server_id": 1,
+            "req_id": 42,
+            "req": { "method": "GET", "url": "/hello", "headers": {} }
+        }))
+        .expect("dispatch");
+
+    let full = String::from_utf8_lossy(&daemon.drain_stdout()).into_owned();
+    assert!(
+        full.contains("server got GET /hello"),
+        "stdout after dispatch = {full:?}"
+    );
+}
+
+#[test]
+fn http_req_text_resolves_body() {
+    // Polyfill's `req.text()` is a Node-conventional convenience
+    // that Promise-wraps the full body. Exercised via a handler
+    // that echoes req.text() through console.log.
+    let c = fresh();
+    let mut daemon = c
+        .spawn_daemon(
+            r#"
+            const http = require('http');
+            http.createServer(async function(req, res) {
+                const body = await req.text();
+                console.log('got-body: ' + body);
+                res.end('ok');
+            }).listen(3000);
+            "#,
+            Manifold::open(),
+        )
+        .expect("spawn");
+
+    daemon
+        .dispatch_event(json!({
+            "kind": "http-request",
+            "server_id": 1,
+            "req_id": 7,
+            "req": { "method": "POST", "url": "/echo", "body": "ping" }
+        }))
+        .expect("dispatch");
+
+    let stdout = String::from_utf8_lossy(&daemon.drain_stdout()).into_owned();
+    assert!(stdout.contains("got-body: ping"), "stdout = {stdout:?}");
+}
+
+#[test]
+fn http_createserver_request_event_listener_also_fires() {
+    // Node allows `server.on('request', cb)` as an alternative to
+    // passing the listener to createServer. The polyfill emits
+    // 'request' on the Server EventEmitter — a cb attached this
+    // way should see the same event.
+    let c = fresh();
+    let mut daemon = c
+        .spawn_daemon(
+            r#"
+            const http = require('http');
+            const server = http.createServer();
+            server.on('request', function(req, res) {
+                console.log('via-on-request: ' + req.url);
+                res.end('');
+            });
+            server.listen(4000);
+            "#,
+            Manifold::open(),
+        )
+        .expect("spawn");
+
+    daemon
+        .dispatch_event(json!({
+            "kind": "http-request",
+            "server_id": 1,
+            "req_id": 1,
+            "req": { "method": "GET", "url": "/pathA" }
+        }))
+        .expect("dispatch");
+
+    let stdout = String::from_utf8_lossy(&daemon.drain_stdout()).into_owned();
+    assert!(stdout.contains("via-on-request: /pathA"), "stdout = {stdout:?}");
+}
