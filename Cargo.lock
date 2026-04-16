@@ -182,6 +182,7 @@ dependencies = [
  "base64",
  "fastrace",
  "hex",
+ "kovan-channel",
  "kovan-map",
  "p256",
  "rand 0.8.5",

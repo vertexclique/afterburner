@@ -41,6 +41,18 @@ pub struct HostState {
     /// the per-thrust preamble compile that would otherwise publish the
     /// input as a JS global. Empty if the call uses the legacy envelope.
     pub pending_input: Vec<u8>,
+    /// JSON-serialized envelope for the daemon path's `daemon_step`
+    /// re-entry. Separate from `pending_input` because daemon mode
+    /// re-uses the same Store across many calls and we don't want one
+    /// channel's state to leak into the other. Host sets this before
+    /// each `daemon_step` invocation; plugin reads via the
+    /// `host_get_envelope` import.
+    pub pending_envelope: Vec<u8>,
+    /// Optional daemon HTTP coordinator. `Some` only in daemon mode —
+    /// owns the axum listeners + per-req reply channels. `None` for
+    /// all one-shot thrust paths so UDF/script callers don't pay the
+    /// coordinator's startup cost.
+    pub daemon_http: Option<Arc<crate::daemon_http::DaemonHttp>>,
 }
 
 impl HostState {
@@ -84,6 +96,8 @@ impl HostState {
             hash_handles: HashHandleStore::new(),
             last_error: String::new(),
             pending_input: Vec::new(),
+            pending_envelope: Vec::new(),
+            daemon_http: None,
         }
     }
 

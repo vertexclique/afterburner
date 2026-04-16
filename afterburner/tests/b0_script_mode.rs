@@ -141,8 +141,10 @@ fn library_run_script_with_invocation_threads_argv_env() {
         .manifold(Manifold::sealed())
         .build()
         .expect("build");
-    let mut inv = ScriptInvocation::default();
-    inv.argv = vec!["burn".into(), "[test]".into(), "x".into(), "y".into()];
+    let mut inv = ScriptInvocation {
+        argv: vec!["burn".into(), "[test]".into(), "x".into(), "y".into()],
+        ..ScriptInvocation::default()
+    };
     inv.env.insert("MY_FLAG".into(), "one".into());
     inv.env.insert("OTHER".into(), "two".into());
 

@@ -77,8 +77,10 @@ pub extern "C" fn initialize_runtime() {
     }
 }
 
-/// `_start` — reads the JSON envelope from stdin and delegates to the
-/// mode dispatcher in [`modes`].
+/// `_start` — one-shot path. Reads the JSON envelope from stdin and
+/// delegates to the mode dispatcher in [`modes`]. Used by every
+/// combustor that tears down the Store after a single call (UDF
+/// `invoke`, `script`, `compile`, `legacy`).
 #[unsafe(export_name = "_start")]
 pub extern "C" fn start() {
     let envelope = match stdio::read_stdin() {
@@ -92,4 +94,49 @@ pub extern "C" fn start() {
     };
 
     modes::dispatch(&parsed);
+}
+
+/// `daemon_step` — long-lived-Store path. Reads the envelope bytes
+/// from `HostState::pending_envelope` via the `host_get_envelope`
+/// import, parses, and dispatches.
+///
+/// The host keeps the same Wasmtime Store alive across many
+/// `daemon_step` invocations so JS-side state (plenum caches,
+/// handler tables from `http.createServer().listen(...)`) persists.
+/// That's what makes daemon mode different from every other
+/// combustor path in this plugin — nothing here reads stdin or
+/// tears down the runtime.
+#[unsafe(export_name = "daemon_step")]
+pub extern "C" fn daemon_step() {
+    let env_bytes = read_daemon_envelope();
+    let parsed: serde_json::Value = match serde_json::from_slice(&env_bytes) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    modes::dispatch(&parsed);
+}
+
+/// Read `HostState::pending_envelope` via the `host_get_envelope`
+/// import directly from Rust (no JS hop). Mirrors
+/// `call_read` in `globals/mod.rs` but is available at the top
+/// level of the plugin so `daemon_step` can dispatch in Rust.
+fn read_daemon_envelope() -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = unsafe { host_api::host_get_envelope(buf.as_mut_ptr(), buf.len() as u32) };
+        if n >= 0 {
+            buf.truncate(n as usize);
+            return buf;
+        }
+        if n == -4 {
+            let new_cap = buf.len().saturating_mul(2);
+            if new_cap > 16 * 1024 * 1024 {
+                return alloc::vec::Vec::new();
+            }
+            buf.resize(new_cap, 0);
+            continue;
+        }
+        return alloc::vec::Vec::new();
+    }
 }

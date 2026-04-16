@@ -96,8 +96,10 @@ fn uncaught_exception_is_exit_1_with_captured_output() {
 #[test]
 fn argv_and_env_threaded_through_invocation() {
     let c = fresh();
-    let mut inv = ScriptInvocation::default();
-    inv.argv = vec!["burn".into(), "[eval]".into(), "first".into(), "second".into()];
+    let mut inv = ScriptInvocation {
+        argv: vec!["burn".into(), "[eval]".into(), "first".into(), "second".into()],
+        ..ScriptInvocation::default()
+    };
     inv.env.insert("NATIVE_FLAG".into(), "yes".into());
 
     let out = c

@@ -141,9 +141,8 @@ fn node_prefix_with_unknown_also_throws() {
 fn fs_promises_readfile_works_end_to_end() {
     // Confirms that `fs/promises` doesn't just resolve — its API
     // actually hits the host, matching `require('fs').promises`.
-    let src = format!(
-        r#"
-        (async () => {{
+    let src = r#"
+        (async () => {
             const fs = require('node:fs');
             const fsp = require('node:fs/promises');
             if (fs.promises !== fsp) throw new Error("fs.promises !== fs/promises");
@@ -154,10 +153,9 @@ fn fs_promises_readfile_works_end_to_end() {
             if (back !== "ok") throw new Error("read != wrote: " + back);
             await fsp.unlink(tmp);
             console.log("fs/promises ok");
-        }})();
-        "#
-    );
-    let out = run_burn(&src);
+        })();
+        "#;
+    let out = run_burn(src);
     assert_ok(&out, "fs/promises round-trip");
     assert!(String::from_utf8_lossy(&out.stdout).contains("fs/promises ok"));
 }

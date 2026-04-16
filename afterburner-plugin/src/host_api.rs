@@ -309,4 +309,34 @@ unsafe extern "C" {
     // JS callers use the `__AB_GET_INPUT__` global installed in
     // `globals::install`.
     pub fn host_get_input(out_ptr: *mut u8, out_cap: u32) -> i32;
+
+    // ---- daemon envelope (long-lived Store re-entry) ----------------
+    //
+    // The daemon path reuses the same Wasmtime Store across many
+    // `daemon_step` invocations (so JS globals — including registered
+    // HTTP handlers — persist). Each step reads its envelope from
+    // `HostState::pending_envelope` via this import. We keep this
+    // separate from `host_get_input` because the UDF invoke path
+    // still uses the latter for per-call user-data input.
+    pub fn host_get_envelope(out_ptr: *mut u8, out_cap: u32) -> i32;
+
+    // ---- http server (daemon mode B2) -------------------------------
+    //
+    // `host_http_listen(port)` binds an axum listener on the host and
+    // returns a `server_id` (>0) — scripts that call
+    // `http.createServer(cb).listen(port)` hand the port to this
+    // import. Subsequent HTTP requests on that listener are dispatched
+    // through `daemon_step` with `{kind: "http-request", ...}`.
+    // Returns a negative error code on permission denied / port in use.
+    pub fn host_http_listen(port: u32) -> i32;
+
+    // `host_http_reply(req_id, resp_json_ptr, resp_json_len)` sends
+    // the reply bytes through the host's internal request→reply
+    // channel so axum can write the response to the socket. `resp_json`
+    // shape: `{status, headers: {...}, body: string}`.
+    pub fn host_http_reply(
+        req_id: i64,
+        resp_ptr: *const u8,
+        resp_len: u32,
+    ) -> i32;
 }

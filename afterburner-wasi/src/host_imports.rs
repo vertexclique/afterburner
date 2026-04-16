@@ -46,6 +46,8 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_host_context(linker)?;
     wrap_last_error(linker)?;
     wrap_input(linker)?;
+    wrap_envelope(linker)?;
+    wrap_http_server(linker)?;
     Ok(())
 }
 
@@ -1535,6 +1537,85 @@ fn wrap_input(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 // shared borrow on `pending_input` simultaneously.
                 let input = caller.data().pending_input.clone();
                 write_out(&mut caller, &memory, out_ptr, out_cap, &input)
+            },
+        )
+        .map_err(link_err)?;
+    Ok(())
+}
+
+// ---- daemon envelope slot (long-lived-Store re-entry) -------------------
+//
+// Mirrors `wrap_input` but routes to `HostState::pending_envelope`.
+// Daemon mode's `daemon_step` export reads each step's envelope via
+// this import rather than stdin, because WASI preview1 has no way
+// to reset stdin between calls.
+fn wrap_envelope(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    linker
+        .func_wrap(
+            NS,
+            "host_get_envelope",
+            |mut caller: Caller<'_, HostState>, out_ptr: i32, out_cap: i32| -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let env = caller.data().pending_envelope.clone();
+                write_out(&mut caller, &memory, out_ptr, out_cap, &env)
+            },
+        )
+        .map_err(link_err)?;
+    Ok(())
+}
+
+// ---- http server (daemon mode) ------------------------------------------
+//
+// `host_http_listen` / `host_http_reply` are stubbed in B2.1 — they
+// satisfy the plugin's import table so daemon mode can instantiate,
+// but return sentinel error codes. B2.4 wires the real axum listener
+// pool and request→reply plumbing.
+fn wrap_http_server(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    linker
+        .func_wrap(
+            NS,
+            "host_http_listen",
+            |mut caller: Caller<'_, HostState>, port: i32| -> i32 {
+                // Without a `DaemonHttp` attached, the coordinator
+                // isn't live — return E_PERM (caller is outside
+                // daemon mode). B2.4 wires real bind + axum spawn.
+                let Some(dh) = caller.data().daemon_http.clone() else {
+                    caller.data_mut().last_error =
+                        "http.createServer requires daemon mode; run via `burn foo.js` CLI".into();
+                    return E_PERMISSION;
+                };
+                if !(1..=65535).contains(&port) {
+                    caller.data_mut().last_error =
+                        format!("http.listen: invalid port {port}");
+                    return E_OTHER;
+                }
+                dh.register_listener(port as u16)
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_http_reply",
+            |mut caller: Caller<'_, HostState>,
+             req_id: i64,
+             resp_ptr: i32,
+             resp_len: i32|
+             -> i32 {
+                // B2.1 stub — accept and drop. B2.4 correlates with
+                // the axum listener's per-req sender channel.
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                // Read-through to populate any stderr diagnostic path
+                // that might be useful when debugging. Ignore the
+                // payload for now.
+                let _ = read_bytes(&memory, &caller, resp_ptr, resp_len);
+                let _ = req_id;
+                0
             },
         )
         .map_err(link_err)?;

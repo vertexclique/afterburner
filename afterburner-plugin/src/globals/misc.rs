@@ -71,6 +71,46 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
             }
         }),
     );
+
+    // Daemon-mode envelope getter. Same shape as __AB_GET_INPUT__ but
+    // routes to `HostState::pending_envelope` — the long-lived Store
+    // re-entry channel. Plugin's `daemon_step` export calls this at
+    // the top of every dispatch.
+    let _ = globals.set(
+        "__AB_GET_ENVELOPE__",
+        Func::from(|| -> String {
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                let n = unsafe { host_get_envelope(buf.as_mut_ptr(), buf.len() as u32) };
+                if n >= 0 {
+                    buf.truncate(n as usize);
+                    return String::from_utf8_lossy(&buf).into_owned();
+                }
+                if n == -4 {
+                    let new_cap = buf.len().saturating_mul(2);
+                    buf.resize(new_cap, 0);
+                    continue;
+                }
+                return String::new();
+            }
+        }),
+    );
+
+    // HTTP-server host imports. JS polyfill calls these from
+    // `http.createServer().listen(...)` and the `ServerResponse.end()`
+    // path. `f64` across the ABI boundary is the JS-number → i64
+    // bridge (rquickjs exposes integers through f64 for portability).
+    let _ = globals.set(
+        "__host_http_listen",
+        Func::from(|port: f64| -> f64 { unsafe { host_http_listen(port as u32) as f64 } }),
+    );
+    let _ = globals.set(
+        "__host_http_reply",
+        Func::from(|req_id: f64, resp_json: String| -> i32 {
+            let b = resp_json.as_bytes();
+            unsafe { host_http_reply(req_id as i64, b.as_ptr(), b.len() as u32) }
+        }),
+    );
 }
 
 fn install_os<'js>(globals: &Object<'js>) {

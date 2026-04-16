@@ -503,15 +503,14 @@ fn exception_detail(value: &rquickjs::Value<'_>) -> String {
             (Some(m), Some(s)) => format!("{name}: {m}\n{s}"),
             (Some(m), None) => format!("{name}: {m}"),
             (None, Some(s)) => s,
-            (None, None) => format!("{name}"),
+            (None, None) => name,
         };
     }
-    if value.is_string() {
-        if let Some(s) = value.as_string() {
-            if let Ok(text) = s.to_string() {
-                return text;
-            }
-        }
+    if value.is_string()
+        && let Some(s) = value.as_string()
+        && let Ok(text) = s.to_string()
+    {
+        return text;
     }
     format!("uncaught exception (type {})", value.type_of().as_str())
 }

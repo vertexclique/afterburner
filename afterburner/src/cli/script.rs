@@ -50,9 +50,10 @@ fn collect_env(cli: &Cli) -> BTreeMap<String, String> {
     }
 }
 
-/// Run `source` in script mode and forward captured stdout / stderr
-/// + exit code to the real host process streams. On `exit_code != 0`
-/// this calls [`std::process::exit`] — same semantics as Node.
+/// Run `source` in script mode and forward the captured stdout,
+/// stderr, and exit code to the real host process streams. On
+/// `exit_code != 0` this calls [`std::process::exit`] — same
+/// semantics as Node.
 pub fn execute(
     ab: &Afterburner,
     source: &str,

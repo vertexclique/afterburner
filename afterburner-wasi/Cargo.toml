@@ -21,6 +21,7 @@ wasmtime-wasi = { workspace = true, features = ["preview1"] }
 serde.workspace = true
 serde_json.workspace = true
 kovan-map.workspace = true
+kovan-channel.workspace = true
 anyhow.workspace = true
 tempfile.workspace = true
 fastrace.workspace = true
