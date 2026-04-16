@@ -64,7 +64,7 @@ implementation.
 | `punycode` | ✅ | [punycode](https://nodejs.org/docs/latest-v20.x/api/punycode.html) | Deprecated in Node but still ships — kept for compat. |
 | `querystring` | ✅ | [querystring](https://nodejs.org/docs/latest-v20.x/api/querystring.html) | Legacy parser. Use `URLSearchParams` for new code. |
 | `string_decoder` | ✅ | [string_decoder](https://nodejs.org/docs/latest-v20.x/api/string_decoder.html) | UTF-8 only. |
-| `timers` | ✅ | [timers](https://nodejs.org/docs/latest-v20.x/api/timers.html) | Mirror of the globals above. |
+| `timers` | ✅ | [timers](https://nodejs.org/docs/latest-v20.x/api/timers.html) | Mirror of the globals above. `timers/promises` (`setTimeout` / `setImmediate` returning Promises, with `AbortSignal` support) reachable as its own require target. `timers/promises.setInterval` async iterator is not implemented. |
 | `url` | ✅ | [url](https://nodejs.org/docs/latest-v20.x/api/url.html) | Both legacy (`url.parse`) and WHATWG. |
 | `util` | 🟡 | [util](https://nodejs.org/docs/latest-v20.x/api/util.html) | `format`, `inspect`, `inherits`, `promisify`, `callbackify`, `deprecate`, `types.*`, `TextEncoder/Decoder`. Missing: `util.parseArgs`, `util.styleText`, debug-log infrastructure. |
 
@@ -72,7 +72,7 @@ implementation.
 
 | Module | Status | Node.js docs | Notes |
 |:-------|:------:|:-------------|:------|
-| `stream` | 🟡 | [stream](https://nodejs.org/docs/latest-v20.x/api/stream.html) | `Readable`, `Writable`, `Duplex`, `Transform`, `PassThrough`, `pipeline`. Object-mode and flowing-mode work. Missing: web-streams interop (`Readable.toWeb` / `Writable.toWeb`). |
+| `stream` | 🟡 | [stream](https://nodejs.org/docs/latest-v20.x/api/stream.html) | `Readable`, `Writable`, `Duplex`, `Transform`, `PassThrough`, `pipeline`. Object-mode and flowing-mode work. `stream/promises` (Promise-returning `pipeline` / `finished`) reachable as its own require target. Missing: web-streams interop (`Readable.toWeb` / `Writable.toWeb`). |
 
 ### Host-backed — capability-gated via `Manifold`
 
@@ -84,11 +84,11 @@ capabilities.
 | Module | Status | Node.js docs | Capability | Notes |
 |:-------|:------:|:-------------|:-----------|:------|
 | `fs` (sync surface) | 🟡 | [fs](https://nodejs.org/docs/latest-v20.x/api/fs.html) | `Manifold::fs` | `readFileSync`, `writeFileSync`, `existsSync`, `statSync`, `unlinkSync`, `renameSync`, `mkdirSync`, `readdirSync`, plus chunked `createReadStream` / `createWriteStream`. Missing: `watch`, file descriptors, `cp`, `realpath`. |
-| `fs/promises` | 🟡 | [fs#promises-api](https://nodejs.org/docs/latest-v20.x/api/fs.html#promises-api) | `Manifold::fs` | Promise wrappers around the sync surface. Same coverage. |
+| `fs/promises` | 🟡 | [fs#promises-api](https://nodejs.org/docs/latest-v20.x/api/fs.html#promises-api) | `Manifold::fs` | Promise wrappers around the sync surface. Reachable as `require('node:fs/promises')` **or** via `require('fs').promises` — same object. |
 | `crypto` | ✅ | [crypto](https://nodejs.org/docs/latest-v20.x/api/crypto.html) | `Manifold::crypto` | Hashes (`createHash` SHA-1/256/384/512, MD5), HMACs, AES-GCM/CBC, PBKDF2, scrypt, RSA + ECDSA `sign`/`verify` (PEM keys), `randomBytes`, `randomUUID`. Streaming `createHash` / `createSign` / `createVerify`. |
 | `http` | 🟡 | [http](https://nodejs.org/docs/latest-v20.x/api/http.html) | `Manifold::net` | Outbound only via `http.request` / `http.get`. Per-call wall-clock cap via `Manifold::http_timeout_ms`. **Inbound `http.createServer().listen()` lands in B2** of the burn-runtime plan. |
 | `https` | 🟡 | [https](https://nodejs.org/docs/latest-v20.x/api/https.html) | `Manifold::net` | Same surface as `http`; TLS handled by the host. |
-| `dns` | 🟡 | [dns](https://nodejs.org/docs/latest-v20.x/api/dns.html) | `Manifold::net` | `lookup`, `resolve` with bounded per-call wall-clock timeout. Async + promise variants both present. |
+| `dns` | 🟡 | [dns](https://nodejs.org/docs/latest-v20.x/api/dns.html) | `Manifold::net` | `lookup`, `resolve` with bounded per-call wall-clock timeout. Async + promise variants both present. `dns/promises` reachable as its own require target. |
 | `os` | 🟡 | [os](https://nodejs.org/docs/latest-v20.x/api/os.html) | always on | `platform`, `arch`, `type`, `release`, `EOL`, `tmpdir`, `homedir`, `cpus`, `totalmem`, `freemem`. Non-sensitive surface. |
 | `zlib` | ✅ | [zlib](https://nodejs.org/docs/latest-v20.x/api/zlib.html) | always on | `deflate`/`inflate`/`gzip`/`gunzip` (sync + async). Backed by Rust `flate2`. |
 | `child_process` | 🟡 | [child_process](https://nodejs.org/docs/latest-v20.x/api/child_process.html) | `Manifold::child_process` | **Native path only.** `spawn`, `exec`, `execSync`, `spawnSync`. Sandboxed (WASM) builds reject the capability — there is no way to `fork(2)` from inside a Wasmtime instance. |
