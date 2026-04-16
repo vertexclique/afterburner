@@ -14,7 +14,9 @@
 //!
 //! Invoked via `cargo install afterburner --features bin`.
 
-use afterburner::{Afterburner, AfterburnerError, FuelGauge, Manifold};
+use afterburner::{
+    Afterburner, AfterburnerError, EnvAccess, FsAccess, FuelGauge, Manifold, NetAccess,
+};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::Value;
@@ -58,6 +60,27 @@ struct Cli {
     /// Per-call wall-clock cap (milliseconds).
     #[arg(long = "timeout", value_name = "MS", global = true)]
     timeout_ms: Option<u64>,
+
+    /// Grant outbound HTTP access. Values: `*` = any host;
+    /// `api.example.com,*.trusted.io` = comma-separated allow-list with
+    /// optional wildcard subdomains. Without this flag all HTTP is
+    /// denied (`PermissionDenied`).
+    #[arg(long = "allow-net", value_name = "HOSTS", global = true)]
+    allow_net: Option<String>,
+
+    /// Grant read+write filesystem access. Values: `*` = entire FS;
+    /// `/var/data,/tmp/workspace` = comma-separated root allow-list.
+    #[arg(long = "allow-fs", value_name = "PATHS", global = true)]
+    allow_fs: Option<String>,
+
+    /// Grant env-var read access. Values: `*` = all env; `HOME,PATH` =
+    /// comma-separated name allow-list.
+    #[arg(long = "allow-env", value_name = "VARS", global = true)]
+    allow_env: Option<String>,
+
+    /// Shortcut: grant all capabilities (net, fs, env). Use with care.
+    #[arg(long = "allow-all", short = 'A', global = true)]
+    allow_all: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -198,14 +221,77 @@ fn build_afterburner(cli: &Cli) -> Result<Afterburner> {
     if let Some(ms) = cli.timeout_ms {
         b = b.timeout_ms(ms);
     }
-    // Default manifold is sealed. U5 will layer --allow-net / --allow-fs
-    // / --allow-env on top of this default.
-    b = b.manifold(Manifold::sealed());
-    // Silence unused: the builder takes Manifold by value so the assign
-    // above is sufficient; this line keeps FuelGauge import live for
-    // the U4 thrust subcommand that will build one explicitly.
+    b = b.manifold(build_manifold(cli));
+    // Reference FuelGauge here so future changes that rebuild the
+    // gauge from CLI flags at this site don't need a fresh import.
     let _ = FuelGauge::unlimited();
     b.build().context("build afterburner")
+}
+
+/// Assemble a [`Manifold`] from the Deno-style allow flags.
+///
+/// * `--allow-all` / `-A` → `Manifold::open()` (every flap wide open).
+/// * Each of `--allow-net`, `--allow-fs`, `--allow-env` grants exactly
+///   the capability it names. Absent flags stay at the `sealed()`
+///   default — `PermissionDenied` on use.
+/// * `*` in the value = unrestricted for that capability. Otherwise
+///   the value is a comma-separated allow-list (hosts / paths / var
+///   names).
+fn build_manifold(cli: &Cli) -> Manifold {
+    if cli.allow_all {
+        return Manifold::open();
+    }
+    let mut m = Manifold::sealed();
+
+    if let Some(s) = cli.allow_net.as_deref() {
+        let hosts = parse_allow_list(s);
+        // Wildcard or empty list → unrestricted. We keep `OutboundFull`
+        // rather than `OutboundHttp` so scripts that talk raw TCP in a
+        // future host expansion don't need a migration.
+        m.net = if hosts.is_empty() || has_wildcard(&hosts) {
+            NetAccess::OutboundFull(None)
+        } else {
+            NetAccess::OutboundFull(Some(hosts))
+        };
+    }
+
+    if let Some(s) = cli.allow_fs.as_deref() {
+        let paths = parse_allow_list(s);
+        // `*` or empty = full FS access. We model that as a ReadWrite
+        // rooted at `/`; host fs code canonicalizes and checks path
+        // containment, which trivially passes against root.
+        let roots: Vec<PathBuf> = if paths.is_empty() || has_wildcard(&paths) {
+            vec![PathBuf::from("/")]
+        } else {
+            paths.into_iter().map(PathBuf::from).collect()
+        };
+        m.fs = FsAccess::ReadWrite(roots);
+    }
+
+    if let Some(s) = cli.allow_env.as_deref() {
+        let vars = parse_allow_list(s);
+        m.env = if vars.is_empty() || has_wildcard(&vars) {
+            EnvAccess::Full
+        } else {
+            EnvAccess::AllowList(vars)
+        };
+    }
+
+    m
+}
+
+/// Split `"a,b, c"` into `["a", "b", "c"]`, trimming whitespace and
+/// dropping empty segments. `""` returns `[]`.
+fn parse_allow_list(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+fn has_wildcard(list: &[String]) -> bool {
+    list.iter().any(|s| s == "*")
 }
 
 fn parse_mode(s: &str) -> Result<afterburner::Mode> {
@@ -229,4 +315,110 @@ fn print_version() -> Result<()> {
     println!("  flow      = {}", cfg!(feature = "flow"));
     println!("  host-http = {}", cfg!(feature = "host-http"));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cli_with(
+        allow_all: bool,
+        allow_net: Option<&str>,
+        allow_fs: Option<&str>,
+        allow_env: Option<&str>,
+    ) -> Cli {
+        Cli {
+            command: None,
+            file: None,
+            eval_code: None,
+            mode: None,
+            fuel: None,
+            memory: None,
+            timeout_ms: None,
+            allow_net: allow_net.map(String::from),
+            allow_fs: allow_fs.map(String::from),
+            allow_env: allow_env.map(String::from),
+            allow_all,
+        }
+    }
+
+    #[test]
+    fn parse_allow_list_trims_and_drops_empty() {
+        assert_eq!(
+            parse_allow_list("a, b ,,c"),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+        assert!(parse_allow_list("").is_empty());
+        assert!(parse_allow_list("  ,  ,").is_empty());
+    }
+
+    #[test]
+    fn default_manifold_is_sealed() {
+        let m = build_manifold(&cli_with(false, None, None, None));
+        assert!(matches!(m.fs, FsAccess::None));
+        assert!(matches!(m.net, NetAccess::None));
+        assert!(matches!(m.env, EnvAccess::None));
+    }
+
+    #[test]
+    fn allow_all_opens_every_flap() {
+        let m = build_manifold(&cli_with(true, None, None, None));
+        assert!(matches!(m.fs, FsAccess::ReadWrite(_)));
+        assert!(matches!(m.net, NetAccess::OutboundFull(_)));
+        assert!(matches!(m.env, EnvAccess::Full));
+    }
+
+    #[test]
+    fn allow_net_wildcard_is_unrestricted() {
+        let m = build_manifold(&cli_with(false, Some("*"), None, None));
+        match m.net {
+            NetAccess::OutboundFull(None) => {}
+            other => panic!("expected OutboundFull(None), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn allow_net_host_list_is_restricted() {
+        let m = build_manifold(&cli_with(false, Some("api.foo.com,*.bar.io"), None, None));
+        match m.net {
+            NetAccess::OutboundFull(Some(hosts)) => {
+                assert_eq!(
+                    hosts,
+                    vec!["api.foo.com".to_string(), "*.bar.io".to_string()]
+                );
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn allow_fs_paths_become_roots() {
+        let m = build_manifold(&cli_with(false, None, Some("/tmp,/var/lib"), None));
+        match m.fs {
+            FsAccess::ReadWrite(roots) => {
+                assert_eq!(
+                    roots,
+                    vec![PathBuf::from("/tmp"), PathBuf::from("/var/lib")]
+                );
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn allow_env_without_wildcard_is_allow_list() {
+        let m = build_manifold(&cli_with(false, None, None, Some("HOME,PATH")));
+        match m.env {
+            EnvAccess::AllowList(keys) => {
+                assert_eq!(keys, vec!["HOME".to_string(), "PATH".to_string()]);
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn allow_env_wildcard_is_full() {
+        let m = build_manifold(&cli_with(false, None, None, Some("*")));
+        assert!(matches!(m.env, EnvAccess::Full));
+    }
 }
