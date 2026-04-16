@@ -3,10 +3,19 @@
 
 __register_module('util', function(module, exports, require) {
 
+    // Matches Node's util.format: string args at the top level are
+    // emitted verbatim; non-string args go through util.inspect. That
+    // keeps `console.log("a", "b")` producing `"a b"` (no quotes) and
+    // `console.log("a", ["b"])` producing `"a [ 'b' ]"` (quotes on the
+    // ARRAY element via inspect, not on the top-level "a").
+    function renderArg(arg) {
+        return typeof arg === 'string' ? arg : exports.inspect(arg);
+    }
+
     exports.format = function(fmt) {
         if (typeof fmt !== 'string') {
             var parts = [];
-            for (var i = 0; i < arguments.length; i++) parts.push(exports.inspect(arguments[i]));
+            for (var i = 0; i < arguments.length; i++) parts.push(renderArg(arguments[i]));
             return parts.join(' ');
         }
         var args = arguments;
@@ -27,7 +36,7 @@ __register_module('util', function(module, exports, require) {
             else { out += ch; argIdx--; i++; continue; }
             i += 2;
         }
-        while (argIdx < args.length) out += ' ' + exports.inspect(args[argIdx++]);
+        while (argIdx < args.length) out += ' ' + renderArg(args[argIdx++]);
         return out;
     };
 

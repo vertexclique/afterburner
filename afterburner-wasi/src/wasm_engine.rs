@@ -25,7 +25,7 @@ use crate::nozzle::parse_output;
 use afterburner_core::log::Level;
 use afterburner_core::{
     AfterburnerError, Combustor, EngineMode, FuelGauge, InMemoryStateStore, Manifold, Result,
-    ScriptId, SharedStateStore, ab_event, sha256,
+    ScriptId, ScriptInvocation, ScriptOutcome, SharedStateStore, ab_event, sha256,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -441,6 +441,120 @@ impl Combustor for WasmCombustor {
         self.bytecode_cache.remove(&id.hash);
         ab_event!(Level::Info, "wasm.extinguish", "hash" => hex8(&id.hash));
     }
+
+    #[fastrace::trace(name = "WasmCombustor::run_script")]
+    fn run_script(
+        &self,
+        source: &str,
+        invocation: &ScriptInvocation,
+        limits: &FuelGauge,
+    ) -> Result<ScriptOutcome> {
+        // Script mode envelope: source + process.argv + process.env
+        // carried through. The plugin unpacks argv/env into JS globals
+        // before evaluating the user source (see modes/script.rs).
+        let envelope = serde_json::json!({
+            "mode": "script",
+            "source": source,
+            "argv": invocation.argv,
+            "env": invocation.env,
+        });
+        let envelope_bytes = serde_json::to_vec(&envelope)?;
+
+        let state = HostState::new(
+            &envelope_bytes,
+            limits.memory_bytes,
+            STDOUT_CAPACITY,
+            limits.manifold.clone(),
+            self.state_store.clone(),
+            self.host_context.clone(),
+        );
+        let mut store = Store::new(&self.engine, state);
+        store.limiter(|s| &mut s.limits);
+
+        let fuel = limits.fuel.unwrap_or(u64::MAX);
+        store
+            .set_fuel(fuel)
+            .map_err(|e| AfterburnerError::Engine(format!("set_fuel: {e}")))?;
+
+        if let Some(ms) = limits.timeout_ms {
+            let ticks = ms.div_ceil(TICK_PERIOD_MS).max(1);
+            store.set_epoch_deadline(ticks);
+        } else {
+            store.set_epoch_deadline(u64::MAX / 2);
+        }
+
+        let instance = self
+            .instance_pre
+            .instantiate(&mut store)
+            .map_err(|e| AfterburnerError::Engine(format!("plugin instantiate: {e}")))?;
+        let start = instance
+            .get_typed_func::<(), ()>(&mut store, "_start")
+            .map_err(|e| AfterburnerError::Engine(format!("_start lookup: {e}")))?;
+        let call_result = start.call(&mut store, ());
+
+        let stdout_bytes = drain_stdout(&mut store);
+        let stderr_bytes = store.data().stderr.contents().to_vec();
+
+        if let Err(trap) = call_result {
+            if let Some(exit) = trap.downcast_ref::<I32Exit>() {
+                // `process.exit(N)` path: preserve N as the exit code.
+                // I32Exit(0) is a clean exit through WASI `proc_exit(0)`.
+                ab_event!(Level::Info, "wasm.script.proc_exit", "code" => exit.0);
+                return Ok(ScriptOutcome {
+                    stdout: stdout_bytes,
+                    stderr: stderr_bytes,
+                    exit_code: exit.0,
+                });
+            } else if let Some(t) = trap.downcast_ref::<Trap>() {
+                match t {
+                    Trap::Interrupt => {
+                        ab_event!(Level::Warn, "wasm.script.timeout");
+                        return Err(AfterburnerError::Timeout);
+                    }
+                    Trap::OutOfFuel => {
+                        ab_event!(Level::Warn, "wasm.script.fuel_exhausted");
+                        return Err(AfterburnerError::FuelExhausted);
+                    }
+                    _ => {
+                        return map_script_trap(stdout_bytes, stderr_bytes);
+                    }
+                }
+            } else {
+                let chain: Vec<String> = trap.chain().map(|e| format!("{e}")).collect();
+                let full = chain.join(" => ");
+                if full.contains("memory minimum size") || full.contains("memory size") {
+                    ab_event!(Level::Warn, "wasm.script.memory_limit");
+                    return Err(AfterburnerError::MemoryLimit);
+                }
+                return map_script_trap(stdout_bytes, stderr_bytes);
+            }
+        }
+
+        Ok(ScriptOutcome {
+            stdout: stdout_bytes,
+            stderr: stderr_bytes,
+            exit_code: 0,
+        })
+    }
+}
+
+/// Map a generic WASM trap in script mode to either `CompileFailed`
+/// (when the plugin wrote its "compile_src (script): …" preface to
+/// stderr) or an `Ok(ScriptOutcome { exit_code: 1 })` for an uncaught
+/// JS exception. The Err path here is the only non-infrastructural
+/// error script mode surfaces; everything else is Ok with captured
+/// output so the CLI can still print what the script managed to emit
+/// before it failed.
+fn map_script_trap(stdout: Vec<u8>, stderr: Vec<u8>) -> Result<ScriptOutcome> {
+    let stderr_str = String::from_utf8_lossy(&stderr);
+    if stderr_str.contains("compile_src (script):") {
+        return Err(AfterburnerError::CompileFailed(stderr_str.into_owned()));
+    }
+    Ok(ScriptOutcome {
+        stdout,
+        stderr,
+        exit_code: 1,
+    })
 }
 
 fn drain_stdout(store: &mut Store<HostState>) -> Vec<u8> {

@@ -10,7 +10,12 @@
     // the require resolver since this runs before user code.
     var EventEmitter = require('events');
 
+    // `__host_env` / `__ab_argv` are installed per-thrust by script
+    // mode (see plugin's modes/script.rs). Both globals are absent in
+    // UDF mode, which is intentional — UDF scripts only see their
+    // `data` input.
     var hostEnv = globalThis.__host_env || {};
+    var argv    = globalThis.__ab_argv   || ['afterburner'];
     var proc = Object.create(EventEmitter.prototype);
     EventEmitter.call(proc);
 
@@ -20,7 +25,7 @@
         version:  'v20.0.0-afterburner',
         versions: { node: '20.0.0', afterburner: '0.1.0' },
         env:      hostEnv,
-        argv:     ['afterburner'],
+        argv:     argv,
         execPath: '/usr/bin/afterburner',
         pid:      1,
         title:    'afterburner',

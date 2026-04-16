@@ -47,13 +47,15 @@
 #![warn(missing_debug_implementations)]
 
 mod builder;
+#[cfg(feature = "bin")]
+pub mod cli;
 pub mod prelude;
 
 pub use afterburner_core::{
     AfterburnerError, BurnCache, BurnCacheBackend, Combustor, EngineMode, EnvAccess, FsAccess,
     FuelGauge, HostContext, HostFunction, HttpMethod, HttpResponse, InMemoryStateStore,
     InProcessCacheBackend, LogLevel, Manifold, NetAccess, NullHost, RegistryStats, Result,
-    ScriptId, SharedStateStore, StateStore, sha256,
+    ScriptId, ScriptInvocation, ScriptOutcome, SharedStateStore, StateStore, sha256,
 };
 
 #[cfg(feature = "wasm")]

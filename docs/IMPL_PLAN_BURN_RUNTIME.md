@@ -232,6 +232,108 @@ Each polyfill is JS that imports host functions from the existing
 is partial (sync + chunked read/write live; `fs.promises.*` is thin).
 Server-side `http` is the biggest new addition.
 
+### 4.7 Code organization and testing conventions
+
+These rules apply to every B-phase below and, going forward, to the rest
+of the workspace. Existing files that exceed the ceiling get split
+opportunistically as a phase touches them — not a separate refactor pass.
+
+**File size.**
+
+- Soft target: **≤500 lines** per `.rs` / `.js` file.
+- Hard ceiling: **1000 lines** — at that point the file *must* split, no
+  exceptions.
+- Polyfill `.js` files over ~400 lines also split (`http/server.js`,
+  `http/agent.js`, … re-exported from `http.js`).
+
+**Burn binary — module layout.**
+
+`afterburner/src/bin/burn.rs` stays a thin entrypoint (arg parsing +
+dispatch, under 100 lines). Every subcommand and CLI concern lives in
+its own file under `afterburner/src/cli/`:
+
+```
+afterburner/src/cli/
+  mod.rs              // pub use re-exports
+  args.rs             // Cli struct, Cmd enum, clap derives
+  manifold.rs         // --allow-* / --sandbox / -A → Manifold
+  run.rs              // `burn run` / `burn <file>`
+  eval.rs             // `burn -e`
+  thrust.rs           // `burn thrust` (UDF stdin mode)
+  bench.rs            // `burn bench`
+  repl.rs             // `burn repl`
+  check.rs            // `burn check`
+  script.rs           // script mode plumbing (B0)
+  daemon.rs           // daemon event loop + shutdown (B2/B3)
+  passthrough.rs      // `burn node|npm|pnpm|…` dispatch (B4/B5)
+  shim.rs             // PATH shim generation (B5)
+  banner.rs           // first-run open-capabilities banner (Q1-D)
+```
+
+**node-compat — module layout.**
+
+- **JS polyfills**: one file per Node built-in at
+  `afterburner-node-compat/polyfills/node/<name>.js`; sub-files for
+  large built-ins (`http/server.js`, `http/client.js`, `fs/sync.js`,
+  `fs/promises.js`, `stream/readable.js`, `stream/writable.js`).
+- **Rust host bindings**: one file per host-import surface:
+
+```
+afterburner-node-compat/src/
+  http_host.rs            // outbound HTTP (existing)
+  http_server_host.rs     // inbound HTTP via axum (B2, NEW)
+  net_host.rs             // raw TCP (B7, NEW)
+  tls_host.rs             // TLS sockets (B7, NEW)
+  fs_promises_host.rs     // fs.promises.* (B7, NEW)
+  dns_host.rs             // (existing)
+  child_process_host.rs   // (existing — extend in B7)
+  resolver.rs             // require() + node_modules walk (B6, NEW)
+  shadows/                // pure-Rust N-API shadow modules (Q3 / L3)
+    mod.rs
+    bcrypt.rs
+    argon2.rs
+    jsonwebtoken.rs
+    sqlite.rs
+    sharp.rs
+```
+
+**Plugin modes — module layout.**
+
+Mode dispatch already exists in `afterburner-plugin/src/lib.rs`. Peel
+each mode out into its own file:
+
+```
+afterburner-plugin/src/modes/
+  mod.rs              // dispatcher
+  legacy.rs
+  compile.rs
+  invoke.rs
+  script.rs           // B0 — top-level JS, no UDF envelope
+  daemon_init.rs      // B2 — first-entry: eval + register handlers
+  daemon_event.rs     // B2 — re-entry: dispatch payload to handler
+```
+
+**Test layout.**
+
+- **No `#[cfg(test)] mod tests { … }` blocks inline in `src/*.rs`.** All
+  tests live in each crate's `tests/` directory.
+- Existing inline test modules are migrated when the surrounding file is
+  touched. No separate "migrate tests" PR.
+- Cross-crate integration tests live in the workspace-level `tests/`
+  directory. Burn-runtime phase gates live in
+  `tests/burn-runtime/<phase>.rs` — one file per verification fixture
+  in §8.
+- Doctests on public items are fine — they document the API surface.
+- Every phase B0–B10 lands its verification test in the right place
+  **in the same commit** as the implementation. No "tests later"
+  carve-outs — this reinforces the repo's "no deferred /
+  production-grade only" rule.
+
+**Why.** Long files are unreviewable; the PR diff drowns the real
+change. Per-mode / per-built-in files also match how readers *navigate*
+the code — `require('node:http')` → `polyfills/node/http.js` — and keep
+compile units recompilable independently.
+
 ---
 
 ## 5. Phase breakdown
@@ -266,83 +368,114 @@ the long-tail grind toward npm-ecosystem compatibility.
 
 ---
 
-## 6. Design questions — needs your decision before starting
+## 6. Locked decisions
 
-**Q1 — Sandbox default for script mode.** Burn today is sandbox-first
-(`Manifold::sealed()`); real Node apps expect open FS/net/env. Three
-choices:
+Answers to Q1–Q6 below are final; later phases layer on top without
+revisiting.
 
-- **A**: `burn foo.js` stays sealed — Node apps break unless user
-  passes `--allow-*`. Matches today's security posture; breaks the
-  "drop-in Node replacement" promise.
-- **B**: `burn foo.js` defaults to open (everything granted) — matches
-  Node semantics; gives up the sandbox-by-default win.
-- **C**: Default to open *only when invoked as `burn node …` or
-  `burn <pkg-mgr> …`*; stay sealed for direct `burn foo.js`. Mixed.
-- **D**: Default to `Manifold::open()` but announce it loudly on
-  startup; require `burn --sandbox foo.js` for sealed.
+### Q1 — Sandbox default: **D — open, announced on first use**
 
-> **Ask:** which?
+- `burn <file>` grants `Manifold::open()` so Node scripts run unmodified.
+- On first run per user, print a one-line banner to stderr:
+  `burn: running with open capabilities. --sandbox to seal; BURN_QUIET=1 to silence.`
+  Write an ack-marker to `~/.cache/burn/opened` so the banner does not
+  repeat.
+- `--sandbox` resets the manifold to `Manifold::sealed()` for that
+  invocation. `BURN_QUIET=1` or `--quiet` silences the banner (and
+  future notices) globally — for CI.
+- **Library API default stays `Manifold::sealed()`.** The CLI flip does
+  *not* leak into `Afterburner::builder()`. Embedders choose their
+  posture explicitly.
 
-**Q2 — When does daemon mode kick in?** `.listen()` auto-entering is
-the Node-natural behavior but surprising: a one-line change to a
-script can make it long-lived. Alternative:
+### Q2 — Daemon trigger: **A — auto on `.listen()` / long-lived timers**
 
-- **A**: Auto-daemon whenever JS creates a handler the host knows is
-  event-driven (listen, setInterval, repeated setTimeout).
-- **B**: Explicit `burn serve foo.js` subcommand; plain `burn foo.js`
-  always runs to completion and exits even if handlers are installed.
-- **C**: Auto-detect, but require `--serve` for "yes, I mean it" when
-  the script uses risky event sources.
+- **CLI-only.** The runtime detects handler registration via the host
+  imports that back `http.createServer().listen()`, `setInterval`, and
+  repeated `setTimeout`; it transitions the `Store` into daemon mode
+  and drives the event loop until signal (SIGINT / SIGTERM).
+- Node-style **ref semantics**: unref'd timers do not keep the runtime
+  alive. `setTimeout(fn, 100).unref()` does not immortalize the script.
+- **Library API never auto-daemons.** `Afterburner::run()` and
+  flow-style entry points are always one-shot. If user JS calls
+  `.listen()` or `setInterval` inside a library call, the thrust
+  returns typed `AfterburnerError::UnsupportedInLibraryMode`. A
+  `LibraryConfig::allow_event_handlers: bool` escape hatch (default
+  false) exists for embedders who genuinely want a library-mode daemon.
+- Add a **per-phase CLI-vs-library test pair**
+  (`tests/burn-runtime/<phase>_cli.rs`,
+  `tests/burn-runtime/<phase>_library.rs`) so this contract can't
+  silently regress.
 
-> **Ask:** A, B, or C?
+### Q3 — npm depth: **L3, pure Rust, WASM-compilable**
 
-**Q3 — npm/node_modules depth target.** We can pick a depth and stick
-to it:
+- **Tiered rollout**: L1 (pure-JS CommonJS) → L2 (+ ESM) → L3
+  (on-demand pure-Rust shadows of the most popular N-API packages).
+  No big bang.
+- L3 explicitly **excludes loading `.node` binaries** — they're raw
+  native code, incompatible with the WASM sandbox. `require('bcrypt')`
+  / `require('sqlite3')` / … are intercepted in the resolver and
+  routed to pure-Rust shadow modules exposed via host imports.
+- **Shadow list at launch**: `bcrypt`, `argon2`, `jsonwebtoken`,
+  `sqlite3` (via `rusqlite`), `sharp` (via `image` +
+  `fast_image_resize`). Each shadow lives in
+  `afterburner-node-compat/src/shadows/<pkg>.rs` and is gated behind a
+  cargo feature (`shadow-bcrypt`, `shadow-sqlite`, …) so binary size
+  scales with opt-in.
+- Pure-JS packages fall through to real `node_modules` resolution.
+  Packages requiring a non-shadowed `.node` addon fail with a typed
+  `AfterburnerError::NativeAddonUnsupported { pkg }` — never a crash.
 
-- **Level 1**: pure-JS CommonJS packages. No native addons. No `.node`
-  binary support. Roughly 70 % of npm "it works."
-- **Level 2**: Level 1 + ESM. ~85 %.
-- **Level 3**: Level 2 + minimal N-API shim so packages with native
-  bindings *that only use stable N-API* work (sqlite3, bcrypt, …).
-  ~95 %. Much more work.
-- **Level 4**: Full Node ABI compat (libuv, libc details, etc.). Bun /
-  Deno are still climbing this hill after years.
+### Q4 — TypeScript: **oxc, transpile-only**
 
-> **Ask:** Level 1 as the initial gate, Level 2 shortly after, Level 3
-> as an explicit stretch?
+- Rust-native, actively maintained, ~5–10× faster than swc on
+  transpile; smaller dep footprint (WASM-compile friendly).
+- **Strip-types only.** No type-checking inside burn — `tsc --noEmit`
+  remains the user's concern.
+- Behind a `ts` cargo feature; non-TS users don't pay the ~3 MiB dep
+  cost.
 
-**Q4 — TypeScript transpiler.** Three realistic choices:
+### Q5 — Wrapper scope: **A — any unknown first-arg is pass-through**
 
-- **oxc** (Rust-native, fast, ecosystem still maturing).
-- **swc** (Rust-native, battle-tested in Next.js / Deno).
-- **esbuild** (Go, requires shelling out a binary; excellent quality).
+Guardrails:
 
-> **Ask:** prefer swc for maturity? Or oxc for deeper Rust integration
-> ("it's the same team that wrote ruff and biome-rs in spirit")?
+1. **Existing-file wins.** If `argv[1]` resolves to a file in cwd,
+   "run this file" wins over "pass through" — deterministically
+   resolves the `burn tsc.js` (local file) vs. `burn tsc` (global
+   binary) ambiguity.
+2. **Unknown-command error.** If `argv[1]` is not a known subcommand
+   *and* not on PATH, fail with `burn: unknown command '<arg>'`
+   before calling `exec(3)`. No more "could not exec noed: No such
+   file" confusion.
+3. **Shim recursion guard.** `BURN_SHIM_DEPTH` env var caps PATH-shim
+   re-entry at 8. Higher values → `burn: shim recursion limit
+   reached`, protecting against fork-bomb misconfig.
 
-**Q5 — Wrapper-scope: `burn <anything>` or specific allow-list?**
+### Q6 — HTTP topology: **B — host-wide multiplex, phased**
 
-- **A**: Any first-arg that isn't a known subcommand / file path is
-  treated as a pass-through command (`burn deno test`,
-  `burn tsc -w`, …). Maximally flexible.
-- **B**: Hard allow-list: `node`, `npm`, `pnpm`, `npx`, `yarn`, `bun`.
-  Everything else is a run-the-script or error.
+- **End state:** one axum listener per `(host, port)` tuple with a
+  dispatch table keyed by `server_id`. Multiple scripts' servers on
+  different ports share the process's listener pool. Matches the
+  multi-tenant use case this runtime is ultimately for.
+- **Phasing:** B2 ships A-style per-script listeners to keep the
+  critical path at ~5 days. B2b (~2 days) refactors internals to the
+  multiplex table. JS-visible surface is identical across both — no
+  client breakage.
+- **Node semantics preserved:** two scripts both calling `.listen(3000)`
+  → the second gets `EADDRINUSE`, same as Node.
 
-> **Ask:** A or B?
+### Library-vs-CLI contract (cross-cutting)
 
-**Q6 — Where does the HTTP server live in the architecture?**
+| Concern                      | `burn` CLI               | Library API (`Afterburner::builder()`) |
+|------------------------------|--------------------------|----------------------------------------|
+| Default `Manifold`           | `open()` + banner (Q1-D) | `sealed()` — unchanged                 |
+| Daemon mode                  | Auto (Q2-A)              | Never (one-shot enforced)              |
+| `.listen()` / `setInterval`  | Starts daemon            | `UnsupportedInLibraryMode` error       |
+| Default timeout              | User-set                 | `FuelGauge::timeout_ms` must be set    |
+| `require()`                  | Full CJS + L3 shadows    | Off by default; opt-in flag            |
+| TS transpile                 | Auto via oxc             | Same — embedder opts in via `ts` flag  |
 
-- **A**: Each `createServer().listen()` call starts its own `axum`
-  listener, owned by the host, with a channel plumbed into the
-  sandbox. Simple, fits our facade.
-- **B**: A single host-wide listener multiplexes by `server_id` across
-  all scripts running in the process. Cheaper on sockets when a
-  process hosts many scripts; mostly relevant to multi-tenant
-  deployments.
-
-> **Ask:** A is the obvious default; is B interesting to you
-> long-term?
+CLI defaults **must not** regress the library's sealed/one-shot
+contract — the phase-pair tests above are the guardrail.
 
 ---
 
@@ -411,7 +544,7 @@ phase gate.
 
 ---
 
-**Ready to execute once Q1–Q6 are decided.**
+**Ready to execute — decisions locked in §6.**
 
 Sources:
 - [wasmerio/edgejs on GitHub](https://github.com/wasmerio/edgejs)

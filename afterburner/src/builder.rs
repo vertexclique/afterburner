@@ -7,7 +7,8 @@
 
 use afterburner_core::{
     AfterburnerError, BurnCache, BurnCacheBackend, Combustor, FuelGauge, HostContext,
-    InMemoryStateStore, Manifold, Result, ScriptId, SharedStateStore,
+    InMemoryStateStore, Manifold, Result, ScriptId, ScriptInvocation, ScriptOutcome,
+    SharedStateStore,
 };
 use serde_json::Value;
 use std::fmt;
@@ -174,6 +175,44 @@ impl Afterburner {
                 }
                 Ok(Value::Array(out))
             }
+        }
+    }
+
+    /// Run `source` as a **top-level script** (no UDF envelope). This
+    /// is the `burn run foo.js` path: the script's `console.log`
+    /// output is captured into [`ScriptOutcome::stdout`], exceptions
+    /// thrown from user code yield a non-zero exit code rather than an
+    /// `Err`.
+    ///
+    /// Intended for CLI consumers. Library callers typically want
+    /// [`run`](Self::run) (UDF shape) instead — script mode's one-shot
+    /// semantics and captured-output model don't compose well with
+    /// long-running embedders.
+    ///
+    /// Currently requires a single-threaded engine. The multi-threaded
+    /// [`ThrustEngine`] variant returns an error — script mode is not
+    /// pool-scheduled (each call is an independent compile + run).
+    pub fn run_script(&self, source: &str) -> Result<ScriptOutcome> {
+        self.run_script_with(source, &ScriptInvocation::default(), &self.defaults)
+    }
+
+    /// Like [`run_script`](Self::run_script) but with explicit
+    /// `process.argv` / `process.env` values and per-call limits
+    /// overriding the builder defaults.
+    pub fn run_script_with(
+        &self,
+        source: &str,
+        invocation: &ScriptInvocation,
+        limits: &FuelGauge,
+    ) -> Result<ScriptOutcome> {
+        match &self.engine {
+            EngineHolder::Cache(c) => c.run_script(source, invocation, limits),
+            #[cfg(feature = "thrust")]
+            EngineHolder::Thrust(_) => Err(AfterburnerError::Engine(
+                "run_script requires a single-threaded engine; \
+                 construct `Afterburner::builder()` without .threaded()"
+                    .into(),
+            )),
         }
     }
 

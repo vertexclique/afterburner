@@ -26,7 +26,7 @@
 use afterburner_core::log::Level;
 use afterburner_core::{
     AfterburnerError, Combustor, EngineMode, FuelGauge, InMemoryStateStore, Result, ScriptId,
-    SharedStateStore, ab_event, sha256,
+    ScriptInvocation, ScriptOutcome, SharedStateStore, ab_event, sha256,
 };
 use kovan_map::HopscotchMap;
 use rquickjs::{Context, Ctx, Error as RquickjsError, Runtime, Value as RqValue};
@@ -41,6 +41,77 @@ thread_local! {
     /// the interrupt-handler slot; RefCell is single-threaded, not a
     /// synchronization primitive.
     static THREAD_RT: RefCell<Option<ThreadRuntime>> = const { RefCell::new(None) };
+
+    /// When `Some`, native script mode is active on this thread:
+    /// `__host_log` writes into the per-call buffers instead of
+    /// emitting workspace log events. Set + cleared by
+    /// [`ScriptCaptureGuard`]; never observed across calls because
+    /// each `run_script` activates and drops its own guard.
+    static SCRIPT_CAPTURE: RefCell<Option<ScriptCapture>> = const { RefCell::new(None) };
+}
+
+/// Per-script-mode-call capture buffers that `__host_log` writes into.
+#[derive(Default)]
+struct ScriptCapture {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// RAII guard that activates script-mode capture for the current
+/// thread and takes ownership back on drop. Calling code uses
+/// [`ScriptCaptureGuard::take`] to retrieve the buffers — the `Drop`
+/// impl is the safety net that fires if the caller panics.
+struct ScriptCaptureGuard;
+
+impl ScriptCaptureGuard {
+    fn activate() -> Self {
+        SCRIPT_CAPTURE.with(|c| {
+            *c.borrow_mut() = Some(ScriptCapture::default());
+        });
+        Self
+    }
+
+    fn take(self) -> ScriptCapture {
+        // Take BEFORE drop runs so we get the populated buffers
+        // (drop's path leaves an empty default in place).
+        let captured = SCRIPT_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default());
+        std::mem::forget(self);
+        captured
+    }
+}
+
+impl Drop for ScriptCaptureGuard {
+    fn drop(&mut self) {
+        // Caller panicked before `take()` — clear the slot so the
+        // next call doesn't observe stale captures.
+        SCRIPT_CAPTURE.with(|c| {
+            let _ = c.borrow_mut().take();
+        });
+    }
+}
+
+/// Append a captured log line. Handles the "info"/"debug" → stdout vs
+/// "warn"/"error" → stderr split that matches Node's console
+/// semantics (and what the wasm path does via Javy.IO).
+fn append_capture(level: &str, msg: &str) {
+    SCRIPT_CAPTURE.with(|c| {
+        if let Some(cap) = c.borrow_mut().as_mut() {
+            let buf = if matches!(level, "warn" | "error") {
+                &mut cap.stderr
+            } else {
+                &mut cap.stdout
+            };
+            buf.extend_from_slice(msg.as_bytes());
+            buf.push(b'\n');
+        }
+    });
+}
+
+/// True iff the current thread is mid-script-mode capture. The
+/// closure-installed `__host_log` consults this to decide whether to
+/// route to the capture buffer or emit a workspace log event.
+fn capture_is_active() -> bool {
+    SCRIPT_CAPTURE.with(|c| c.borrow().is_some())
 }
 
 struct ThreadRuntime {
@@ -92,6 +163,14 @@ fn install_host_globals(ctx: &Ctx<'_>) -> std::result::Result<(), AfterburnerErr
 }
 
 fn host_log(level: &str, msg: &str) {
+    // In native script mode, console output is captured per-call so
+    // the embedder can hand it back through [`ScriptOutcome`]. Outside
+    // script mode (i.e. UDF thrust), it falls through to the workspace
+    // logger as before.
+    if capture_is_active() {
+        append_capture(level, msg);
+        return;
+    }
     use afterburner_core::ab_event;
     use afterburner_core::log::Level;
     let level = match level {
@@ -208,6 +287,233 @@ impl Combustor for NativeCombustor {
         self.source_store.remove(&id.hash);
         ab_event!(Level::Info, "native.extinguish");
     }
+
+    #[fastrace::trace(name = "NativeCombustor::run_script")]
+    fn run_script(
+        &self,
+        source: &str,
+        invocation: &ScriptInvocation,
+        limits: &FuelGauge,
+    ) -> Result<ScriptOutcome> {
+        let argv_json = serde_json::to_string(&invocation.argv)
+            .map_err(|e| AfterburnerError::Engine(format!("argv json: {e}")))?;
+        let env_json = serde_json::to_string(&invocation.env)
+            .map_err(|e| AfterburnerError::Engine(format!("env json: {e}")))?;
+        let stage = build_script_stage(source, &argv_json, &env_json);
+
+        let _capture_guard = ScriptCaptureGuard::activate();
+        let exit_code = with_thread_rt(|rt| {
+            let _g =
+                afterburner_node_compat::state_active::activate(self.state_store.clone());
+            let _hg = self
+                .host_context
+                .as_ref()
+                .map(|c| afterburner_node_compat::host_context_active::activate(c.clone()));
+            let _mg = afterburner_node_compat::active_manifold::activate(limits.manifold.clone());
+
+            rt.runtime
+                .set_memory_limit(limits.memory_bytes.unwrap_or(0));
+            let fuel_budget = limits.fuel;
+            let counter = Arc::new(AtomicU64::new(0));
+            let counter_clone = counter.clone();
+            rt.runtime
+                .set_interrupt_handler(Some(Box::new(move || match fuel_budget {
+                    Some(budget) => counter_clone.fetch_add(1, Ordering::Relaxed) >= budget,
+                    None => false,
+                })));
+
+            let res =
+                rt.context
+                    .with(|ctx| -> Result<()> { run_script_stage(&ctx, &stage) });
+
+            rt.runtime.set_interrupt_handler(None);
+
+            // Translate the JS-side outcome into a Node-style exit code.
+            // Anything that's *not* a script-level exception bubbles up
+            // as Err — fuel exhaustion and memory limits stay typed.
+            match res {
+                Ok(()) => Ok(0),
+                Err(e) => {
+                    if let Some(budget) = fuel_budget
+                        && counter.load(Ordering::Relaxed) >= budget
+                    {
+                        ab_event!(
+                            Level::Warn,
+                            "native.script.fuel_exhausted",
+                            "budget" => budget,
+                        );
+                        return Err(AfterburnerError::FuelExhausted);
+                    }
+                    if matches!(e, AfterburnerError::MemoryLimit) {
+                        ab_event!(Level::Warn, "native.script.memory_limit");
+                        return Err(e);
+                    }
+                    // Treat as user-script exception — surface the
+                    // message on captured stderr and return exit 1.
+                    append_capture("error", &format!("{e}"));
+                    Ok(1)
+                }
+            }
+        })?;
+        let captured = _capture_guard.take();
+        Ok(ScriptOutcome {
+            stdout: captured.stdout,
+            stderr: captured.stderr,
+            exit_code,
+        })
+    }
+}
+
+/// Build the JS stage that script mode evaluates. Sync outer IIFE
+/// does the global setup (`__ab_argv`, `__host_env`, refreshing the
+/// live `process` polyfill) and runs the user source inside a plain
+/// `new Function(...)` wrapper. The wrapper's return value is
+/// whatever the user source's last statement yields — typically
+/// `undefined` (script mode doesn't JSON-stringify a result).
+///
+/// **Top-level `await` is NOT supported on this path.** rquickjs's
+/// thread-local runtime surfaces a "line 3:1" parse-time exception
+/// when we attempt to construct an `AsyncFunction` from here —
+/// reproduced against the real `NativeCombustor::run_script` but not
+/// against a fresh `Runtime` in isolation, pointing at a
+/// version-pinning quirk we'd rather not paper over with a
+/// half-working workaround. Scripts that need top-level `await`
+/// should run through the WASM / adaptive backends (the default) —
+/// that path compiles via Javy's ES-module pipeline where it's
+/// first-class. On native, the idiomatic workaround is the
+/// self-invoking async IIFE pattern:
+///
+/// ```js
+/// (async () => { const v = await something(); console.log(v); })();
+/// ```
+///
+/// which compiles fine as a sync-returned Promise; the pumping loop
+/// below drains its microtasks.
+fn build_script_stage(user: &str, argv_json: &str, env_json: &str) -> String {
+    let user_lit = js_string_literal(user);
+    format!(
+        r#"
+        (function() {{
+            globalThis.__ab_argv = {argv_json};
+            globalThis.__host_env = {env_json};
+            if (globalThis.process) {{
+                globalThis.process.argv = globalThis.__ab_argv;
+                globalThis.process.env  = globalThis.__host_env;
+            }}
+            var __ab_module = {{ exports: {{}} }};
+            var __ab_user = new Function(
+                'module', 'exports', 'require', {user_lit}
+            );
+            return __ab_user(__ab_module, __ab_module.exports, globalThis.require);
+        }})()
+        "#
+    )
+}
+
+/// Eval the script-mode stage and pump pending jobs until the
+/// returned Promise resolves or rejects. Uses the same microtask-cap
+/// guardrail as `run_script` (UDF mode) to bound runaway chains even
+/// if the interrupt handler under-fires.
+fn run_script_stage(ctx: &Ctx<'_>, stage: &str) -> Result<()> {
+    let result_val: rquickjs::Value<'_> = ctx
+        .eval(stage.as_bytes())
+        .map_err(|e| map_script_err(ctx, e))?;
+
+    // Same belt-and-suspenders cap as the UDF path. See run_script in
+    // this file for the rationale.
+    const MAX_PUMP_ITERATIONS: usize = 1_000_000;
+    for _ in 0..MAX_PUMP_ITERATIONS {
+        if !ctx.execute_pending_job() {
+            break;
+        }
+    }
+    if ctx.execute_pending_job() {
+        return Err(AfterburnerError::FuelExhausted);
+    }
+
+    // The sync `new Function(...)` wrapper returns whatever the user
+    // source's last statement produces. If that's a Promise (e.g. an
+    // `(async () => {...})()` IIFE), we pump it; otherwise done.
+    // Detect a thenable via duck-typing rather than
+    // `Promise::from_value` because the latter errors on non-Promise
+    // objects, and script-mode user code commonly returns `undefined`.
+    let is_thenable = result_val
+        .as_object()
+        .and_then(|o| o.get::<_, rquickjs::Value<'_>>("then").ok())
+        .map(|v| v.is_function())
+        .unwrap_or(false);
+    if !is_thenable {
+        return Ok(());
+    }
+    let promise = rquickjs::Promise::from_value(result_val.clone())
+        .map_err(|e| AfterburnerError::Engine(format!("Promise::from_value: {e}")))?;
+    promise
+        .finish::<rquickjs::Value<'_>>()
+        .map(|_| ())
+        .map_err(|e| map_script_err(ctx, e))
+}
+
+/// Script-mode error mapper. Unlike [`map_rquickjs_err`] (used by UDF
+/// mode), this variant extracts the real exception detail via
+/// `ctx.catch()` so the captured stderr carries the actual error
+/// message rather than a generic "uncaught exception" placeholder.
+/// The distinction matters for user debugging: a Node-like
+/// `TypeError: foo is not a function` is far more actionable than
+/// the opaque fallback.
+fn map_script_err(ctx: &Ctx<'_>, err: RquickjsError) -> AfterburnerError {
+    match err {
+        RquickjsError::Allocation => AfterburnerError::MemoryLimit,
+        RquickjsError::Unknown => AfterburnerError::Engine("unknown rquickjs error".into()),
+        ref other => {
+            let base = format!("{other}");
+            if base.contains("interrupt") || base.contains("Interrupt") {
+                return AfterburnerError::FuelExhausted;
+            }
+            if base.contains("out of memory") || base.contains("OutOfMemory") {
+                return AfterburnerError::MemoryLimit;
+            }
+            if matches!(other, RquickjsError::Exception) {
+                // Pull the actual exception value out of the context.
+                let exc_val = ctx.catch();
+                let detail = exception_detail(&exc_val);
+                return AfterburnerError::CompileFailed(detail);
+            }
+            AfterburnerError::Engine(base)
+        }
+    }
+}
+
+/// Best-effort human-readable rendering of an rquickjs exception
+/// value. Prefers the shape `"Error: <message>\n<stack>"` that Node
+/// users recognize — QuickJS's `.stack` lacks the leading "Error:
+/// msg" line that V8 includes, so we reassemble it here.
+fn exception_detail(value: &rquickjs::Value<'_>) -> String {
+    if let Some(obj) = value.as_object() {
+        let message = obj
+            .get::<_, String>("message")
+            .ok()
+            .filter(|m| !m.is_empty());
+        let stack = obj.get::<_, String>("stack").ok().filter(|s| !s.is_empty());
+        let name = obj
+            .get::<_, String>("name")
+            .ok()
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "Error".to_string());
+        return match (message, stack) {
+            (Some(m), Some(s)) => format!("{name}: {m}\n{s}"),
+            (Some(m), None) => format!("{name}: {m}"),
+            (None, Some(s)) => s,
+            (None, None) => format!("{name}"),
+        };
+    }
+    if value.is_string() {
+        if let Some(s) = value.as_string() {
+            if let Ok(text) = s.to_string() {
+                return text;
+            }
+        }
+    }
+    format!("uncaught exception (type {})", value.type_of().as_str())
 }
 
 /// Actual script execution — runs on the caller's thread against the

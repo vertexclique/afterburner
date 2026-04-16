@@ -170,9 +170,18 @@ afterburner_core::log::init();  // reads AFTERBURNER_LOG + AFTERBURNER_LOG_FORMA
 
 ## Node.js Compat Surface
 
+Afterburner targets the **Node.js 20.x LTS API surface**. The summary
+table is below; the full per-module breakdown — with status, links to
+the official Node.js docs, and notes on any deliberate divergences —
+lives in **[`docs/NODE_COMPAT.md`](./docs/NODE_COMPAT.md)**.
+
+> **Drop-in promise:** code that runs under `node script.js` should
+> run unchanged under `burn script.js`. Where it doesn't, that's a
+> bug — file an issue with a Node.js docs link and a minimal repro.
+
 | Group | Modules | Gate |
 |:------|:--------|:-----|
-| **Pure JS** | `path`, `url`, `querystring`, `events`, `assert`, `buffer`, `util`, `string_decoder`, `punycode`, `timers`, `process` (EventEmitter), `console`, `stream` | none — always available |
+| **Pure JS** | `path`, `url`, `querystring`, `events`, `assert`, `buffer`, `util`, `string_decoder`, `punycode`, `timers`, `process`, `console`, `stream` | none — always available |
 | **Web globals** | `fetch`, `Request`, `Response`, `Headers`, `AbortController`, `AbortSignal`, `URL`, `URLSearchParams`, `TextEncoder`, `TextDecoder`, `btoa`/`atob`, `queueMicrotask`, `performance.now`, `structuredClone` | none |
 | **Host-backed** | `fs` (incl. `createReadStream` / `createWriteStream`, `fs.promises`) | `Manifold::fs` (`None` / `ReadOnly(roots)` / `ReadWrite(roots)`) |
 | | `crypto` (hash, hmac, AES-GCM/CBC, PBKDF2, scrypt, RSA & ECDSA sign/verify, randomBytes/UUID) | `Manifold::crypto` |
@@ -183,8 +192,11 @@ afterburner_core::log::init();  // reads AFTERBURNER_LOG + AFTERBURNER_LOG_FORMA
 | | `child_process` | `Manifold::child_process` — **native path only** |
 | **Custom** | `afterburner:state` — cross-invocation key/value store | implicit — host installs the `StateStore` |
 
-Default manifold is `Manifold::sealed()` — safe to hand untrusted user
-scripts. `Manifold::open()` exists for trusted admin contexts.
+The library default manifold is `Manifold::sealed()` — safe to hand
+untrusted user scripts. The `burn` CLI defaults to `Manifold::open()`
+so Node scripts drop in without flags; `--sandbox` flips it back to
+sealed. See [`docs/NODE_COMPAT.md`](./docs/NODE_COMPAT.md#sandbox-model)
+for the full sandbox-model section.
 
 ---
 

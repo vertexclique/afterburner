@@ -25,7 +25,9 @@
 //! `FAILED` slot (idempotent, no compile re-attempt).
 
 use afterburner_core::log::Level;
-use afterburner_core::{Combustor, EngineMode, FuelGauge, Result, ScriptId, ab_event};
+use afterburner_core::{
+    Combustor, EngineMode, FuelGauge, Result, ScriptId, ScriptInvocation, ScriptOutcome, ab_event,
+};
 use afterburner_ignite::NativeCombustor;
 use afterburner_wasi::{WasmCombustor, WasmConfig};
 use kovan_channel::flavors::unbounded::{Receiver, Sender};
@@ -271,6 +273,20 @@ impl Combustor for AdaptiveCombustor {
             hash: id.hash,
             mode: EngineMode::Native,
         });
+    }
+
+    /// Script mode runs exclusively through the WASM backend — the
+    /// whole point of adaptive is to *cache* compiled scripts across
+    /// many calls, but script mode is one-shot. Native would also work
+    /// but the sandboxed path matches the Q1-D expectation that
+    /// `burn foo.js` behaves like a sandboxable Node replacement.
+    fn run_script(
+        &self,
+        source: &str,
+        invocation: &ScriptInvocation,
+        limits: &FuelGauge,
+    ) -> Result<ScriptOutcome> {
+        self.wasm.run_script(source, invocation, limits)
     }
 }
 

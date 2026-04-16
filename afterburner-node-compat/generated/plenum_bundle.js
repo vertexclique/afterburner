@@ -568,16 +568,45 @@ __register_module('child_process', function(module, exports, require) {
 // console — routes messages through the host log hook when available,
 // falling back to a noop-buffer if no host is wired. `util.format` is
 // used for message rendering so `%s`, `%d`, `%j` behave as expected.
+//
+// Eager-installed as `globalThis.console` via bootstrap IIFE, matching
+// Node's drop-in posture where `console` is always available without an
+// explicit `require('console')`. Also registered as the CommonJS
+// `console` module so `require('console')` returns the same object.
+//
+// If `globalThis.console` already exists when this loads (e.g. Javy's
+// built-in console on the wasm path, which writes to fd 1/2 directly),
+// we leave it alone — the runtime's native impl is strictly better
+// than our host-log bridge.
 
 __register_module('console', function(module, exports, require) {
+    module.exports = globalThis.console;
+});
+
+(function bootstrapConsole() {
+    if (globalThis.console) {
+        // Runtime already has a console (Javy on wasm, etc.) — leave it.
+        return;
+    }
 
     function resolveHost() {
         return typeof globalThis.__host_log === 'function' ? globalThis.__host_log : null;
     }
 
+    // `util` isn't available yet at bundle-load time if this runs before
+    // util.js registers — so render lazily.
     function render() {
-        var util = require('util');
-        return util.format.apply(null, arguments);
+        try {
+            var util = require('util');
+            return util.format.apply(null, arguments);
+        } catch (_) {
+            // Pre-util fallback: concatenate arguments the way Node does.
+            var parts = [];
+            for (var i = 0; i < arguments.length; i++) {
+                parts.push(String(arguments[i]));
+            }
+            return parts.join(' ');
+        }
     }
 
     function logAt(level) {
@@ -599,8 +628,12 @@ __register_module('console', function(module, exports, require) {
         debug:   logAt('debug'),
         trace:   logAt('debug'),
         dir:     function(obj) {
-            var util = require('util');
-            logAt('info')(util.inspect(obj));
+            try {
+                var util = require('util');
+                logAt('info')(util.inspect(obj));
+            } catch (_) {
+                logAt('info')(String(obj));
+            }
         },
         assert:  function(cond) {
             if (!cond) {
@@ -615,9 +648,8 @@ __register_module('console', function(module, exports, require) {
         table:   function(t) { logAt('info')(JSON.stringify(t, null, 2)); }
     };
 
-    module.exports = c;
-    if (!globalThis.console) globalThis.console = c;
-});
+    globalThis.console = c;
+})();
 
 // ---- crypto.js ----
 // crypto — Node-style hash/hmac/randomBytes/randomUUID, all backed by
@@ -1862,7 +1894,12 @@ __register_module('path', function(module, exports, require) {
     // the require resolver since this runs before user code.
     var EventEmitter = require('events');
 
+    // `__host_env` / `__ab_argv` are installed per-thrust by script
+    // mode (see plugin's modes/script.rs). Both globals are absent in
+    // UDF mode, which is intentional — UDF scripts only see their
+    // `data` input.
     var hostEnv = globalThis.__host_env || {};
+    var argv    = globalThis.__ab_argv   || ['afterburner'];
     var proc = Object.create(EventEmitter.prototype);
     EventEmitter.call(proc);
 
@@ -1872,7 +1909,7 @@ __register_module('path', function(module, exports, require) {
         version:  'v20.0.0-afterburner',
         versions: { node: '20.0.0', afterburner: '0.1.0' },
         env:      hostEnv,
-        argv:     ['afterburner'],
+        argv:     argv,
         execPath: '/usr/bin/afterburner',
         pid:      1,
         title:    'afterburner',
@@ -2680,10 +2717,19 @@ __register_module('url', function(module, exports, require) {
 
 __register_module('util', function(module, exports, require) {
 
+    // Matches Node's util.format: string args at the top level are
+    // emitted verbatim; non-string args go through util.inspect. That
+    // keeps `console.log("a", "b")` producing `"a b"` (no quotes) and
+    // `console.log("a", ["b"])` producing `"a [ 'b' ]"` (quotes on the
+    // ARRAY element via inspect, not on the top-level "a").
+    function renderArg(arg) {
+        return typeof arg === 'string' ? arg : exports.inspect(arg);
+    }
+
     exports.format = function(fmt) {
         if (typeof fmt !== 'string') {
             var parts = [];
-            for (var i = 0; i < arguments.length; i++) parts.push(exports.inspect(arguments[i]));
+            for (var i = 0; i < arguments.length; i++) parts.push(renderArg(arguments[i]));
             return parts.join(' ');
         }
         var args = arguments;
@@ -2704,7 +2750,7 @@ __register_module('util', function(module, exports, require) {
             else { out += ch; argIdx--; i++; continue; }
             i += 2;
         }
-        while (argIdx < args.length) out += ' ' + exports.inspect(args[argIdx++]);
+        while (argIdx < args.length) out += ' ' + renderArg(args[argIdx++]);
         return out;
     };
 

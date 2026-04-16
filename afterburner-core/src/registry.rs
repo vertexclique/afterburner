@@ -248,6 +248,23 @@ impl BurnCache {
         self.engine.thrust(id, input, limits)
     }
 
+    /// Run `source` as a top-level script (no UDF envelope). See
+    /// [`Combustor::run_script`] for semantics. Script-mode calls are
+    /// **not** cached — every invocation is a fresh compile + run.
+    /// Caching a script-mode script is almost never what the user
+    /// wants: Node-style scripts usually have side effects at top
+    /// level, and the host has no way to know whether a particular
+    /// re-run should re-execute those effects.
+    #[fastrace::trace(name = "BurnCache::run_script")]
+    pub fn run_script(
+        &self,
+        source: &str,
+        invocation: &crate::ScriptInvocation,
+        limits: &FuelGauge,
+    ) -> Result<crate::ScriptOutcome> {
+        self.engine.run_script(source, invocation, limits)
+    }
+
     /// Array-in / array-out batch helper.
     ///
     /// Contract: `rows` must be a JSON array. The script receives the whole

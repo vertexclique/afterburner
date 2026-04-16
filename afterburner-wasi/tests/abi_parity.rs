@@ -1,6 +1,6 @@
 //! ABI drift gate. Host imports are declared in three places:
 //!
-//! 1. `afterburner-plugin/src/lib.rs` — `extern "C" { fn host_foo(...) }`.
+//! 1. `afterburner-plugin/src/host_api.rs` — `extern "C" { fn host_foo(...) }`.
 //! 2. `afterburner-wasi/src/host_imports.rs` — `linker.func_wrap(NS, "host_foo", ...)`.
 //! 3. `wit/afterburner-host.wit` — the shape contract (docs).
 //!
@@ -43,12 +43,15 @@ fn wasi_imports() -> BTreeSet<String> {
 ///
 /// ```ignore
 /// extern "C" {
-///     fn host_foo(...);
+///     pub fn host_foo(...);
 /// }
 /// ```
+///
+/// Lives in `afterburner-plugin/src/host_api.rs` since the lib.rs
+/// split (B0 / §4.7).
 fn plugin_imports() -> BTreeSet<String> {
-    let src = fs::read_to_string(workspace_root().join("afterburner-plugin/src/lib.rs"))
-        .expect("read plugin/src/lib.rs");
+    let src = fs::read_to_string(workspace_root().join("afterburner-plugin/src/host_api.rs"))
+        .expect("read plugin/src/host_api.rs");
     let mut out = BTreeSet::new();
     let mut in_extern = false;
     for line in src.lines() {
@@ -67,7 +70,13 @@ fn plugin_imports() -> BTreeSet<String> {
             in_extern = false;
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("fn host_")
+        // After the split, declarations are `pub fn host_foo(...)`.
+        // The pre-split form was `fn host_foo(...)`. Accept both so
+        // the test stays robust if visibility is ever tightened.
+        let stripped = trimmed
+            .strip_prefix("pub fn host_")
+            .or_else(|| trimmed.strip_prefix("fn host_"));
+        if let Some(rest) = stripped
             && let Some(open) = rest.find('(')
         {
             let name = format!("host_{}", &rest[..open]);

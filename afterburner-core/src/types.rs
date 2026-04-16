@@ -76,6 +76,54 @@ impl FuelGauge {
     }
 }
 
+/// Input for [`crate::engine::Combustor::run_script`] — the script
+/// source plus Node-style `process.argv` and `process.env` values.
+///
+/// Separated from [`FuelGauge`] because this is per-invocation *data*
+/// flowing into the runtime, not *limits* applied to it. The active
+/// [`Manifold`] still gates what the script can actually do with env
+/// vars once visible; this struct only governs what the caller
+/// exposes in the first place.
+#[derive(Debug, Clone, Default)]
+pub struct ScriptInvocation {
+    /// Populated into `process.argv`. Conventionally
+    /// `["burn", "/abs/path/script.js", ...user_args]` for the CLI;
+    /// library callers typically pass `[]` or just a program name.
+    pub argv: Vec<String>,
+    /// Populated into `process.env`. For the CLI this is usually
+    /// `std::env::vars()` filtered through [`Manifold::env`]; library
+    /// callers pick what they want exposed.
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+/// Result of [`crate::engine::Combustor::run_script`] — top-level
+/// script-mode execution (no UDF envelope).
+///
+/// Unlike the UDF [`thrust`](crate::engine::Combustor::thrust) path
+/// where the backend returns the script's JSON return value, script
+/// mode buffers whatever was written to stdout / stderr during
+/// execution and surfaces them alongside the Node-style `exit_code`.
+///
+/// `Ok(ScriptOutcome)` means the script ran to completion — possibly
+/// with `exit_code != 0` if the user code threw an uncaught exception.
+/// `Err(AfterburnerError)` is reserved for infrastructural failures
+/// that prevented a meaningful run: compile failure on the user
+/// source, fuel/memory/timeout exhaustion, WASM traps not mapped to a
+/// specific cause.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScriptOutcome {
+    /// Everything the script wrote to fd 1 (`console.log`, `process.stdout.write`,
+    /// `Javy.IO.writeSync(1, …)`). Bounded by the host's stdout capacity.
+    pub stdout: Vec<u8>,
+    /// Everything the script wrote to fd 2 (`console.error`, plus any
+    /// plugin-emitted trap-diagnosis text when the script threw).
+    pub stderr: Vec<u8>,
+    /// Node-style exit code. `0` = natural completion. `1` = uncaught
+    /// exception in user code. Other values come from `process.exit(N)`
+    /// when that lands in a later phase.
+    pub exit_code: i32,
+}
+
 /// SHA-256 the given bytes. Shared helper so every engine hashes sources
 /// identically and `ScriptId`s round-trip between backends.
 pub fn sha256(bytes: &[u8]) -> [u8; 32] {
