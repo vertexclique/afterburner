@@ -23,7 +23,7 @@ use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(
     name = "burn",
     version,
@@ -83,7 +83,7 @@ struct Cli {
     allow_all: bool,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 enum Cmd {
     /// Execute a JavaScript file.
     Run {
@@ -107,6 +107,22 @@ enum Cmd {
         #[arg(value_name = "FILE")]
         file: PathBuf,
     },
+    /// Measure throughput + p50/p99 latency by running the script N
+    /// times. Reports to stderr; script output is suppressed.
+    Bench {
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// Total iterations to submit.
+        #[arg(long, default_value_t = 10_000)]
+        iters: usize,
+        /// Workers for the threaded path. `1` uses the single-threaded
+        /// BurnCache. Higher values use ThrustEngine.
+        #[arg(long, default_value_t = 1)]
+        workers: usize,
+    },
+    /// Interactive REPL. Each line becomes a fresh script (no state
+    /// shared across lines — matches the fresh-per-call invariant).
+    Repl,
     /// Print the build version + enabled features.
     Version,
 }
@@ -147,6 +163,12 @@ fn dispatch(mut cli: Cli) -> Result<()> {
         Cmd::Eval { code } => run_source(&cli, &code),
         Cmd::Thrust { file } => thrust_from_stdin(&cli, &file),
         Cmd::Check { file } => check_file(&cli, &file),
+        Cmd::Bench {
+            file,
+            iters,
+            workers,
+        } => bench(&cli, &file, iters, workers),
+        Cmd::Repl => repl(&cli),
         Cmd::Version => print_version(),
     }
 }
@@ -303,6 +325,238 @@ fn parse_mode(s: &str) -> Result<afterburner::Mode> {
         "adaptive" => afterburner::Mode::Adaptive,
         other => anyhow::bail!("unknown --mode '{other}'; expected one of: native, wasm, adaptive"),
     })
+}
+
+/// Perf harness. Register once; submit `iters` thrusts via the
+/// configured engine; measure total wall-clock + per-iteration
+/// latency; report throughput + p50/p99 on stderr.
+///
+/// For `workers > 1`: we build the threaded engine and fan out `N`
+/// submitter threads (matching `workers`) via `std::thread::scope` so
+/// the pool is actually exercised in parallel. Per-thread iterations
+/// are distributed evenly. Without this, a single-threaded submit
+/// loop would serialize the caller side and leave the worker pool
+/// mostly idle.
+#[allow(clippy::needless_return)] // feature-gated branches need explicit returns
+fn bench(cli: &Cli, path: &PathBuf, iters: usize, workers: usize) -> Result<()> {
+    use std::time::Instant;
+    let source = fs::read_to_string(path).with_context(|| format!("reading {path:?}"))?;
+
+    if workers <= 1 {
+        let ab = build_afterburner(cli)?;
+        let id = ab.register(&source).context("compile")?;
+        let mut latencies = Vec::with_capacity(iters);
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            let i0 = Instant::now();
+            ab.run(&id, &Value::Null)
+                .map_err(|e: AfterburnerError| anyhow::anyhow!("{e}"))?;
+            latencies.push(i0.elapsed().as_micros());
+        }
+        let total = t0.elapsed();
+        report_bench(total, &mut latencies, iters, workers);
+        return Ok(());
+    }
+
+    #[cfg(feature = "thrust")]
+    {
+        let ab = build_threaded_for_bench(cli, workers)?;
+        let id = ab.register(&source).context("compile")?;
+        let per_thread = iters / workers;
+        let remainder = iters % workers;
+        let ab_ref = &ab;
+        let id_ref = &id;
+
+        let t0 = Instant::now();
+        let all_latencies: Vec<u128> = std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(workers);
+            for w in 0..workers {
+                let my_iters = per_thread + if w < remainder { 1 } else { 0 };
+                handles.push(s.spawn(move || -> Result<Vec<u128>> {
+                    let mut lat = Vec::with_capacity(my_iters);
+                    for _ in 0..my_iters {
+                        let i0 = Instant::now();
+                        ab_ref
+                            .run(id_ref, &Value::Null)
+                            .map_err(|e: AfterburnerError| anyhow::anyhow!("{e}"))?;
+                        lat.push(i0.elapsed().as_micros());
+                    }
+                    Ok(lat)
+                }));
+            }
+            let mut all: Vec<u128> = Vec::with_capacity(iters);
+            for h in handles {
+                let part = h
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("bench thread panic"))??;
+                all.extend(part);
+            }
+            Ok::<Vec<u128>, anyhow::Error>(all)
+        })?;
+        let total = t0.elapsed();
+        let mut lat = all_latencies;
+        report_bench(total, &mut lat, iters, workers);
+        return Ok(());
+    }
+
+    #[cfg(not(feature = "thrust"))]
+    anyhow::bail!(
+        "bench with --workers > 1 requires the `thrust` feature; rebuild with `--features thrust`"
+    );
+}
+
+#[cfg(feature = "thrust")]
+fn build_threaded_for_bench(cli: &Cli, workers: usize) -> Result<Afterburner> {
+    let mut b = Afterburner::builder();
+    if let Some(fuel) = cli.fuel {
+        b = b.fuel(fuel);
+    }
+    if let Some(mem) = cli.memory {
+        b = b.memory_bytes(mem);
+    }
+    if let Some(ms) = cli.timeout_ms {
+        b = b.timeout_ms(ms);
+    }
+    b = b.manifold(build_manifold(cli));
+    b.threaded(workers).build().context("build threaded")
+}
+
+fn report_bench(total: std::time::Duration, latencies: &mut [u128], iters: usize, workers: usize) {
+    latencies.sort_unstable();
+    let throughput = iters as f64 / total.as_secs_f64();
+    let p50 = latencies[latencies.len() / 2];
+    let p99_idx = ((latencies.len() as f64) * 0.99) as usize;
+    let p99 = latencies[p99_idx.min(latencies.len() - 1)];
+    eprintln!(
+        "burn bench: iters={iters} workers={workers} total={:.2}ms throughput={:.0}/sec \
+         p50={p50}us p99={p99}us",
+        total.as_secs_f64() * 1000.0,
+        throughput
+    );
+}
+
+/// Interactive REPL. Submits each submitted line as a fresh script.
+/// Meta-commands:
+///
+/// * `:fuel N` — set the per-call fuel cap.
+/// * `:mode native|wasm|adaptive` — rebuild the engine in a given mode.
+/// * `:allow net=*`, `:allow fs=/tmp`, `:allow env=HOME` — grant
+///   capabilities on the live engine (rebuilds the manifold).
+/// * `:help` — list commands. `:exit` / `:quit` — exit.
+///
+/// Scripts run in UDF shape (`module.exports = () => ...` or plain
+/// expressions — the latter are wrapped). No state shared across
+/// lines; matches the fresh-per-call invariant.
+fn repl(cli: &Cli) -> Result<()> {
+    use rustyline::DefaultEditor;
+    use rustyline::error::ReadlineError;
+
+    let mut rl = DefaultEditor::new().context("rustyline init")?;
+    let mut live_cli = cli.clone();
+    let mut ab = build_afterburner(&live_cli)?;
+
+    eprintln!("burn repl — type :help for commands, :exit to quit.");
+    loop {
+        match rl.readline("burn> ") {
+            Ok(line) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let _ = rl.add_history_entry(trimmed);
+
+                if let Some(rest) = trimmed.strip_prefix(':') {
+                    match dispatch_meta(rest, &mut live_cli, &mut ab) {
+                        Ok(ReplAction::Continue) => continue,
+                        Ok(ReplAction::Exit) => break,
+                        Err(e) => {
+                            eprintln!("  error: {e}");
+                            continue;
+                        }
+                    }
+                }
+
+                // Evaluate as script. We wrap so a naked expression
+                // gets its value back (not via module.exports).
+                let wrapped = wrap_repl_line(trimmed);
+                match ab
+                    .register(&wrapped)
+                    .and_then(|id| ab.run(&id, &Value::Null))
+                {
+                    Ok(v) => {
+                        if !v.is_null() {
+                            println!("{}", serde_json::to_string(&v).unwrap_or_default());
+                        }
+                    }
+                    Err(e) => eprintln!("  error: {e}"),
+                }
+            }
+            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,
+            Err(e) => {
+                eprintln!("  readline error: {e}");
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+enum ReplAction {
+    Continue,
+    Exit,
+}
+
+fn dispatch_meta(rest: &str, cli: &mut Cli, ab: &mut Afterburner) -> Result<ReplAction> {
+    let (cmd, arg) = match rest.split_once(char::is_whitespace) {
+        Some((c, a)) => (c, a.trim()),
+        None => (rest, ""),
+    };
+    match cmd {
+        "help" | "?" => {
+            eprintln!("  :fuel N                   set per-call fuel");
+            eprintln!("  :mode native|wasm|adaptive");
+            eprintln!("  :allow net=*|host,list");
+            eprintln!("  :allow fs=*|/path,list");
+            eprintln!("  :allow env=*|VAR,list");
+            eprintln!("  :exit | :quit");
+        }
+        "fuel" => {
+            let n: u64 = arg.parse().context("parse fuel")?;
+            cli.fuel = Some(n);
+            *ab = build_afterburner(cli)?;
+            eprintln!("  fuel = {n}");
+        }
+        "mode" => {
+            cli.mode = Some(arg.to_string());
+            *ab = build_afterburner(cli)?;
+            eprintln!("  mode = {arg}");
+        }
+        "allow" => {
+            let (k, v) = arg.split_once('=').context(":allow expects key=value")?;
+            match k.trim() {
+                "net" => cli.allow_net = Some(v.to_string()),
+                "fs" => cli.allow_fs = Some(v.to_string()),
+                "env" => cli.allow_env = Some(v.to_string()),
+                "all" => cli.allow_all = true,
+                other => anyhow::bail!("unknown capability '{other}' (expected: net|fs|env|all)"),
+            }
+            *ab = build_afterburner(cli)?;
+            eprintln!("  {k} = {v}");
+        }
+        "exit" | "quit" => return Ok(ReplAction::Exit),
+        other => anyhow::bail!("unknown command :{other} — try :help"),
+    }
+    Ok(ReplAction::Continue)
+}
+
+fn wrap_repl_line(line: &str) -> String {
+    // If the user wrote a full module.exports shape, pass through.
+    if line.contains("module.exports") {
+        return line.to_string();
+    }
+    // Otherwise wrap as a nullary-arg function that returns the
+    // expression's value.
+    format!("module.exports = () => ({line});\n")
 }
 
 fn print_version() -> Result<()> {
