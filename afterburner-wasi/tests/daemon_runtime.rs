@@ -83,10 +83,7 @@ fn daemon_dispatch_invokes_registered_handler() {
 
     let stdout = daemon.drain_stdout();
     let text = String::from_utf8_lossy(&stdout);
-    assert!(
-        text.contains("dispatched: GET /hello"),
-        "stdout = {text:?}"
-    );
+    assert!(text.contains("dispatched: GET /hello"), "stdout = {text:?}");
     assert!(
         text.contains("dispatched: POST /world"),
         "stdout = {text:?}"
@@ -151,10 +148,7 @@ fn daemon_handles_missing_handler_without_crashing() {
     // no-op — the important thing is the dispatch returns cleanly.
     let c = fresh();
     let mut daemon = c
-        .spawn_daemon(
-            "/* empty init — no handlers */",
-            Manifold::open(),
-        )
+        .spawn_daemon("/* empty init — no handlers */", Manifold::open())
         .expect("spawn daemon");
     daemon
         .dispatch_event(json!({
@@ -222,7 +216,10 @@ fn http_createserver_polyfill_end_to_end() {
         )
         .expect("spawn daemon");
 
-    assert!(daemon.has_listeners(), "createServer().listen() should register a listener");
+    assert!(
+        daemon.has_listeners(),
+        "createServer().listen() should register a listener"
+    );
     let startup = String::from_utf8_lossy(&daemon.drain_stdout()).into_owned();
     assert!(
         startup.contains("listening on port 3000"),
@@ -310,5 +307,8 @@ fn http_createserver_request_event_listener_also_fires() {
         .expect("dispatch");
 
     let stdout = String::from_utf8_lossy(&daemon.drain_stdout()).into_owned();
-    assert!(stdout.contains("via-on-request: /pathA"), "stdout = {stdout:?}");
+    assert!(
+        stdout.contains("via-on-request: /pathA"),
+        "stdout = {stdout:?}"
+    );
 }

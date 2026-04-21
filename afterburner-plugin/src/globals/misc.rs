@@ -111,6 +111,34 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
             unsafe { host_http_reply(req_id as i64, b.as_ptr(), b.len() as u32) }
         }),
     );
+
+    // B3: process.exit — never returns; the host traps with I32Exit.
+    let _ = globals.set(
+        "__host_process_exit",
+        Func::from(|code: f64| unsafe { host_process_exit(code as i32) }),
+    );
+
+    // B3: timer host imports for daemon mode. Polyfill `timers.js`
+    // checks for the presence of `__host_timer_set` to detect daemon
+    // mode and route through real host-managed timers.
+    let _ = globals.set(
+        "__host_timer_set",
+        Func::from(|delay_ms: f64, repeat: f64| -> f64 {
+            unsafe { host_timer_set(delay_ms as i32, repeat as i32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_timer_clear",
+        Func::from(|timer_id: f64| unsafe { host_timer_clear(timer_id as i32) }),
+    );
+    let _ = globals.set(
+        "__host_timer_unref",
+        Func::from(|timer_id: f64| unsafe { host_timer_unref(timer_id as i32) }),
+    );
+    let _ = globals.set(
+        "__host_timer_ref",
+        Func::from(|timer_id: f64| unsafe { host_timer_ref(timer_id as i32) }),
+    );
 }
 
 fn install_os<'js>(globals: &Object<'js>) {
@@ -225,10 +253,8 @@ fn install_hostctx<'js>(globals: &Object<'js>) {
         "__host_get_env",
         Func::from(|key: String| -> Option<String> {
             let kb = key.as_bytes();
-            call_read(|out, cap| unsafe {
-                host_get_env(kb.as_ptr(), kb.len() as u32, out, cap)
-            })
-            .ok()
+            call_read(|out, cap| unsafe { host_get_env(kb.as_ptr(), kb.len() as u32, out, cap) })
+                .ok()
         }),
     );
 }
@@ -241,10 +267,8 @@ fn install_state<'js>(globals: &Object<'js>) {
         "__host_state_get",
         Func::from(|key: String| -> Option<String> {
             let kb = key.as_bytes();
-            call_read(|out, cap| unsafe {
-                host_state_get(kb.as_ptr(), kb.len() as u32, out, cap)
-            })
-            .ok()
+            call_read(|out, cap| unsafe { host_state_get(kb.as_ptr(), kb.len() as u32, out, cap) })
+                .ok()
         }),
     );
 

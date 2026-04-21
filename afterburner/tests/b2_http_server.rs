@@ -45,12 +45,8 @@ fn wait_for_listener(port: u16, timeout: Duration) -> bool {
 
 fn http_get(port: u16, path: &str) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .ok();
-    let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-    );
+    stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
+    let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
     stream.write_all(req.as_bytes()).expect("write");
     let mut resp = String::new();
     stream.read_to_string(&mut resp).expect("read");

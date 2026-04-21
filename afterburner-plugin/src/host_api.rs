@@ -300,6 +300,22 @@ unsafe extern "C" {
         out_cap: u32,
     ) -> i32;
 
+    // ---- process lifecycle -------------------------------------------
+    //
+    // `host_process_exit(code)` never returns — the host traps with
+    // `I32Exit(code)` which propagates as `AfterburnerError::ProcessExit`.
+    pub fn host_process_exit(code: i32);
+
+    // ---- timers (daemon mode B3) ------------------------------------
+    //
+    // `host_timer_set(delay_ms, repeat)` registers a host-managed timer.
+    // Returns a positive timer_id on success. `repeat` != 0 means
+    // setInterval (re-arms after each fire). Ref'd by default.
+    pub fn host_timer_set(delay_ms: i32, repeat: i32) -> i32;
+    pub fn host_timer_clear(timer_id: i32);
+    pub fn host_timer_unref(timer_id: i32);
+    pub fn host_timer_ref(timer_id: i32);
+
     // ---- diagnostics -------------------------------------------------
     pub fn host_last_error(out_ptr: *mut u8, out_cap: u32) -> i32;
 
@@ -334,9 +350,5 @@ unsafe extern "C" {
     // the reply bytes through the host's internal request→reply
     // channel so axum can write the response to the socket. `resp_json`
     // shape: `{status, headers: {...}, body: string}`.
-    pub fn host_http_reply(
-        req_id: i64,
-        resp_ptr: *const u8,
-        resp_len: u32,
-    ) -> i32;
+    pub fn host_http_reply(req_id: i64, resp_ptr: *const u8, resp_len: u32) -> i32;
 }

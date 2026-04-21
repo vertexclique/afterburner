@@ -27,8 +27,7 @@ pub fn build_manifold(cli: &Cli) -> Manifold {
     if cli.allow_all {
         return Manifold::open();
     }
-    let any_allow =
-        cli.allow_net.is_some() || cli.allow_fs.is_some() || cli.allow_env.is_some();
+    let any_allow = cli.allow_net.is_some() || cli.allow_fs.is_some() || cli.allow_env.is_some();
     let explicit_sandbox = cli.sandbox || any_allow;
     if !explicit_sandbox {
         // The CLI-flip: implicit open. Banner triggers separately in
@@ -96,7 +95,6 @@ pub fn is_implicit_open(cli: &Cli) -> bool {
     if cli.allow_all {
         return false;
     }
-    let any_allow =
-        cli.allow_net.is_some() || cli.allow_fs.is_some() || cli.allow_env.is_some();
+    let any_allow = cli.allow_net.is_some() || cli.allow_fs.is_some() || cli.allow_env.is_some();
     !(cli.sandbox || any_allow)
 }

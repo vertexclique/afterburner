@@ -7,9 +7,25 @@ use afterburner_core::{HostContext, Manifold, SharedStateStore};
 use afterburner_node_compat::hash_handles::HashHandleStore;
 use afterburner_node_compat::sign_handles::SignHandleStore;
 use std::sync::Arc;
+use std::time::Instant;
 use wasmtime::{ResourceLimiter, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::preview1::WasiP1Ctx;
+
+/// Host-managed timer entry. Lives in `HostState::timers` and is
+/// manipulated by the `__host_timer_*` imports. The CLI event loop
+/// drains expired entries via `DaemonRuntime::drain_expired_timers`.
+#[derive(Debug, Clone)]
+pub struct TimerSlot {
+    pub id: i32,
+    pub fire_at: Instant,
+    /// `None` = one-shot (`setTimeout`); `Some(ms)` = repeating
+    /// (`setInterval`). On fire the host re-arms with a new `fire_at`.
+    pub interval_ms: Option<u64>,
+    /// Ref'd timers keep the daemon event loop alive. `unref()` clears
+    /// this; `ref()` re-sets it. Matches Node's `timer.unref()`.
+    pub is_ref: bool,
+}
 
 /// Per-`thrust` host state. A fresh instance is created for every call so
 /// invocations are fully isolated (no shared JS globals, no stdout leak
@@ -53,6 +69,13 @@ pub struct HostState {
     /// all one-shot thrust paths so UDF/script callers don't pay the
     /// coordinator's startup cost.
     pub daemon_http: Option<Arc<crate::daemon_http::DaemonHttp>>,
+    /// Host-managed timers registered by `setTimeout`/`setInterval` in
+    /// daemon mode via the `__host_timer_set` import. Empty for one-shot
+    /// UDF / script paths.
+    pub timers: Vec<TimerSlot>,
+    /// Monotonically increasing timer id counter. Starts at 1 so JS
+    /// can use `0` as "no timer".
+    pub next_timer_id: i32,
 }
 
 impl HostState {
@@ -98,6 +121,8 @@ impl HostState {
             pending_input: Vec::new(),
             pending_envelope: Vec::new(),
             daemon_http: None,
+            timers: Vec::new(),
+            next_timer_id: 1,
         }
     }
 

@@ -50,7 +50,10 @@ fn dispatch(mut cli: Cli) -> Result<()> {
                     rest.push(f.to_string_lossy().into_owned());
                 }
                 rest.extend(std::mem::take(&mut cli.rest_args));
-                Cmd::Eval { code, rest_args: rest }
+                Cmd::Eval {
+                    code,
+                    rest_args: rest,
+                }
             } else if let Some(file) = cli.file.clone() {
                 Cmd::Run {
                     file,

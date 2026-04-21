@@ -80,7 +80,11 @@ pub struct Cli {
     /// `process.argv[2..]`. Only meaningful for the top-level
     /// `burn FILE arg1 arg2…` shape; each subcommand has its own
     /// `rest_args` when it accepts trailing args.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_name = "ARGS")]
+    #[arg(
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "ARGS"
+    )]
     pub rest_args: Vec<String>,
 }
 
@@ -91,7 +95,11 @@ pub enum Cmd {
         #[arg(value_name = "FILE")]
         file: PathBuf,
         /// Arguments passed through as `process.argv[2..]`.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_name = "ARGS")]
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "ARGS"
+        )]
         rest_args: Vec<String>,
     },
     /// Evaluate an inline JavaScript snippet.
@@ -99,7 +107,11 @@ pub enum Cmd {
         #[arg(value_name = "CODE")]
         code: String,
         /// Arguments passed through as `process.argv[2..]`.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_name = "ARGS")]
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "ARGS"
+        )]
         rest_args: Vec<String>,
     },
     /// UDF mode — reads JSON from stdin, feeds as `data` to the script,

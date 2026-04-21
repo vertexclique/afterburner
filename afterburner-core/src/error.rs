@@ -71,6 +71,12 @@ pub enum AfterburnerError {
     #[error("engine overloaded (in-flight cap reached)")]
     Overloaded,
 
+    /// The script called `process.exit(n)` inside daemon mode. The CLI
+    /// propagates the exit code to `std::process::exit`; library callers
+    /// can inspect the code and decide what to do.
+    #[error("process.exit({0})")]
+    ProcessExit(i32),
+
     /// Generic engine-internal failure that doesn't fit a specific variant.
     /// Use sparingly — prefer adding a typed variant.
     #[error("engine error: {0}")]

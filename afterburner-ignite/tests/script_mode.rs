@@ -20,7 +20,12 @@ fn console_log_captured_to_stdout() {
             &FuelGauge::unlimited(),
         )
         .expect("run");
-    assert_eq!(out.exit_code, 0, "stderr: {:?}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.exit_code,
+        0,
+        "stderr: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("native script mode"), "stdout = {stdout:?}");
 }
@@ -68,7 +73,12 @@ fn async_iife_resolves_native() {
             &FuelGauge::unlimited(),
         )
         .expect("run");
-    assert_eq!(out.exit_code, 0, "stderr: {:?}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.exit_code,
+        0,
+        "stderr: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("resolved: 42"), "stdout = {stdout:?}");
 }
@@ -97,7 +107,12 @@ fn uncaught_exception_is_exit_1_with_captured_output() {
 fn argv_and_env_threaded_through_invocation() {
     let c = fresh();
     let mut inv = ScriptInvocation {
-        argv: vec!["burn".into(), "[eval]".into(), "first".into(), "second".into()],
+        argv: vec![
+            "burn".into(),
+            "[eval]".into(),
+            "first".into(),
+            "second".into(),
+        ],
         ..ScriptInvocation::default()
     };
     inv.env.insert("NATIVE_FLAG".into(), "yes".into());
@@ -113,7 +128,12 @@ fn argv_and_env_threaded_through_invocation() {
             &FuelGauge::unlimited(),
         )
         .expect("run");
-    assert_eq!(out.exit_code, 0, "stderr: {:?}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.exit_code,
+        0,
+        "stderr: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("argv1: [eval]"), "stdout = {stdout:?}");
     assert!(stdout.contains("argv[2]: first"), "stdout = {stdout:?}");

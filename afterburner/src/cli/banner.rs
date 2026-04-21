@@ -66,8 +66,7 @@ pub fn maybe_show(cli: &Cli) {
 fn ack_marker_path() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        let base = env::var_os("LOCALAPPDATA")
-            .or_else(|| env::var_os("USERPROFILE"))?;
+        let base = env::var_os("LOCALAPPDATA").or_else(|| env::var_os("USERPROFILE"))?;
         Some(PathBuf::from(base).join("burn").join(ACK_FILENAME))
     }
     #[cfg(not(windows))]

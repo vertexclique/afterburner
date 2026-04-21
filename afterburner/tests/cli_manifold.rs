@@ -92,7 +92,9 @@ fn default_is_implicit_open() {
 #[test]
 fn allow_all_is_not_implicit_open() {
     // `-A` is an EXPLICIT open; banner should not fire for it.
-    assert!(!is_implicit_open(&CliBuilder::default().allow_all().build()));
+    assert!(!is_implicit_open(
+        &CliBuilder::default().allow_all().build()
+    ));
 }
 
 #[test]

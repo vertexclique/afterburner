@@ -303,8 +303,7 @@ impl Combustor for NativeCombustor {
 
         let _capture_guard = ScriptCaptureGuard::activate();
         let exit_code = with_thread_rt(|rt| {
-            let _g =
-                afterburner_node_compat::state_active::activate(self.state_store.clone());
+            let _g = afterburner_node_compat::state_active::activate(self.state_store.clone());
             let _hg = self
                 .host_context
                 .as_ref()
@@ -322,9 +321,9 @@ impl Combustor for NativeCombustor {
                     None => false,
                 })));
 
-            let res =
-                rt.context
-                    .with(|ctx| -> Result<()> { run_script_stage(&ctx, &stage) });
+            let res = rt
+                .context
+                .with(|ctx| -> Result<()> { run_script_stage(&ctx, &stage) });
 
             rt.runtime.set_interrupt_handler(None);
 

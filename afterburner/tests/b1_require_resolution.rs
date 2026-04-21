@@ -62,39 +62,111 @@ fn both_forms(module: &str) {
 
 // ---- plan-gate modules (from §5 B1) ------------------------------------
 
-#[test] fn require_path()   { both_forms("path"); }
-#[test] fn require_events() { both_forms("events"); }
-#[test] fn require_url()    { both_forms("url"); }
-#[test] fn require_buffer() { both_forms("buffer"); }
-#[test] fn require_stream() { both_forms("stream"); }
+#[test]
+fn require_path() {
+    both_forms("path");
+}
+#[test]
+fn require_events() {
+    both_forms("events");
+}
+#[test]
+fn require_url() {
+    both_forms("url");
+}
+#[test]
+fn require_buffer() {
+    both_forms("buffer");
+}
+#[test]
+fn require_stream() {
+    both_forms("stream");
+}
 
 // ---- pure-JS, always-available --------------------------------------
 
-#[test] fn require_assert()          { both_forms("assert"); }
-#[test] fn require_console()         { both_forms("console"); }
-#[test] fn require_punycode()        { both_forms("punycode"); }
-#[test] fn require_querystring()     { both_forms("querystring"); }
-#[test] fn require_string_decoder()  { both_forms("string_decoder"); }
-#[test] fn require_timers()          { both_forms("timers"); }
-#[test] fn require_util()            { both_forms("util"); }
+#[test]
+fn require_assert() {
+    both_forms("assert");
+}
+#[test]
+fn require_console() {
+    both_forms("console");
+}
+#[test]
+fn require_punycode() {
+    both_forms("punycode");
+}
+#[test]
+fn require_querystring() {
+    both_forms("querystring");
+}
+#[test]
+fn require_string_decoder() {
+    both_forms("string_decoder");
+}
+#[test]
+fn require_timers() {
+    both_forms("timers");
+}
+#[test]
+fn require_util() {
+    both_forms("util");
+}
 
 // ---- host-backed (capability-gated; `-A` grants everything) ------------
 
-#[test] fn require_fs()            { both_forms("fs"); }
-#[test] fn require_fs_promises()   { both_forms("fs/promises"); }
-#[test] fn require_crypto()        { both_forms("crypto"); }
-#[test] fn require_http()          { both_forms("http"); }
-#[test] fn require_https()         { both_forms("https"); }
-#[test] fn require_dns()           { both_forms("dns"); }
-#[test] fn require_dns_promises()  { both_forms("dns/promises"); }
-#[test] fn require_os()            { both_forms("os"); }
-#[test] fn require_zlib()          { both_forms("zlib"); }
-#[test] fn require_child_process() { both_forms("child_process"); }
+#[test]
+fn require_fs() {
+    both_forms("fs");
+}
+#[test]
+fn require_fs_promises() {
+    both_forms("fs/promises");
+}
+#[test]
+fn require_crypto() {
+    both_forms("crypto");
+}
+#[test]
+fn require_http() {
+    both_forms("http");
+}
+#[test]
+fn require_https() {
+    both_forms("https");
+}
+#[test]
+fn require_dns() {
+    both_forms("dns");
+}
+#[test]
+fn require_dns_promises() {
+    both_forms("dns/promises");
+}
+#[test]
+fn require_os() {
+    both_forms("os");
+}
+#[test]
+fn require_zlib() {
+    both_forms("zlib");
+}
+#[test]
+fn require_child_process() {
+    both_forms("child_process");
+}
 
 // ---- newer sub-module paths Node supports --------------------------
 
-#[test] fn require_stream_promises() { both_forms("stream/promises"); }
-#[test] fn require_timers_promises() { both_forms("timers/promises"); }
+#[test]
+fn require_stream_promises() {
+    both_forms("stream/promises");
+}
+#[test]
+fn require_timers_promises() {
+    both_forms("timers/promises");
+}
 
 // ---- behaviours beyond pure resolution ----------------------------------
 

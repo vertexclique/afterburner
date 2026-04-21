@@ -3,19 +3,23 @@
 //! Every CLI script runs through daemon mode (Q2-A locked decision):
 //! `daemon-init` evaluates the user source, and then:
 //!
-//! * **No listeners registered** → the script is a plain one-shot.
-//!   Drain captured stdout / stderr to the real process streams and
-//!   exit 0 (or non-zero if daemon-init trapped).
-//! * **At least one listener** (via `http.createServer().listen(...)`
-//!   → `__host_http_listen`) → we transition into the dispatcher
-//!   loop, routing axum-dispatched events to the long-lived Store
-//!   until SIGINT. On shutdown we drain any remaining output and
-//!   exit cleanly.
+//! * **No refs** (no HTTP listeners, no ref'd timers) → the script is
+//!   a plain one-shot. Drain captured stdout/stderr and exit 0.
+//! * **At least one ref** (HTTP listener via `.listen()`, or a ref'd
+//!   `setInterval` / `setTimeout`) → enter the dispatcher loop,
+//!   routing axum events and firing host-managed timers until SIGINT
+//!   or until all refs are cleared.
+//!
+//! B3 additions: `process.exit(n)` propagates the exit code via
+//! `AfterburnerError::ProcessExit`; `setInterval` / non-zero
+//! `setTimeout` register host-managed timers that keep the event
+//! loop alive (ref'd by default, `.unref()` supported).
 //!
 //! The library API (`Afterburner::run_script`) does **not** use this
 //! path — Q2-A locks that to strict one-shot semantics. Only the CLI
 //! can auto-transition into daemon mode.
 
+use crate::AfterburnerError;
 use crate::wasm::{DaemonHttp, DaemonRuntime, WasmCombustor, WasmConfig};
 use crate::{EnvAccess, ScriptInvocation};
 use anyhow::{Context, Result};
@@ -24,21 +28,17 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::args::Cli;
 use super::manifold::build_manifold;
 
 /// Run `source` via daemon-init; enter the event loop if the script
-/// registered at least one listener. Matches script-mode semantics
-/// for plain scripts — captured stdout/stderr flushed, exit code
-/// from `process.exit(N)` (once B3 lands) or `0` on clean completion.
-pub fn execute(
-    cli: &Cli,
-    source: &str,
-    script_label: &str,
-    user_args: &[String],
-) -> Result<()> {
+/// registered at least one ref (HTTP listener or ref'd timer).
+/// Matches script-mode semantics for plain scripts — captured
+/// stdout/stderr flushed, exit code from `process.exit(N)` or `0`
+/// on clean completion.
+pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]) -> Result<()> {
     // `burn --mode native` can't host daemon mode (native combustor
     // has no axum hooks). Route such scripts through the library's
     // script mode instead — keeps the `--mode native foo.js` path
@@ -91,17 +91,22 @@ pub fn execute(
 
     if let Err(e) = daemon.run_init(source, &invocation) {
         flush_streams(&mut daemon)?;
-        let _ = std::io::stderr().write_all(format!("burn: {e}\n").as_bytes());
-        std::process::exit(1);
+        match e {
+            AfterburnerError::ProcessExit(code) => std::process::exit(code),
+            other => {
+                let _ = std::io::stderr().write_all(format!("burn: {other}\n").as_bytes());
+                std::process::exit(1);
+            }
+        }
     }
 
     // Flush the daemon-init output (startup `console.log`s) up front
     // so the user sees "listening on ..." before any events arrive.
     flush_streams(&mut daemon)?;
 
-    if !daemon.has_listeners() {
-        // Plain script — exit cleanly. `rt` drops; axum had no
-        // listeners to drop.
+    if !daemon.has_refs() {
+        // Plain script — no listeners and no ref'd timers. Exit
+        // cleanly. `rt` drops; axum had no listeners to drop.
         rt.shutdown_timeout(Duration::from_secs(1));
         return Ok(());
     }
@@ -122,9 +127,9 @@ pub fn execute(
     {
         let shutdown = Arc::clone(&shutdown);
         rt.spawn(async move {
-            if let Ok(mut sigterm) = tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::terminate(),
-            ) {
+            if let Ok(mut sigterm) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            {
                 let _ = sigterm.recv().await;
                 shutdown.store(true, Ordering::Release);
             }
@@ -172,38 +177,64 @@ fn run_event_loop(
     inflight: &Arc<AtomicUsize>,
 ) -> Result<()> {
     while !shutdown.load(Ordering::Acquire) {
-        match http.try_recv_event() {
-            Some(event) => {
-                inflight.fetch_add(1, Ordering::Relaxed);
-                let envelope = event_to_envelope(&event);
-                let res = daemon.dispatch_event(envelope);
-                inflight.fetch_sub(1, Ordering::Relaxed);
-                flush_streams(daemon)?;
-                if let Err(e) = res {
-                    // One bad request shouldn't kill the server.
-                    // Print the error on stderr and keep going —
-                    // matches Node's behaviour for uncaught
-                    // per-request exceptions.
-                    let _ = std::io::stderr().write_all(
-                        format!("burn: dispatch error: {e}\n").as_bytes(),
-                    );
+        let mut did_work = false;
+
+        // ---- HTTP events ----
+        if let Some(event) = http.try_recv_event() {
+            did_work = true;
+            inflight.fetch_add(1, Ordering::Relaxed);
+            let envelope = event_to_envelope(&event);
+            let res = daemon.dispatch_event(envelope);
+            inflight.fetch_sub(1, Ordering::Relaxed);
+            flush_streams(daemon)?;
+            if let Err(e) = res {
+                if let AfterburnerError::ProcessExit(code) = &e {
+                    std::process::exit(*code);
                 }
+                let _ =
+                    std::io::stderr().write_all(format!("burn: dispatch error: {e}\n").as_bytes());
             }
-            None => {
-                // No event available — sleep briefly so we don't
-                // peg a core. A signal-based wake would be nicer;
-                // B2b (multiplexed listeners) is a good place to
-                // revisit this.
-                std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // ---- Timer events ----
+        let fired = daemon.drain_expired_timers();
+        for timer_id in fired {
+            did_work = true;
+            let envelope = serde_json::json!({
+                "kind": "timer-fire",
+                "timer_id": timer_id,
+            });
+            let res = daemon.dispatch_event(envelope);
+            flush_streams(daemon)?;
+            if let Err(e) = res {
+                if let AfterburnerError::ProcessExit(code) = &e {
+                    std::process::exit(*code);
+                }
+                let _ = std::io::stderr().write_all(format!("burn: timer error: {e}\n").as_bytes());
             }
+        }
+
+        // If the last ref'd timer was cleared (or unref'd) during a
+        // callback, exit cleanly — matches Node's behaviour where
+        // clearing the only active interval lets the process exit.
+        if !daemon.has_refs() {
+            break;
+        }
+
+        if !did_work {
+            // Sleep briefly; wake sooner if a timer is due.
+            let max_sleep = Duration::from_millis(5);
+            let sleep_dur = daemon
+                .next_timer_deadline()
+                .map(|d| d.saturating_duration_since(Instant::now()).min(max_sleep))
+                .unwrap_or(max_sleep);
+            std::thread::sleep(sleep_dur);
         }
     }
     Ok(())
 }
 
-fn event_to_envelope(
-    event: &afterburner_wasi::daemon_http::DaemonEvent,
-) -> serde_json::Value {
+fn event_to_envelope(event: &afterburner_wasi::daemon_http::DaemonEvent) -> serde_json::Value {
     serde_json::json!({
         "kind": "http-request",
         "server_id": event.server_id,
@@ -259,4 +290,3 @@ pub fn script_label(path: &Path) -> String {
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| path.to_string_lossy().into_owned())
 }
-

@@ -97,11 +97,7 @@ fn install_oneshot<'js>(globals: &Object<'js>) {
             let _ = globals.set(
                 $name,
                 Func::from(
-                    |algo: String,
-                     key_b64: String,
-                     iv_b64: String,
-                     data_b64: String|
-                     -> String {
+                    |algo: String, key_b64: String, iv_b64: String, data_b64: String| -> String {
                         let ab = algo.as_bytes();
                         let kb = key_b64.as_bytes();
                         let ib = iv_b64.as_bytes();
@@ -167,13 +163,7 @@ fn install_oneshot<'js>(globals: &Object<'js>) {
     let _ = globals.set(
         "__host_crypto_scrypt_sync",
         Func::from(
-            |password: String,
-             salt_b64: String,
-             n: u32,
-             r: u32,
-             p: u32,
-             key_len: u32|
-             -> String {
+            |password: String, salt_b64: String, n: u32, r: u32, p: u32, key_len: u32| -> String {
                 let pb = password.as_bytes();
                 let sb = salt_b64.as_bytes();
                 match call_read(|out, cap| unsafe {
@@ -341,12 +331,7 @@ fn install_streaming<'js>(globals: &Object<'js>) {
             let ab = algo.as_bytes();
             let kb = key_b64.as_bytes();
             let h = unsafe {
-                host_crypto_hmac_open(
-                    ab.as_ptr(),
-                    ab.len() as u32,
-                    kb.as_ptr(),
-                    kb.len() as u32,
-                )
+                host_crypto_hmac_open(ab.as_ptr(), ab.len() as u32, kb.as_ptr(), kb.len() as u32)
             };
             if h <= 0 { 0.0 } else { h as f64 }
         }),

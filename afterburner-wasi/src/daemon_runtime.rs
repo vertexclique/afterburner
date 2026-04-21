@@ -21,6 +21,7 @@ use afterburner_core::{
 };
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use wasmtime::{Engine, InstancePre, Store, Trap, TypedFunc};
 use wasmtime_wasi::I32Exit;
 
@@ -151,11 +152,7 @@ impl DaemonRuntime {
     /// Store. On failure, `self` is still valid — callers can call
     /// [`drain_stdout`] / [`drain_stderr`] to retrieve whatever the
     /// script wrote before it threw.
-    pub fn run_init(
-        &mut self,
-        source: &str,
-        invocation: &ScriptInvocation,
-    ) -> Result<()> {
+    pub fn run_init(&mut self, source: &str, invocation: &ScriptInvocation) -> Result<()> {
         let envelope = serde_json::json!({
             "mode": "daemon-init",
             "source": source,
@@ -213,20 +210,53 @@ impl DaemonRuntime {
     pub fn has_listeners(&self) -> bool {
         self.daemon_http.listener_count() > 0
     }
+
+    /// `true` if the daemon has anything keeping it alive — HTTP
+    /// listeners or ref'd timers. Q2-A locked decision: both
+    /// `.listen()` and `setInterval` / ref'd `setTimeout` keep the
+    /// runtime alive.
+    pub fn has_refs(&self) -> bool {
+        self.daemon_http.listener_count() > 0 || self.store.data().timers.iter().any(|t| t.is_ref)
+    }
+
+    /// Drain timers whose `fire_at` has passed. Returns the ids that
+    /// fired. One-shot timers are removed; repeating timers are re-
+    /// armed with a fresh `fire_at`.
+    pub fn drain_expired_timers(&mut self) -> Vec<i32> {
+        let now = Instant::now();
+        let timers = &mut self.store.data_mut().timers;
+        let mut fired = Vec::new();
+        let mut i = 0;
+        while i < timers.len() {
+            if timers[i].fire_at <= now {
+                fired.push(timers[i].id);
+                if let Some(interval) = timers[i].interval_ms {
+                    timers[i].fire_at = now + Duration::from_millis(interval);
+                    i += 1;
+                } else {
+                    timers.swap_remove(i);
+                }
+            } else {
+                i += 1;
+            }
+        }
+        fired
+    }
+
+    /// Earliest fire-time among all registered timers, if any. The
+    /// event loop uses this to bound its poll sleep so timers fire
+    /// with reasonable granularity.
+    pub fn next_timer_deadline(&self) -> Option<Instant> {
+        self.store.data().timers.iter().map(|t| t.fire_at).min()
+    }
 }
 
 fn map_daemon_trap(phase: &'static str, trap: anyhow::Error) -> AfterburnerError {
-    // WASI `proc_exit(N)` propagates as I32Exit. Daemon mode doesn't
-    // use proc_exit as a control-flow signal, but scripts that call
-    // `process.exit` will land here — treat 0 as clean return, non-
-    // zero as an error the CLI should propagate via its own exit.
+    // WASI `proc_exit(N)` propagates as I32Exit. `__host_process_exit`
+    // triggers this via the host import that returns `Err(I32Exit(n))`.
+    // Surface it as `ProcessExit` so the CLI can `std::process::exit`.
     if let Some(exit) = trap.downcast_ref::<I32Exit>() {
-        if exit.0 == 0 {
-            return AfterburnerError::Engine(format!(
-                "{phase}: unexpected proc_exit(0) — daemon mode doesn't support process.exit yet"
-            ));
-        }
-        return AfterburnerError::WasmTrap(format!("{phase}: process.exit({})", exit.0));
+        return AfterburnerError::ProcessExit(exit.0);
     }
     if let Some(t) = trap.downcast_ref::<Trap>() {
         match t {

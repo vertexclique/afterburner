@@ -57,9 +57,7 @@ fn wait_for_listener(port: u16, timeout: Duration) -> bool {
 /// Send a raw HTTP/1.1 request and return the full response bytes.
 fn http_raw(port: u16, request: &str) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .ok();
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
     stream.write_all(request.as_bytes()).expect("write");
     let mut resp = String::new();
     stream.read_to_string(&mut resp).expect("read");
@@ -92,7 +90,10 @@ fn hello_from_burn_serves_http() {
     let mut daemon = c
         .spawn_daemon_with(&source, Manifold::open(), Arc::clone(&daemon_http))
         .expect("spawn daemon");
-    assert!(daemon.has_listeners(), "createServer().listen() should register");
+    assert!(
+        daemon.has_listeners(),
+        "createServer().listen() should register"
+    );
 
     // Dispatcher thread: drains events the axum handler pushes and
     // feeds them to the long-lived Store. A shutdown flag lets us

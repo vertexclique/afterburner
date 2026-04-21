@@ -37,7 +37,11 @@ fn run_burn_script(source: &str, extra_flags: &[&str]) -> std::process::Output {
 #[test]
 fn top_level_console_log_reaches_stdout() {
     let out = run_burn_script(r#"console.log("hello from script mode")"#, &[]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("hello from script mode"),
@@ -54,7 +58,11 @@ fn top_level_await_resolves() {
         console.log("resolved:", v);
     "#;
     let out = run_burn_script(src, &[]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("resolved: 42"), "stdout = {stdout:?}");
 }
@@ -114,9 +122,7 @@ fn library_script_syntax_error_yields_exit_1() {
     assert_eq!(outcome.exit_code, 1);
     let stderr = String::from_utf8_lossy(&outcome.stderr);
     assert!(
-        stderr.contains("Error")
-            || stderr.contains("SyntaxError")
-            || stderr.contains("expecting"),
+        stderr.contains("Error") || stderr.contains("SyntaxError") || stderr.contains("expecting"),
         "expected SyntaxError-ish stderr, got {stderr:?}"
     );
     // We should *not* get a `CompileFailed`-shape error with this
@@ -158,7 +164,12 @@ fn library_run_script_with_invocation_threads_argv_env() {
     let outcome = ab
         .run_script_with(src, &inv, ab.default_limits())
         .expect("script ran");
-    assert_eq!(outcome.exit_code, 0, "stderr: {:?}", String::from_utf8_lossy(&outcome.stderr));
+    assert_eq!(
+        outcome.exit_code,
+        0,
+        "stderr: {:?}",
+        String::from_utf8_lossy(&outcome.stderr)
+    );
     let stdout = String::from_utf8_lossy(&outcome.stdout);
     assert!(stdout.contains("argv0: burn"), "stdout = {stdout:?}");
     assert!(stdout.contains("argv[2]: x"), "stdout = {stdout:?}");
@@ -184,7 +195,14 @@ fn cli_piped_stdin_not_expected_in_script_mode() {
         let _ = stdin.write_all(b"{\"payload\": \"ignored\"}\n");
     }
     let out = child.wait_with_output().expect("wait burn");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("script ignores stdin"), "stdout = {stdout:?}");
+    assert!(
+        stdout.contains("script ignores stdin"),
+        "stdout = {stdout:?}"
+    );
 }

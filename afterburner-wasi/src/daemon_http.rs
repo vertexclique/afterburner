@@ -92,7 +92,10 @@ pub struct DaemonHttp {
 impl fmt::Debug for DaemonHttp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DaemonHttp")
-            .field("next_server_id", &self.next_server_id.load(Ordering::Relaxed))
+            .field(
+                "next_server_id",
+                &self.next_server_id.load(Ordering::Relaxed),
+            )
             .field("next_req_id", &self.next_req_id.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
@@ -152,7 +155,9 @@ impl DaemonHttp {
     /// (listeners present → daemon).
     pub fn listener_count(&self) -> usize {
         let seen = self.next_server_id.load(Ordering::Relaxed);
-        (1..seen).filter(|id| self.listeners.get(id).is_some()).count()
+        (1..seen)
+            .filter(|id| self.listeners.get(id).is_some())
+            .count()
     }
 
     /// Stub-mode listener registration — reserves a `server_id`
@@ -206,20 +211,13 @@ impl DaemonHttp {
     /// modes observably symmetric for host ABI tests.
     #[cfg(feature = "daemon")]
     pub fn bind_listener(self: &Arc<Self>, port: u16) -> i32 {
-        let (Some(runtime), Some(event_tx)) =
-            (self.runtime.as_ref(), self.event_tx.clone())
-        else {
+        let (Some(runtime), Some(event_tx)) = (self.runtime.as_ref(), self.event_tx.clone()) else {
             return self.register_listener(port);
         };
         let id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
         let bind_addr = format!("127.0.0.1:{port}");
         let coord = Arc::clone(self);
-        let spawn = runtime.spawn(axum_server::serve(
-            bind_addr,
-            id,
-            coord,
-            event_tx,
-        ));
+        let spawn = runtime.spawn(axum_server::serve(bind_addr, id, coord, event_tx));
         // Keep the task alive by letting the runtime own it. We
         // don't need the JoinHandle here — shutdown happens when the
         // daemon drops.
@@ -320,10 +318,7 @@ mod axum_server {
         coord: Arc<DaemonHttp>,
     }
 
-    async fn dispatch_request(
-        State(state): State<Arc<ServerState>>,
-        req: Request,
-    ) -> Response {
+    async fn dispatch_request(State(state): State<Arc<ServerState>>, req: Request) -> Response {
         let (parts, body) = req.into_parts();
         let method = parts.method.to_string();
         let url = parts
@@ -364,7 +359,10 @@ mod axum_server {
         };
 
         let Some(event_tx) = state.coord.event_tx.as_ref() else {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "burn: daemon not running\n")
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "burn: daemon not running\n",
+            )
                 .into_response();
         };
         event_tx.send_async(event).await;
@@ -374,8 +372,8 @@ mod axum_server {
         // facing path.
         let reply = reply_rx.recv_async().await;
 
-        let status = StatusCode::from_u16(reply.status)
-            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let status =
+            StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let mut headers_out = HeaderMap::new();
         for (name, value) in &reply.headers {
             if let (Ok(name), Ok(value)) = (

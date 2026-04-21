@@ -52,6 +52,18 @@ const DISPATCH_SOURCE: &str = r#"
                 res.end(String((e && e.stack) || e));
             }
         }
+    } else if (kind === 'timer-fire') {
+        // B3: host-managed timer expired. Look up the callback the JS
+        // side registered in `__ab_timer_handlers[timer_id]`.
+        const table = globalThis.__ab_timer_handlers || {};
+        const cb = table[ev.timer_id];
+        if (typeof cb === 'function') {
+            try {
+                await cb();
+            } catch (e) {
+                try { console.error('timer callback error:', (e && e.stack) || e); } catch (_) {}
+            }
+        }
     } else {
         // Unknown event kind — surface on stderr for diagnosis.
         try { console.error('daemon-event: unknown kind=' + kind); } catch (_) {}

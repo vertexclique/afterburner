@@ -68,7 +68,10 @@ fn cli_banner_silenced_by_burn_quiet() {
         .env("BURN_QUIET", "1")
         // Isolated XDG so an existing marker on the host doesn't
         // mask a missing-silence bug.
-        .env("XDG_CACHE_HOME", std::env::temp_dir().join("burn-b0-silent"))
+        .env(
+            "XDG_CACHE_HOME",
+            std::env::temp_dir().join("burn-b0-silent"),
+        )
         .arg("-e")
         .arg(r#"console.log("q")"#)
         .output()
@@ -105,10 +108,7 @@ fn cli_banner_silenced_by_quiet_flag() {
 fn cli_banner_appears_on_first_implicit_open() {
     // Fresh XDG_CACHE_HOME → no ack-marker → banner should print
     // (implicit open, no --sandbox, no --allow-*, no -A).
-    let cache_dir = std::env::temp_dir().join(format!(
-        "burn-b0-banner-{}",
-        std::process::id()
-    ));
+    let cache_dir = std::env::temp_dir().join(format!("burn-b0-banner-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&cache_dir);
     let out = Command::new(BURN)
         .env_remove("BURN_QUIET")
@@ -145,10 +145,8 @@ fn cli_banner_appears_on_first_implicit_open() {
 
 #[test]
 fn cli_banner_does_not_fire_with_sandbox_flag() {
-    let cache_dir = std::env::temp_dir().join(format!(
-        "burn-b0-banner-sandbox-{}",
-        std::process::id()
-    ));
+    let cache_dir =
+        std::env::temp_dir().join(format!("burn-b0-banner-sandbox-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&cache_dir);
     let out = Command::new(BURN)
         .env_remove("BURN_QUIET")
@@ -168,10 +166,7 @@ fn cli_banner_does_not_fire_with_sandbox_flag() {
 
 #[test]
 fn cli_banner_does_not_fire_with_allow_all() {
-    let cache_dir = std::env::temp_dir().join(format!(
-        "burn-b0-banner-A-{}",
-        std::process::id()
-    ));
+    let cache_dir = std::env::temp_dir().join(format!("burn-b0-banner-A-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&cache_dir);
     let out = Command::new(BURN)
         .env_remove("BURN_QUIET")

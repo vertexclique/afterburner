@@ -14,12 +14,14 @@
 //! stashed in `HostState::last_error` and read by the plugin via the
 //! `host_last_error` import.
 
-use crate::host::HostState;
+use crate::host::{HostState, TimerSlot};
 use afterburner_core::AfterburnerError;
 use afterburner_node_compat::{crypto_host, dns_host, fs_host, http_host, os_host, zlib_host};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
+use std::time::{Duration, Instant};
 use wasmtime::{Caller, Linker, Memory};
+use wasmtime_wasi::I32Exit;
 
 const NS: &str = "afterburner:host";
 
@@ -48,6 +50,8 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_input(linker)?;
     wrap_envelope(linker)?;
     wrap_http_server(linker)?;
+    wrap_process_exit(linker)?;
+    wrap_timers(linker)?;
     Ok(())
 }
 
@@ -1589,8 +1593,7 @@ fn wrap_http_server(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
                     return E_PERMISSION;
                 };
                 if !(1..=65535).contains(&port) {
-                    caller.data_mut().last_error =
-                        format!("http.listen: invalid port {port}");
+                    caller.data_mut().last_error = format!("http.listen: invalid port {port}");
                     return E_OTHER;
                 }
                 dh.bind_listener(port as u16)
@@ -1602,11 +1605,7 @@ fn wrap_http_server(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
         .func_wrap(
             NS,
             "host_http_reply",
-            |mut caller: Caller<'_, HostState>,
-             req_id: i64,
-             resp_ptr: i32,
-             resp_len: i32|
-             -> i32 {
+            |mut caller: Caller<'_, HostState>, req_id: i64, resp_ptr: i32, resp_len: i32| -> i32 {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return E_OTHER;
                 };
@@ -1623,18 +1622,13 @@ fn wrap_http_server(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
                         return E_OTHER;
                     }
                 };
-                let status = parsed
-                    .get("status")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(500) as u16;
+                let status = parsed.get("status").and_then(|v| v.as_u64()).unwrap_or(500) as u16;
                 let headers: Vec<(String, String)> = parsed
                     .get("headers")
                     .and_then(|v| v.as_object())
                     .map(|obj| {
                         obj.iter()
-                            .filter_map(|(k, v)| {
-                                v.as_str().map(|s| (k.clone(), s.to_string()))
-                            })
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                             .collect()
                     })
                     .unwrap_or_default();
@@ -1653,6 +1647,107 @@ fn wrap_http_server(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
             },
         )
         .map_err(link_err)?;
+    Ok(())
+}
+
+// ---- process.exit (B3) --------------------------------------------------
+//
+// `host_process_exit(code)` never returns — the host traps with
+// `I32Exit(code)`, which Wasmtime surfaces as an anyhow::Error that
+// `map_daemon_trap` converts to `AfterburnerError::ProcessExit(code)`.
+
+fn wrap_process_exit(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    linker
+        .func_wrap(
+            NS,
+            "host_process_exit",
+            |_caller: Caller<'_, HostState>, code: i32| -> anyhow::Result<()> {
+                Err(I32Exit(code).into())
+            },
+        )
+        .map_err(link_err)?;
+    Ok(())
+}
+
+// ---- timers (daemon mode B3) --------------------------------------------
+
+fn wrap_timers(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    linker
+        .func_wrap(
+            NS,
+            "host_timer_set",
+            |mut caller: Caller<'_, HostState>, delay_ms: i32, repeat: i32| -> i32 {
+                // Timers are only supported in daemon mode. In UDF /
+                // one-shot script mode `daemon_http` is None and we
+                // return -1 so the JS polyfill surfaces a clear error.
+                if caller.data().daemon_http.is_none() {
+                    return -1;
+                }
+                let delay = if delay_ms > 0 {
+                    delay_ms as u64
+                } else {
+                    // Node treats delay <= 0 as 1 for setInterval,
+                    // and 0 as immediate for setTimeout. Use 1ms floor.
+                    1
+                };
+                let state = caller.data_mut();
+                let id = state.next_timer_id;
+                state.next_timer_id += 1;
+                state.timers.push(TimerSlot {
+                    id,
+                    fire_at: Instant::now() + Duration::from_millis(delay),
+                    interval_ms: if repeat != 0 { Some(delay) } else { None },
+                    is_ref: true,
+                });
+                id
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_timer_clear",
+            |mut caller: Caller<'_, HostState>, timer_id: i32| {
+                caller.data_mut().timers.retain(|t| t.id != timer_id);
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_timer_unref",
+            |mut caller: Caller<'_, HostState>, timer_id: i32| {
+                if let Some(t) = caller
+                    .data_mut()
+                    .timers
+                    .iter_mut()
+                    .find(|t| t.id == timer_id)
+                {
+                    t.is_ref = false;
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_timer_ref",
+            |mut caller: Caller<'_, HostState>, timer_id: i32| {
+                if let Some(t) = caller
+                    .data_mut()
+                    .timers
+                    .iter_mut()
+                    .find(|t| t.id == timer_id)
+                {
+                    t.is_ref = true;
+                }
+            },
+        )
+        .map_err(link_err)?;
+
     Ok(())
 }
 
