@@ -15,6 +15,7 @@ mod build;
 mod check;
 mod daemon;
 mod manifold;
+mod passthrough;
 mod repl;
 mod run;
 mod script;
@@ -38,6 +39,15 @@ fn dispatch(mut cli: Cli) -> Result<()> {
     let cmd = match cli.command.take() {
         Some(c) => c,
         None => {
+            // B4: pass-through targets (`burn node foo.js`, etc.).
+            // Must run before the positional-file fallback so `burn node`
+            // isn't misinterpreted as "run a file called node".
+            if let Some(ref file) = cli.file {
+                if let Some(target) = passthrough::detect(file) {
+                    return passthrough::dispatch(&mut cli, target);
+                }
+            }
+
             if let Some(code) = cli.eval_code.clone() {
                 // With `-e CODE arg1 arg2`, clap binds the *first*
                 // positional to `cli.file` (its declared slot), and
