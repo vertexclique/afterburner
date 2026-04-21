@@ -254,6 +254,202 @@ fn clearinterval_lets_daemon_exit() {
     );
 }
 
+// ---- process.exit from within daemon-event (HTTP handler) ---------------
+
+#[test]
+fn process_exit_from_http_handler() {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    use std::sync::atomic::{AtomicU16, Ordering as AtOrd};
+
+    static PORT_CTR: AtomicU16 = AtomicU16::new(0);
+    fn pick_port() -> u16 {
+        let offset = PORT_CTR.fetch_add(1, AtOrd::Relaxed);
+        let pid_tail = (std::process::id() & 0xFF) as u16;
+        50200 + ((pid_tail * 7 + offset * 13) % 3000)
+    }
+
+    let port = pick_port();
+    let source = format!(
+        r#"
+        const http = require("http");
+        http.createServer((_req, res) => {{
+            res.end("bye");
+            process.exit(7);
+        }}).listen({port});
+        "#
+    );
+    let mut child = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .arg("-e")
+        .arg(&source)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn burn");
+
+    // Wait for listener.
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(15) {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Fire a request that triggers process.exit(7).
+    if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
+        let req = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+        let _ = stream.write_all(req.as_bytes());
+        let mut resp = String::new();
+        let _ = stream.read_to_string(&mut resp);
+    }
+
+    let out = wait_with_timeout(&mut child, Duration::from_secs(10));
+    assert_eq!(
+        out.2.code(),
+        Some(7),
+        "HTTP handler's process.exit(7) should propagate, got {:?}",
+        out.2.code()
+    );
+}
+
+// ---- process.exit emits 'exit' event before exiting ---------------------
+
+#[test]
+fn process_exit_emits_exit_event() {
+    let out = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .arg("-e")
+        .arg(
+            r#"
+            process.on('exit', function(code) {
+                console.log('exit event code=' + code);
+            });
+            console.log('before');
+            process.exit(0);
+            "#,
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn burn");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("before"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("exit event code=0"),
+        "exit event should fire: {stdout}"
+    );
+}
+
+// ---- clearTimeout for one-shot timer ------------------------------------
+
+#[test]
+fn cleartimeout_prevents_fire() {
+    let start = Instant::now();
+    let out = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .arg("-e")
+        .arg(
+            r#"
+            var h = setTimeout(function() {
+                console.log('should not fire');
+            }, 5000);
+            clearTimeout(h);
+            console.log('cleared');
+            "#,
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn burn");
+    let elapsed = start.elapsed();
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("cleared"), "stdout: {stdout}");
+    assert!(
+        !stdout.contains("should not fire"),
+        "cleared timer should not fire"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "should exit quickly: {elapsed:?}"
+    );
+}
+
+// ---- setTimeout(fn, 0) still works as microtask (not host timer) --------
+
+#[test]
+fn settimeout_zero_delay_does_not_keep_daemon_alive() {
+    // setTimeout(fn, 0) fires via microtask — it should NOT register a
+    // host timer or keep the daemon alive. The script should exit cleanly
+    // without entering the event loop.
+    let start = Instant::now();
+    let out = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .arg("-e")
+        .arg(
+            r#"
+            setTimeout(function() { console.log('zero-delay'); }, 0);
+            console.log('sync');
+            "#,
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn burn");
+    let elapsed = start.elapsed();
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("sync"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("zero-delay"),
+        "zero-delay timer should fire as microtask: {stdout}"
+    );
+    // Should exit fast — no daemon event loop entered.
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "zero-delay should not keep daemon alive: {elapsed:?}"
+    );
+}
+
+// ---- ref() re-enables keepalive after unref() ---------------------------
+
+#[test]
+fn ref_after_unref_keeps_alive() {
+    let mut child = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .arg("-e")
+        .arg(
+            r#"
+            var count = 0;
+            var h = setInterval(function() {
+                count++;
+                console.log('tick ' + count);
+                if (count >= 2) process.exit(0);
+            }, 50);
+            h.unref();
+            h.ref();
+            "#,
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn burn");
+
+    let out = wait_with_timeout(&mut child, Duration::from_secs(30));
+    let stdout = String::from_utf8_lossy(&out.0);
+    assert!(
+        stdout.contains("tick 2"),
+        "ref() after unref() should keep alive: {stdout}"
+    );
+    assert!(out.2.success());
+}
+
 // ---- helpers ------------------------------------------------------------
 
 /// Wait for a child process with a timeout. Returns (stdout, stderr, status).
