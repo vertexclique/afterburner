@@ -5,11 +5,13 @@
 //! calls and the per-request reply channels that ferry
 //! `ServerResponse.end(body)` output back to the waiting axum task.
 //!
-//! B2 ships an A-style (per-script-port) listener topology; the plan
-//! calls out B2b as the refactor to a host-wide multiplex table
-//! keyed by (host, port). The public API here is already shaped for
-//! that refactor — it talks in terms of `server_id` and `req_id`, so
-//! a later host-wide variant can reuse the same contract.
+//! B2b landed the multiplex refactor: listener binding happens
+//! synchronously so `.listen(3000)` that collides with an already-
+//! used port surfaces EADDRINUSE immediately (matching Node), and
+//! `server.close()` releases the port via a new `__host_http_close`
+//! import. The `ports_in_use` map keyed by port (single-host today;
+//! extensible to (host, port) when multi-host lands) provides O(1)
+//! within-process collision detection without racing against the OS.
 //!
 //! The coordinator lives inside an `Arc<DaemonHttp>` attached to
 //! `HostState::daemon_http` on the daemon runtime's long-lived
@@ -65,12 +67,22 @@ pub struct DaemonEvent {
     pub body: Vec<u8>,
 }
 
+/// Negative return codes for `__host_http_listen`. Mirrored in
+/// `polyfills/http.js` — keep them in sync.
+pub const LISTEN_ERR_NO_DAEMON: i32 = -1;
+pub const LISTEN_ERR_ADDR_IN_USE: i32 = -2;
+pub const LISTEN_ERR_IO: i32 = -3;
+
 /// Host-side coordinator attached to `HostState::daemon_http` when a
 /// script enters daemon mode.
 pub struct DaemonHttp {
     next_server_id: AtomicI32,
     next_req_id: AtomicI64,
     listeners: HopscotchMap<ServerId, ListenerSlot>,
+    /// B2b: port → owning server_id. Lets the next `.listen()` on
+    /// the same port fail with EADDRINUSE without racing through the
+    /// OS bind, and keeps close() accounting honest.
+    ports_in_use: HopscotchMap<u16, ServerId>,
     pending: HopscotchMap<ReqId, PendingReply>,
 
     /// Daemon-feature channel — axum handlers push `DaemonEvent`s
@@ -81,6 +93,13 @@ pub struct DaemonHttp {
     event_tx: Option<kovan_channel::flavors::bounded::Sender<DaemonEvent>>,
     #[cfg(feature = "daemon")]
     event_rx: Option<kovan_channel::flavors::bounded::Receiver<DaemonEvent>>,
+
+    /// Abort handles per listener so `server.close()` can release
+    /// the port cleanly. `tokio::task::AbortHandle` is `Clone` so it
+    /// stores fine inside the kovan map; aborting cancels the axum
+    /// `serve` future, which drops the bound `TcpListener`.
+    #[cfg(feature = "daemon")]
+    listener_tasks: HopscotchMap<ServerId, tokio::task::AbortHandle>,
 
     /// Tokio runtime handle used to spawn axum listener tasks. `None`
     /// in stub mode — any call to `bind_listener` without a handle
@@ -117,11 +136,14 @@ impl DaemonHttp {
             next_server_id: AtomicI32::new(1),
             next_req_id: AtomicI64::new(1),
             listeners: HopscotchMap::new(),
+            ports_in_use: HopscotchMap::new(),
             pending: HopscotchMap::new(),
             #[cfg(feature = "daemon")]
             event_tx: None,
             #[cfg(feature = "daemon")]
             event_rx: None,
+            #[cfg(feature = "daemon")]
+            listener_tasks: HopscotchMap::new(),
             #[cfg(feature = "daemon")]
             runtime: None,
         }
@@ -142,9 +164,11 @@ impl DaemonHttp {
             next_server_id: AtomicI32::new(1),
             next_req_id: AtomicI64::new(1),
             listeners: HopscotchMap::new(),
+            ports_in_use: HopscotchMap::new(),
             pending: HopscotchMap::new(),
             event_tx: Some(tx),
             event_rx: Some(rx),
+            listener_tasks: HopscotchMap::new(),
             runtime: Some(handle),
         })
     }
@@ -162,10 +186,37 @@ impl DaemonHttp {
 
     /// Stub-mode listener registration — reserves a `server_id`
     /// without binding. Returned for tests / abstract drivers.
+    /// Still honours within-process port collisions so stub-mode
+    /// tests exercise the EADDRINUSE path.
     pub fn register_listener(&self, port: u16) -> ServerId {
+        if self.ports_in_use.get(&port).is_some() {
+            return LISTEN_ERR_ADDR_IN_USE;
+        }
         let id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
         self.listeners.insert(id, ListenerSlot { port });
+        self.ports_in_use.insert(port, id);
         id
+    }
+
+    /// Release a listener's port + accounting. Called from
+    /// `__host_http_close` via `server.close()` in JS. Returns
+    /// `true` if the server_id was known.
+    ///
+    /// On the daemon path this also aborts the axum task so the
+    /// socket is freed and a subsequent `.listen(port)` in the same
+    /// process succeeds.
+    pub fn close_listener(&self, id: ServerId) -> bool {
+        let Some(slot) = self.listeners.remove(&id) else {
+            return false;
+        };
+        self.ports_in_use.remove(&slot.port);
+        #[cfg(feature = "daemon")]
+        {
+            if let Some(handle) = self.listener_tasks.remove(&id) {
+                handle.abort();
+            }
+        }
+        true
     }
 
     /// Fetch (and remove) a pending reply slot. Called from
@@ -199,31 +250,73 @@ impl DaemonHttp {
         }
     }
 
-    /// Bind a TCP listener on `port` and register it as a new
-    /// `server_id`. The axum task handling the listener runs
-    /// indefinitely on the stored runtime handle.
+    /// Bind a TCP listener on `port` synchronously; on success,
+    /// register the accepted socket with axum on the stored runtime
+    /// handle and return the new `server_id`.
     ///
-    /// Returns a positive `server_id` on success, or falls back to
-    /// the stub path (`register_listener` — allocate id without
-    /// binding) when this `DaemonHttp` was constructed via
-    /// [`Self::new`] / [`Self::shared`] rather than
-    /// [`Self::with_runtime`]. That stub-fallback makes the two
-    /// modes observably symmetric for host ABI tests.
+    /// Returns:
+    ///
+    /// * positive `server_id` — bound and serving.
+    /// * [`LISTEN_ERR_NO_DAEMON`] (-1) — coordinator constructed via
+    ///   [`Self::new`] / [`Self::shared`] (no runtime). Stub path:
+    ///   allocate id without binding, preserving ABI-test symmetry.
+    /// * [`LISTEN_ERR_ADDR_IN_USE`] (-2) — port already bound, by us
+    ///   or by the OS.
+    /// * [`LISTEN_ERR_IO`] (-3) — any other bind failure (permission
+    ///   denied on a privileged port, interface vanished, etc.).
+    ///
+    /// The synchronous bind closes the race where a stale axum task
+    /// silently owned a port: if the OS refuses the bind we return a
+    /// typed error *before* allocating a `server_id`, so JS sees
+    /// the failure up front rather than via a stderr eprintln.
     #[cfg(feature = "daemon")]
     pub fn bind_listener(self: &Arc<Self>, port: u16) -> i32 {
         let (Some(runtime), Some(event_tx)) = (self.runtime.as_ref(), self.event_tx.clone()) else {
+            // Stub path still enforces within-process collision so
+            // the no-runtime tests exercise the same EADDRINUSE edge.
             return self.register_listener(port);
         };
-        let id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
-        let bind_addr = format!("127.0.0.1:{port}");
-        let coord = Arc::clone(self);
-        let spawn = runtime.spawn(axum_server::serve(bind_addr, id, coord, event_tx));
-        // Keep the task alive by letting the runtime own it. We
-        // don't need the JoinHandle here — shutdown happens when the
-        // daemon drops.
-        let _ = spawn;
 
+        // Fast in-process collision check — avoids the OS bind for
+        // the overwhelmingly common "same script calls .listen(p)
+        // twice" case.
+        if self.ports_in_use.get(&port).is_some() {
+            return LISTEN_ERR_ADDR_IN_USE;
+        }
+
+        let bind_addr = format!("127.0.0.1:{port}");
+        let std_listener = match std::net::TcpListener::bind(&bind_addr) {
+            Ok(l) => l,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                return LISTEN_ERR_ADDR_IN_USE;
+            }
+            Err(_) => return LISTEN_ERR_IO,
+        };
+        if std_listener.set_nonblocking(true).is_err() {
+            return LISTEN_ERR_IO;
+        }
+        // `TcpListener::from_std` registers the raw fd with the tokio
+        // reactor — it panics if called outside a runtime context.
+        // Enter the runtime synchronously for the duration of the
+        // conversion + spawn so the host function can stay sync.
+        let _enter = runtime.enter();
+        let tokio_listener = match tokio::net::TcpListener::from_std(std_listener) {
+            Ok(l) => l,
+            Err(_) => return LISTEN_ERR_IO,
+        };
+
+        let id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
         self.listeners.insert(id, ListenerSlot { port });
+        self.ports_in_use.insert(port, id);
+
+        let coord = Arc::clone(self);
+        let handle = runtime.spawn(axum_server::serve_listener(
+            tokio_listener,
+            id,
+            coord,
+            event_tx,
+        ));
+        self.listener_tasks.insert(id, handle.abort_handle());
         id
     }
 
@@ -285,8 +378,11 @@ mod axum_server {
     };
     use bytes::Bytes;
 
-    pub(super) async fn serve(
-        bind_addr: String,
+    /// Drive an already-bound listener through axum. Used by the
+    /// B2b path where `bind_listener` performs a synchronous bind so
+    /// EADDRINUSE surfaces to JS before we ever allocate a server_id.
+    pub(super) async fn serve_listener(
+        listener: tokio::net::TcpListener,
         server_id: ServerId,
         coord: Arc<DaemonHttp>,
         _event_tx: kovan_channel::flavors::bounded::Sender<DaemonEvent>,
@@ -298,17 +394,8 @@ mod axum_server {
         let app = Router::new()
             .fallback(any(dispatch_request))
             .with_state(state);
-        let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
-            Ok(l) => l,
-            Err(e) => {
-                // Log to stderr so the user sees what went wrong; the
-                // JS side already returned a negative error code.
-                eprintln!("burn: axum bind {bind_addr} failed: {e}");
-                return;
-            }
-        };
         if let Err(e) = axum::serve(listener, app).await {
-            eprintln!("burn: axum serve on {bind_addr} exited: {e}");
+            eprintln!("burn: axum serve for server_id={server_id} exited: {e}");
         }
     }
 

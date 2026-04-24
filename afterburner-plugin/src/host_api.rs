@@ -351,4 +351,10 @@ unsafe extern "C" {
     // channel so axum can write the response to the socket. `resp_json`
     // shape: `{status, headers: {...}, body: string}`.
     pub fn host_http_reply(req_id: i64, resp_ptr: *const u8, resp_len: u32) -> i32;
+
+    // B2b: `host_http_close(server_id)` aborts the axum listener task
+    // on the host side and releases the port. Returns 1 if the
+    // server_id was known, 0 otherwise (idempotent — safe to call
+    // twice). Backs `server.close()` in the http polyfill.
+    pub fn host_http_close(server_id: i32) -> i32;
 }

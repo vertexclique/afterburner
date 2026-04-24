@@ -1961,15 +1961,31 @@ function __plenum_install_http(moduleName) {
                     throw new TypeError('http.listen: port must be a number');
                 }
                 if (typeof globalThis.__host_http_listen !== 'function') {
-                    throw new Error('http.listen requires daemon mode (run via `burn` CLI)');
+                    // Library one-shot / no daemon — surface as an
+                    // async error event rather than a synchronous
+                    // throw so `server.on('error', …)` catches it,
+                    // matching Node's listen-failure contract.
+                    queueMicrotask(function() {
+                        var e = new Error('http.listen requires daemon mode (run via `burn` CLI)');
+                        e.code = 'EACCES';
+                        server.emit('error', e);
+                    });
+                    return server;
                 }
                 var id = globalThis.__host_http_listen(port);
                 if (id <= 0) {
-                    var err = new Error('http.listen failed (code ' + id + ')');
-                    if (id === -1) err.code = 'EACCES';
-                    else if (id === -2) err.code = 'EADDRNOTAVAIL';
-                    else err.code = 'EADDRINUSE';
-                    throw err;
+                    // B2b: -1 = no daemon (EACCES), -2 = EADDRINUSE,
+                    // -3 = other IO. Node emits 'error' async — we
+                    // match so `server.on('error', …)` handlers run.
+                    queueMicrotask(function() {
+                        var err = new Error('http.listen failed (code ' + id + ')');
+                        if (id === -1) err.code = 'EACCES';
+                        else if (id === -2) err.code = 'EADDRINUSE';
+                        else err.code = 'EIO';
+                        err.port = port;
+                        server.emit('error', err);
+                    });
+                    return server;
                 }
                 server._serverId = id;
                 server._port = port;
@@ -1990,8 +2006,15 @@ function __plenum_install_http(moduleName) {
             };
 
             server.close = function(cb) {
-                if (server._serverId && globalThis.__ab_http_handlers) {
-                    delete globalThis.__ab_http_handlers[server._serverId];
+                var id = server._serverId;
+                if (id && globalThis.__ab_http_handlers) {
+                    delete globalThis.__ab_http_handlers[id];
+                }
+                // B2b: release the port so a subsequent `.listen(port)`
+                // on the same port succeeds. No-op if the host import
+                // isn't installed (library/no-daemon path).
+                if (id && typeof globalThis.__host_http_close === 'function') {
+                    globalThis.__host_http_close(id);
                 }
                 server._serverId = undefined;
                 if (cb) queueMicrotask(function() { cb(); });

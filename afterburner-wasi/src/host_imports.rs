@@ -1647,6 +1647,24 @@ fn wrap_http_server(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
             },
         )
         .map_err(link_err)?;
+
+    // B2b: `server.close()` in JS → `__host_http_close(server_id)`
+    // here. Aborts the axum listener task and releases the port so a
+    // subsequent `.listen(port)` in the same process succeeds. Idempotent
+    // (second call on the same id is a no-op).
+    linker
+        .func_wrap(
+            NS,
+            "host_http_close",
+            |caller: Caller<'_, HostState>, server_id: i32| -> i32 {
+                let Some(dh) = caller.data().daemon_http.clone() else {
+                    return 0;
+                };
+                if dh.close_listener(server_id) { 1 } else { 0 }
+            },
+        )
+        .map_err(link_err)?;
+
     Ok(())
 }
 

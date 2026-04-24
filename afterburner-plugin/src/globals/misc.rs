@@ -111,6 +111,13 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
             unsafe { host_http_reply(req_id as i64, b.as_ptr(), b.len() as u32) }
         }),
     );
+    // B2b: server.close() — releases the port + aborts the axum task.
+    let _ = globals.set(
+        "__host_http_close",
+        Func::from(|server_id: f64| -> f64 {
+            unsafe { host_http_close(server_id as i32) as f64 }
+        }),
+    );
 
     // B3: process.exit — never returns; the host traps with I32Exit.
     let _ = globals.set(
