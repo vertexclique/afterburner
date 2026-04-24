@@ -21,3 +21,6 @@
 
 #[cfg(feature = "shadow-bcrypt")]
 pub mod bcrypt;
+
+#[cfg(feature = "shadow-argon2")]
+pub mod argon2;

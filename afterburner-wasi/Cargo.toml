@@ -23,6 +23,7 @@ daemon = ["dep:axum", "dep:tokio", "dep:hyper", "dep:bytes"]
 # require() time. Plugin itself always ships the import stubs;
 # without the feature the host returns "shadow-bcrypt not enabled".
 shadow-bcrypt = ["afterburner-node-compat/shadow-bcrypt"]
+shadow-argon2 = ["afterburner-node-compat/shadow-argon2"]
 
 [dependencies]
 afterburner-core.workspace = true

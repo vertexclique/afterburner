@@ -52,6 +52,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_http_server(linker)?;
     wrap_transpile(linker)?;
     wrap_shadow_bcrypt(linker)?;
+    wrap_shadow_argon2(linker)?;
     wrap_process_exit(linker)?;
     wrap_timers(linker)?;
     Ok(())
@@ -1799,6 +1800,162 @@ fn wrap_shadow_bcrypt(linker: &mut Linker<HostState>) -> Result<(), AfterburnerE
                     let _ = (rounds, out_ptr, out_cap);
                     caller.data_mut().last_error =
                         "shadow-bcrypt feature not enabled".into();
+                    -1
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    Ok(())
+}
+
+// ---- L3 shadow: argon2 -------------------------------------------------
+
+fn wrap_shadow_argon2(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    linker
+        .func_wrap(
+            NS,
+            "host_shadow_argon2_hash",
+            |mut caller: Caller<'_, HostState>,
+             pw_ptr: i32,
+             pw_len: i32,
+             ty: i32,
+             time_cost: i32,
+             memory_cost: i32,
+             parallelism: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(pw_bytes) = read_bytes(&memory, &caller, pw_ptr, pw_len) else {
+                    return E_OTHER;
+                };
+                let password = match std::str::from_utf8(&pw_bytes) {
+                    Ok(s) => s,
+                    Err(_) => return E_OTHER,
+                };
+                #[cfg(feature = "shadow-argon2")]
+                {
+                    let ty_u = if ty < 0 { 2 } else { ty as u8 };
+                    let t_u = if time_cost < 0 { 0 } else { time_cost as u32 };
+                    let m_u = if memory_cost < 0 { 0 } else { memory_cost as u32 };
+                    let p_u = if parallelism < 0 { 0 } else { parallelism as u32 };
+                    match afterburner_node_compat::shadows::argon2::hash(
+                        password, ty_u, t_u, m_u, p_u,
+                    ) {
+                        Ok(s) => write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes()),
+                        Err(e) => {
+                            caller.data_mut().last_error = e;
+                            -1
+                        }
+                    }
+                }
+                #[cfg(not(feature = "shadow-argon2"))]
+                {
+                    let _ = (password, ty, time_cost, memory_cost, parallelism, out_ptr, out_cap);
+                    caller.data_mut().last_error =
+                        "shadow-argon2 feature not enabled".into();
+                    -1
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_shadow_argon2_verify",
+            |mut caller: Caller<'_, HostState>,
+             h_ptr: i32,
+             h_len: i32,
+             pw_ptr: i32,
+             pw_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(h_bytes) = read_bytes(&memory, &caller, h_ptr, h_len) else {
+                    return E_OTHER;
+                };
+                let Some(pw_bytes) = read_bytes(&memory, &caller, pw_ptr, pw_len) else {
+                    return E_OTHER;
+                };
+                let hash = match std::str::from_utf8(&h_bytes) {
+                    Ok(s) => s,
+                    Err(_) => return E_OTHER,
+                };
+                let password = match std::str::from_utf8(&pw_bytes) {
+                    Ok(s) => s,
+                    Err(_) => return E_OTHER,
+                };
+                #[cfg(feature = "shadow-argon2")]
+                {
+                    match afterburner_node_compat::shadows::argon2::verify(hash, password) {
+                        Ok(true) => 1,
+                        Ok(false) => 0,
+                        Err(e) => {
+                            caller.data_mut().last_error = e;
+                            -1
+                        }
+                    }
+                }
+                #[cfg(not(feature = "shadow-argon2"))]
+                {
+                    let _ = (hash, password);
+                    caller.data_mut().last_error =
+                        "shadow-argon2 feature not enabled".into();
+                    -1
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_shadow_argon2_needs_rehash",
+            |mut caller: Caller<'_, HostState>,
+             h_ptr: i32,
+             h_len: i32,
+             ty: i32,
+             time_cost: i32,
+             memory_cost: i32,
+             parallelism: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(h_bytes) = read_bytes(&memory, &caller, h_ptr, h_len) else {
+                    return E_OTHER;
+                };
+                let hash = match std::str::from_utf8(&h_bytes) {
+                    Ok(s) => s,
+                    Err(_) => return E_OTHER,
+                };
+                #[cfg(feature = "shadow-argon2")]
+                {
+                    let ty_u = if ty < 0 { 2 } else { ty as u8 };
+                    let t_u = if time_cost < 0 { 0 } else { time_cost as u32 };
+                    let m_u = if memory_cost < 0 { 0 } else { memory_cost as u32 };
+                    let p_u = if parallelism < 0 { 0 } else { parallelism as u32 };
+                    match afterburner_node_compat::shadows::argon2::needs_rehash(
+                        hash, ty_u, t_u, m_u, p_u,
+                    ) {
+                        Ok(true) => 1,
+                        Ok(false) => 0,
+                        Err(e) => {
+                            caller.data_mut().last_error = e;
+                            -1
+                        }
+                    }
+                }
+                #[cfg(not(feature = "shadow-argon2"))]
+                {
+                    let _ = (hash, ty, time_cost, memory_cost, parallelism);
+                    caller.data_mut().last_error =
+                        "shadow-argon2 feature not enabled".into();
                     -1
                 }
             },

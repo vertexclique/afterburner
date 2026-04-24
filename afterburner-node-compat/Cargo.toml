@@ -38,12 +38,15 @@ kovan-channel.workspace = true
 # inside the WASM sandbox where loading a .node binary would be
 # impossible.
 bcrypt = { version = "0.17", optional = true }
+argon2 = { version = "0.5", optional = true, features = ["std"] }
+password-hash = { version = "0.5", optional = true, features = ["std"] }
 
 [features]
 # L3 shadow features. Off by default — enable via
-# `--features shadow-bcrypt` or bundle via
-# `afterburner/bin` if the CLI wants the full shadow set.
+# `--features shadow-<pkg>` or bundle via `afterburner/bin` if
+# the CLI wants the full shadow set.
 shadow-bcrypt = ["dep:bcrypt"]
+shadow-argon2 = ["dep:argon2", "dep:password-hash"]
 
 [build-dependencies]
 # Phase 1 keeps the bundler in pure Rust (concatenation). Phase 2 pulls in

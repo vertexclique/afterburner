@@ -75,3 +75,4 @@ ts = ["dep:oxc", "dep:thiserror"]
 # addons cannot load). Forwards the feature through afterburner-wasi
 # to afterburner-node-compat, which pulls in the `bcrypt` crate.
 shadow-bcrypt = ["afterburner-wasi?/shadow-bcrypt"]
+shadow-argon2 = ["afterburner-wasi?/shadow-argon2"]

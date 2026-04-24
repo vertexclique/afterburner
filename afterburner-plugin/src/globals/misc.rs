@@ -253,6 +253,85 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
         }),
     );
 
+    // ---- L3 shadow: argon2 ------------------------------------------
+    //
+    // PHC-formatted output can be ~160 bytes for default params
+    // (m=65536, t=3, p=4) + salt + hash; 256 is plenty.
+    let _ = globals.set(
+        "__host_shadow_argon2_hash",
+        Func::from(
+            |password: String,
+             ty: f64,
+             time_cost: f64,
+             memory_cost: f64,
+             parallelism: f64|
+             -> String {
+                let pw = password.as_bytes();
+                let cap: u32 = 256;
+                let mut buf = alloc::vec![0u8; cap as usize];
+                let n = unsafe {
+                    host_shadow_argon2_hash(
+                        pw.as_ptr(),
+                        pw.len() as u32,
+                        ty as i32,
+                        time_cost as i32,
+                        memory_cost as i32,
+                        parallelism as i32,
+                        buf.as_mut_ptr(),
+                        cap,
+                    )
+                };
+                if n < 0 {
+                    return host_err_or_default("argon2 hash failed");
+                }
+                match String::from_utf8(buf[..n as usize].to_vec()) {
+                    Ok(s) => s,
+                    Err(_) => alloc::string::String::from("__HOST_ERR__:argon2 hash not utf-8"),
+                }
+            },
+        ),
+    );
+    let _ = globals.set(
+        "__host_shadow_argon2_verify",
+        Func::from(|hash: String, password: String| -> f64 {
+            let h = hash.as_bytes();
+            let pw = password.as_bytes();
+            let n = unsafe {
+                host_shadow_argon2_verify(
+                    h.as_ptr(),
+                    h.len() as u32,
+                    pw.as_ptr(),
+                    pw.len() as u32,
+                )
+            };
+            n as f64
+        }),
+    );
+    let _ = globals.set(
+        "__host_shadow_argon2_needs_rehash",
+        Func::from(
+            |hash: String,
+             ty: f64,
+             time_cost: f64,
+             memory_cost: f64,
+             parallelism: f64|
+             -> f64 {
+                let h = hash.as_bytes();
+                let n = unsafe {
+                    host_shadow_argon2_needs_rehash(
+                        h.as_ptr(),
+                        h.len() as u32,
+                        ty as i32,
+                        time_cost as i32,
+                        memory_cost as i32,
+                        parallelism as i32,
+                    )
+                };
+                n as f64
+            },
+        ),
+    );
+
     // B3: process.exit — never returns; the host traps with I32Exit.
     let _ = globals.set(
         "__host_process_exit",

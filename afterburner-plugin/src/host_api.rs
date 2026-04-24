@@ -399,4 +399,32 @@ unsafe extern "C" {
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
+
+    // argon2 shadow — Argon2d/i/id variants. `ty`: 0=Argon2d,
+    // 1=Argon2i, 2=Argon2id (default). time/memory/parallelism at 0
+    // → use the npm package defaults (3 / 65536 KiB / 4).
+    pub fn host_shadow_argon2_hash(
+        pw_ptr: *const u8,
+        pw_len: u32,
+        ty: i32,
+        time_cost: i32,
+        memory_cost: i32,
+        parallelism: i32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_shadow_argon2_verify(
+        hash_ptr: *const u8,
+        hash_len: u32,
+        pw_ptr: *const u8,
+        pw_len: u32,
+    ) -> i32;
+    pub fn host_shadow_argon2_needs_rehash(
+        hash_ptr: *const u8,
+        hash_len: u32,
+        ty: i32,
+        time_cost: i32,
+        memory_cost: i32,
+        parallelism: i32,
+    ) -> i32;
 }
