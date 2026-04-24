@@ -6,11 +6,14 @@
 //! codes, stdout, and timing behavior.
 //!
 //! Tests run sequentially (`serial_test`) because they spawn long-lived
-//! subprocesses that contend for CPU under parallel execution (debug
-//! builds are slow to instantiate the WASM engine).
+//! subprocesses that contend for CPU under parallel execution — debug
+//! builds are slow to cold-instantiate the WASM engine, and a dozen
+//! parallel instantiations can oversubscribe CPU enough that the
+//! timing assertions below (exit-within-10s etc.) flake.
 
 #![cfg(feature = "bin")]
 
+use serial_test::serial;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -19,6 +22,7 @@ const BURN: &str = env!("CARGO_BIN_EXE_burn");
 // ---- process.exit propagation -------------------------------------------
 
 #[test]
+#[serial]
 fn process_exit_zero_from_script() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
@@ -41,6 +45,7 @@ fn process_exit_zero_from_script() {
 }
 
 #[test]
+#[serial]
 fn process_exit_nonzero_from_script() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
@@ -68,6 +73,7 @@ fn process_exit_nonzero_from_script() {
 }
 
 #[test]
+#[serial]
 fn process_exit_without_arg_is_zero() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
@@ -88,6 +94,7 @@ fn process_exit_without_arg_is_zero() {
 // ---- setInterval keeps daemon alive -------------------------------------
 
 #[test]
+#[serial]
 fn setinterval_keeps_daemon_alive() {
     // Script uses setInterval to log periodically. We wait for a few
     // ticks then kill the process — the key assertion is that it did
@@ -133,6 +140,7 @@ fn setinterval_keeps_daemon_alive() {
 // ---- setTimeout with non-zero delay in daemon mode ----------------------
 
 #[test]
+#[serial]
 fn settimeout_nonzero_delay_fires() {
     let start = Instant::now();
     let out = Command::new(BURN)
@@ -172,6 +180,7 @@ fn settimeout_nonzero_delay_fires() {
 // ---- unref lets daemon exit ---------------------------------------------
 
 #[test]
+#[serial]
 fn unref_timer_lets_daemon_exit() {
     // A setInterval that is immediately unref'd should NOT keep the
     // daemon alive. The process should exit quickly.
@@ -217,6 +226,7 @@ fn unref_timer_lets_daemon_exit() {
 // ---- clearInterval lets daemon exit -------------------------------------
 
 #[test]
+#[serial]
 fn clearinterval_lets_daemon_exit() {
     let start = Instant::now();
     let out = Command::new(BURN)
@@ -257,6 +267,7 @@ fn clearinterval_lets_daemon_exit() {
 // ---- process.exit from within daemon-event (HTTP handler) ---------------
 
 #[test]
+#[serial]
 fn process_exit_from_http_handler() {
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpStream};
@@ -318,6 +329,7 @@ fn process_exit_from_http_handler() {
 // ---- process.exit emits 'exit' event before exiting ---------------------
 
 #[test]
+#[serial]
 fn process_exit_emits_exit_event() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
@@ -347,6 +359,7 @@ fn process_exit_emits_exit_event() {
 // ---- clearTimeout for one-shot timer ------------------------------------
 
 #[test]
+#[serial]
 fn cleartimeout_prevents_fire() {
     let start = Instant::now();
     let out = Command::new(BURN)
@@ -383,6 +396,7 @@ fn cleartimeout_prevents_fire() {
 // ---- setTimeout(fn, 0) still works as microtask (not host timer) --------
 
 #[test]
+#[serial]
 fn settimeout_zero_delay_does_not_keep_daemon_alive() {
     // setTimeout(fn, 0) fires via microtask — it should NOT register a
     // host timer or keep the daemon alive. The script should exit cleanly
@@ -420,6 +434,7 @@ fn settimeout_zero_delay_does_not_keep_daemon_alive() {
 // ---- ref() re-enables keepalive after unref() ---------------------------
 
 #[test]
+#[serial]
 fn ref_after_unref_keeps_alive() {
     let mut child = Command::new(BURN)
         .env("BURN_QUIET", "1")
