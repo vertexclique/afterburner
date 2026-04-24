@@ -19,6 +19,7 @@ mod passthrough;
 mod repl;
 mod run;
 mod script;
+mod shim;
 mod thrust;
 mod version;
 
@@ -39,12 +40,32 @@ fn dispatch(mut cli: Cli) -> Result<()> {
     let cmd = match cli.command.take() {
         Some(c) => c,
         None => {
-            // B4: pass-through targets (`burn node foo.js`, etc.).
-            // Must run before the positional-file fallback so `burn node`
-            // isn't misinterpreted as "run a file called node".
+            // B4/B5: pass-through targets (`burn node foo.js`, `burn
+            // npm install`, …). Must run before the positional-file
+            // fallback so `burn node` isn't misinterpreted as "run a
+            // file called node".
+            //
+            // Eval-mode caveat: in `-e CODE` invocations, clap binds
+            // the first positional into `cli.file`. For arbitrary
+            // names that happen to resolve on PATH we prefer "script
+            // arg" (so `burn -e CODE hello` still works when `hello`
+            // is `/usr/bin/hello`), but the hard-coded Node-ecosystem
+            // names are an explicit user intent and still dispatch.
             if let Some(ref file) = cli.file {
-                if let Some(target) = passthrough::detect(file) {
-                    return passthrough::dispatch(&mut cli, target);
+                match passthrough::detect(file) {
+                    passthrough::Detected::KnownTarget(target) => {
+                        return passthrough::dispatch(&mut cli, &target);
+                    }
+                    passthrough::Detected::PathTarget(target) if cli.eval_code.is_none() => {
+                        return passthrough::dispatch(&mut cli, &target);
+                    }
+                    passthrough::Detected::Unknown(name) if cli.eval_code.is_none() => {
+                        // Q5-2: never let an exec proceed with a
+                        // ghost binary; emit a clean typed error
+                        // first.
+                        anyhow::bail!("burn: unknown command '{name}'");
+                    }
+                    _ => {}
                 }
             }
 
