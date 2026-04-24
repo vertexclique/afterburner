@@ -76,3 +76,4 @@ ts = ["dep:oxc", "dep:thiserror"]
 # to afterburner-node-compat, which pulls in the `bcrypt` crate.
 shadow-bcrypt = ["afterburner-wasi?/shadow-bcrypt"]
 shadow-argon2 = ["afterburner-wasi?/shadow-argon2"]
+shadow-jsonwebtoken = ["afterburner-wasi?/shadow-jsonwebtoken"]

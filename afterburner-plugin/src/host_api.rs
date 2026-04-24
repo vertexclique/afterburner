@@ -427,4 +427,34 @@ unsafe extern "C" {
         memory_cost: i32,
         parallelism: i32,
     ) -> i32;
+
+    // jsonwebtoken shadow. payload/opts are JSON strings; secret is
+    // either a shared HMAC secret or a PEM-formatted key depending
+    // on the algorithm selected in opts.
+    pub fn host_shadow_jwt_sign(
+        payload_ptr: *const u8,
+        payload_len: u32,
+        secret_ptr: *const u8,
+        secret_len: u32,
+        opts_ptr: *const u8,
+        opts_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_shadow_jwt_verify(
+        token_ptr: *const u8,
+        token_len: u32,
+        secret_ptr: *const u8,
+        secret_len: u32,
+        opts_ptr: *const u8,
+        opts_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_shadow_jwt_decode(
+        token_ptr: *const u8,
+        token_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
 }

@@ -24,3 +24,6 @@ pub mod bcrypt;
 
 #[cfg(feature = "shadow-argon2")]
 pub mod argon2;
+
+#[cfg(feature = "shadow-jsonwebtoken")]
+pub mod jsonwebtoken;

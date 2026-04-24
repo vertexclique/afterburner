@@ -332,6 +332,76 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
         ),
     );
 
+    // ---- L3 shadow: jsonwebtoken ------------------------------------
+    //
+    // JWT output is typically under 2 KB; 4 KB buffer covers all
+    // reasonable payloads including ~2 KB RSA signatures.
+    let _ = globals.set(
+        "__host_shadow_jwt_sign",
+        Func::from(|payload_json: String, secret: String, opts_json: String| -> String {
+            let pj = payload_json.as_bytes();
+            let s = secret.as_bytes();
+            let oj = opts_json.as_bytes();
+            let cap: u32 = 4096;
+            let mut buf = alloc::vec![0u8; cap as usize];
+            let n = unsafe {
+                host_shadow_jwt_sign(
+                    pj.as_ptr(), pj.len() as u32,
+                    s.as_ptr(), s.len() as u32,
+                    oj.as_ptr(), oj.len() as u32,
+                    buf.as_mut_ptr(), cap,
+                )
+            };
+            if n < 0 { return host_err_or_default("jwt sign failed"); }
+            match String::from_utf8(buf[..n as usize].to_vec()) {
+                Ok(s) => s,
+                Err(_) => alloc::string::String::from("__HOST_ERR__:jwt sign not utf-8"),
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_shadow_jwt_verify",
+        Func::from(|token: String, secret: String, opts_json: String| -> String {
+            let t = token.as_bytes();
+            let s = secret.as_bytes();
+            let oj = opts_json.as_bytes();
+            let cap: u32 = 16 * 1024;
+            let mut buf = alloc::vec![0u8; cap as usize];
+            let n = unsafe {
+                host_shadow_jwt_verify(
+                    t.as_ptr(), t.len() as u32,
+                    s.as_ptr(), s.len() as u32,
+                    oj.as_ptr(), oj.len() as u32,
+                    buf.as_mut_ptr(), cap,
+                )
+            };
+            if n < 0 { return host_err_or_default("jwt verify failed"); }
+            match String::from_utf8(buf[..n as usize].to_vec()) {
+                Ok(s) => s,
+                Err(_) => alloc::string::String::from("__HOST_ERR__:jwt verify not utf-8"),
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_shadow_jwt_decode",
+        Func::from(|token: String| -> String {
+            let t = token.as_bytes();
+            let cap: u32 = 16 * 1024;
+            let mut buf = alloc::vec![0u8; cap as usize];
+            let n = unsafe {
+                host_shadow_jwt_decode(
+                    t.as_ptr(), t.len() as u32,
+                    buf.as_mut_ptr(), cap,
+                )
+            };
+            if n < 0 { return host_err_or_default("jwt decode failed"); }
+            match String::from_utf8(buf[..n as usize].to_vec()) {
+                Ok(s) => s,
+                Err(_) => alloc::string::String::from("__HOST_ERR__:jwt decode not utf-8"),
+            }
+        }),
+    );
+
     // B3: process.exit — never returns; the host traps with I32Exit.
     let _ = globals.set(
         "__host_process_exit",

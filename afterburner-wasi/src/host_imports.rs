@@ -53,6 +53,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_transpile(linker)?;
     wrap_shadow_bcrypt(linker)?;
     wrap_shadow_argon2(linker)?;
+    wrap_shadow_jwt(linker)?;
     wrap_process_exit(linker)?;
     wrap_timers(linker)?;
     Ok(())
@@ -1956,6 +1957,173 @@ fn wrap_shadow_argon2(linker: &mut Linker<HostState>) -> Result<(), AfterburnerE
                     let _ = (hash, ty, time_cost, memory_cost, parallelism);
                     caller.data_mut().last_error =
                         "shadow-argon2 feature not enabled".into();
+                    -1
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    Ok(())
+}
+
+// ---- L3 shadow: jsonwebtoken -------------------------------------------
+//
+// Three host imports — sign / verify / decode. Options flow in as
+// a JSON blob to keep the ABI narrow; Rust parses only the fields
+// it recognizes and ignores unknown keys.
+
+fn wrap_shadow_jwt(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    linker
+        .func_wrap(
+            NS,
+            "host_shadow_jwt_sign",
+            |mut caller: Caller<'_, HostState>,
+             payload_ptr: i32,
+             payload_len: i32,
+             secret_ptr: i32,
+             secret_len: i32,
+             opts_ptr: i32,
+             opts_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(payload_bytes) = read_bytes(&memory, &caller, payload_ptr, payload_len) else {
+                    return E_OTHER;
+                };
+                let Some(secret) = read_bytes(&memory, &caller, secret_ptr, secret_len) else {
+                    return E_OTHER;
+                };
+                let Some(opts_bytes) = read_bytes(&memory, &caller, opts_ptr, opts_len) else {
+                    return E_OTHER;
+                };
+                let payload_str = match std::str::from_utf8(&payload_bytes) {
+                    Ok(s) => s,
+                    Err(_) => return E_OTHER,
+                };
+                let opts_str = match std::str::from_utf8(&opts_bytes) {
+                    Ok(s) => s,
+                    Err(_) => return E_OTHER,
+                };
+                #[cfg(feature = "shadow-jsonwebtoken")]
+                {
+                    match afterburner_node_compat::shadows::jsonwebtoken::sign(
+                        payload_str, &secret, opts_str,
+                    ) {
+                        Ok(s) => write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes()),
+                        Err(e) => {
+                            caller.data_mut().last_error = e;
+                            -1
+                        }
+                    }
+                }
+                #[cfg(not(feature = "shadow-jsonwebtoken"))]
+                {
+                    let _ = (payload_str, secret, opts_str, out_ptr, out_cap);
+                    caller.data_mut().last_error =
+                        "shadow-jsonwebtoken feature not enabled".into();
+                    -1
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_shadow_jwt_verify",
+            |mut caller: Caller<'_, HostState>,
+             token_ptr: i32,
+             token_len: i32,
+             secret_ptr: i32,
+             secret_len: i32,
+             opts_ptr: i32,
+             opts_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(token_bytes) = read_bytes(&memory, &caller, token_ptr, token_len) else {
+                    return E_OTHER;
+                };
+                let Some(secret) = read_bytes(&memory, &caller, secret_ptr, secret_len) else {
+                    return E_OTHER;
+                };
+                let Some(opts_bytes) = read_bytes(&memory, &caller, opts_ptr, opts_len) else {
+                    return E_OTHER;
+                };
+                let token_str = match std::str::from_utf8(&token_bytes) {
+                    Ok(s) => s,
+                    Err(_) => return E_OTHER,
+                };
+                let opts_str = match std::str::from_utf8(&opts_bytes) {
+                    Ok(s) => s,
+                    Err(_) => return E_OTHER,
+                };
+                #[cfg(feature = "shadow-jsonwebtoken")]
+                {
+                    match afterburner_node_compat::shadows::jsonwebtoken::verify(
+                        token_str, &secret, opts_str,
+                    ) {
+                        Ok(s) => write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes()),
+                        Err(e) => {
+                            caller.data_mut().last_error = e;
+                            -1
+                        }
+                    }
+                }
+                #[cfg(not(feature = "shadow-jsonwebtoken"))]
+                {
+                    let _ = (token_str, secret, opts_str, out_ptr, out_cap);
+                    caller.data_mut().last_error =
+                        "shadow-jsonwebtoken feature not enabled".into();
+                    -1
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_shadow_jwt_decode",
+            |mut caller: Caller<'_, HostState>,
+             token_ptr: i32,
+             token_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(token_bytes) = read_bytes(&memory, &caller, token_ptr, token_len) else {
+                    return E_OTHER;
+                };
+                let token_str = match std::str::from_utf8(&token_bytes) {
+                    Ok(s) => s,
+                    Err(_) => return E_OTHER,
+                };
+                #[cfg(feature = "shadow-jsonwebtoken")]
+                {
+                    match afterburner_node_compat::shadows::jsonwebtoken::decode_unverified(
+                        token_str,
+                    ) {
+                        Ok(s) => write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes()),
+                        Err(e) => {
+                            caller.data_mut().last_error = e;
+                            -1
+                        }
+                    }
+                }
+                #[cfg(not(feature = "shadow-jsonwebtoken"))]
+                {
+                    let _ = (token_str, out_ptr, out_cap);
+                    caller.data_mut().last_error =
+                        "shadow-jsonwebtoken feature not enabled".into();
                     -1
                 }
             },
