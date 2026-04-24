@@ -299,7 +299,11 @@ impl Combustor for NativeCombustor {
             .map_err(|e| AfterburnerError::Engine(format!("argv json: {e}")))?;
         let env_json = serde_json::to_string(&invocation.env)
             .map_err(|e| AfterburnerError::Engine(format!("env json: {e}")))?;
-        let stage = build_script_stage(source, &argv_json, &env_json);
+        let cwd_json = serde_json::to_string(
+            &(if invocation.cwd.is_empty() { "/" } else { invocation.cwd.as_str() }),
+        )
+        .map_err(|e| AfterburnerError::Engine(format!("cwd json: {e}")))?;
+        let stage = build_script_stage(source, &argv_json, &env_json, &cwd_json);
 
         let _capture_guard = ScriptCaptureGuard::activate();
         let exit_code = with_thread_rt(|rt| {
@@ -388,16 +392,20 @@ impl Combustor for NativeCombustor {
 ///
 /// which compiles fine as a sync-returned Promise; the pumping loop
 /// below drains its microtasks.
-fn build_script_stage(user: &str, argv_json: &str, env_json: &str) -> String {
+fn build_script_stage(user: &str, argv_json: &str, env_json: &str, cwd_json: &str) -> String {
     let user_lit = js_string_literal(user);
     format!(
         r#"
         (function() {{
             globalThis.__ab_argv = {argv_json};
             globalThis.__host_env = {env_json};
+            globalThis.__host_cwd = {cwd_json};
             if (globalThis.process) {{
                 globalThis.process.argv = globalThis.__ab_argv;
                 globalThis.process.env  = globalThis.__host_env;
+            }}
+            if (typeof globalThis.__plenum_refresh_entry_require === 'function') {{
+                globalThis.__plenum_refresh_entry_require();
             }}
             var __ab_module = {{ exports: {{}} }};
             var __ab_user = new Function(

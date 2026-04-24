@@ -155,6 +155,7 @@ fn build_invocation(cli: &Cli, script_label: &str, user_args: &[String]) -> Scri
     ScriptInvocation {
         argv,
         env: collect_env(cli),
+        cwd: super::script::cli_cwd(),
     }
 }
 

@@ -42,7 +42,15 @@ pub fn run(envelope: &serde_json::Value) {
         .filter(|v| v.is_object())
         .map(serde_json::Value::to_string)
         .unwrap_or_else(|| "{}".to_string());
-    let wrapped = wrap_script_source(source, &argv_json, &env_json);
+    // `cwd` becomes the baseline for B6's require() path resolver when
+    // the entry point has no meaningful `__dirname` (eval mode) and is
+    // surfaced to user code as `process.cwd()`.
+    let cwd_json = envelope
+        .get("cwd")
+        .filter(|v| v.is_string())
+        .map(serde_json::Value::to_string)
+        .unwrap_or_else(|| "\"/\"".to_string());
+    let wrapped = wrap_script_source(source, &argv_json, &env_json, &cwd_json);
 
     let bytecode = match javy_plugin_api::compile_src(wrapped.as_bytes()) {
         Ok(bc) => bc,

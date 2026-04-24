@@ -158,6 +158,7 @@ impl DaemonRuntime {
             "source": source,
             "argv": invocation.argv,
             "env": invocation.env,
+            "cwd": invocation.cwd,
         });
         let envelope_bytes = serde_json::to_vec(&envelope)?;
         self.store.data_mut().pending_envelope = envelope_bytes;

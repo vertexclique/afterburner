@@ -94,6 +94,11 @@ pub struct ScriptInvocation {
     /// `std::env::vars()` filtered through [`Manifold::env`]; library
     /// callers pick what they want exposed.
     pub env: std::collections::BTreeMap<String, String>,
+    /// Populated into `process.cwd()` and used by B6's `require()`
+    /// resolver as the baseline for path-relative lookups when the
+    /// entry script itself has no meaningful `__dirname` (e.g. `-e`
+    /// eval mode). Empty string falls back to `"/"` inside the plugin.
+    pub cwd: String,
 }
 
 /// Result of [`crate::engine::Combustor::run_script`] — top-level

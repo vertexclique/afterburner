@@ -27,7 +27,19 @@ pub fn build_invocation(cli: &Cli, script_label: &str, user_args: &[String]) -> 
     ScriptInvocation {
         argv,
         env: collect_env(cli),
+        cwd: cli_cwd(),
     }
+}
+
+/// CLI's current working directory as a string. Used so
+/// `process.cwd()` and B6's `require()` path resolver have a sensible
+/// baseline when the entry script is `-e` eval mode (no `__dirname`
+/// of its own). Falls back to `"/"` if the host refuses to report a
+/// directory — the script still runs, just with a degraded baseline.
+pub fn cli_cwd() -> String {
+    std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "/".to_string())
 }
 
 /// Resolve the `process.env` map per the active [`Manifold`]:

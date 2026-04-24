@@ -35,7 +35,12 @@ pub fn run(envelope: &serde_json::Value) {
         .filter(|v| v.is_object())
         .map(serde_json::Value::to_string)
         .unwrap_or_else(|| "{}".into());
-    let wrapped = wrap_script_source(source, &argv_json, &env_json);
+    let cwd_json = envelope
+        .get("cwd")
+        .filter(|v| v.is_string())
+        .map(serde_json::Value::to_string)
+        .unwrap_or_else(|| "\"/\"".into());
+    let wrapped = wrap_script_source(source, &argv_json, &env_json, &cwd_json);
 
     let bytecode = match javy_plugin_api::compile_src(wrapped.as_bytes()) {
         Ok(bc) => bc,

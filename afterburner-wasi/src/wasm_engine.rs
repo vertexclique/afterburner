@@ -525,6 +525,7 @@ impl Combustor for WasmCombustor {
             "source": source,
             "argv": invocation.argv,
             "env": invocation.env,
+            "cwd": invocation.cwd,
         });
         let envelope_bytes = serde_json::to_vec(&envelope)?;
 

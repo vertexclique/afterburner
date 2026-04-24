@@ -76,12 +76,22 @@ pub fn wrap_user_source_with_input_global(user: &str) -> String {
 /// also mutate the live `globalThis.process` here to refresh those
 /// fields per invocation.
 ///
+/// `cwd_json` is a JSON string literal (including quotes). It becomes
+/// `globalThis.__host_cwd` so `process.cwd()` + the B6 `require()`
+/// resolver have a working baseline for path-relative lookups when
+/// the entry script is eval'd (`[eval]` has no dirname of its own).
+///
 /// Top-level `await` inside user source resolves through Javy's
 /// event-loop drain: the outer wrapper itself is compiled as an ES
 /// module, so a rejecting Promise surfaces as a module-evaluation
 /// error that `invoke` returns as `Err` — exactly how we want script
 /// errors to flow back to the host as a WASM trap.
-pub fn wrap_script_source(user: &str, argv_json: &str, env_json: &str) -> String {
+pub fn wrap_script_source(
+    user: &str,
+    argv_json: &str,
+    env_json: &str,
+    cwd_json: &str,
+) -> String {
     let user_lit = js_string_literal(user);
     // The user wrapper is an `AsyncFunction` so top-level `await`
     // inside the user's source compiles. The plain `Function`
@@ -94,9 +104,16 @@ pub fn wrap_script_source(user: &str, argv_json: &str, env_json: &str) -> String
         r#"
         globalThis.__ab_argv = {argv_json};
         globalThis.__host_env = {env_json};
+        globalThis.__host_cwd = {cwd_json};
         if (globalThis.process) {{
             globalThis.process.argv = globalThis.__ab_argv;
             globalThis.process.env  = globalThis.__host_env;
+        }}
+        // B6: rebase the require resolver on the freshly-set cwd so
+        // `require('./foo')` in an eval script lands in the user's
+        // invocation directory.
+        if (typeof globalThis.__plenum_refresh_entry_require === 'function') {{
+            globalThis.__plenum_refresh_entry_require();
         }}
         const __ab_AsyncFunction = (async function () {{}}).constructor;
         const __ab_module = {{ exports: {{}} }};

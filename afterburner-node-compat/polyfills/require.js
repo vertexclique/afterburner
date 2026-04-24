@@ -1,21 +1,34 @@
 // The plenum.js require() resolver.
 //
-// Installs a tiny CommonJS-style loader onto `globalThis`:
-//   * `require(name)` resolves by stripping a `node:` prefix, consulting
-//     the factory map, instantiating the module on first hit, and caching
-//     the resulting `exports` object for subsequent calls.
-//   * `__register_module(name, factory)` registers a lazy module whose
-//     body runs only on first `require`.
-//   * `__register_host_module(name, obj)` lets the Rust side inject a
-//     ready-made module object bypassing the factory step — used when a
-//     polyfill has no JS body and is fully backed by host globals.
+// Bare names and `node:*` resolve through the factory map installed
+// by `__register_module` — that covers every Node stdlib module the
+// plenum bundle ships. B6 extends this with:
 //
-// `require()` throws an Error for unknown modules, matching Node's
-// `Cannot find module '…'` string so scripts that depend on the exact
-// error text keep working.
+//   * Filesystem resolution for `./`, `../`, `/` paths
+//     (`require('./lib')`, `require('../util')`, `require('/abs')`).
+//   * `node_modules` walk for bare names not in the stdlib factory
+//     map (`require('express')` starts at the caller's `__dirname`
+//     and walks up looking for `node_modules/express`).
+//   * `package.json "main"` + `index.js` / `index.json` resolution
+//     matching Node's CommonJS semantics.
+//   * Per-module `require` closures so `./sibling` inside a loaded
+//     file resolves relative to THAT file's dir, not the entry
+//     script's — same as Node.
+//   * `.json` file support: `require('./config.json')` returns the
+//     parsed object, no need to JSON.parse by hand.
+//   * `require.cache` keyed by absolute resolved path.
+//   * `require.resolve(name)` → the absolute path that `require`
+//     would load, without actually loading it.
+//
+// Filesystem lookups go through `__host_fs_*`; if the active
+// Manifold denies fs access, filesystem-backed requires throw a
+// clean EACCES the same way `fs.readFileSync` would.
 
 (function plenumRequire() {
     var factories = Object.create(null);
+    // Cache is shared across all per-module requires and keyed by the
+    // resolved identifier: stdlib names (e.g. "path"), or absolute
+    // filesystem paths (e.g. "/home/me/server.js").
     var cache = Object.create(null);
 
     function stripNodePrefix(name) {
@@ -24,30 +37,307 @@
             : name;
     }
 
-    function loadModule(mod) {
+    function loadStdlib(mod) {
         var cached = cache[mod];
         if (cached !== undefined) return cached;
-
         var factory = factories[mod];
-        if (typeof factory === 'function') {
-            var m = { exports: {} };
-            // Install before invoking so cyclic requires see a partial
-            // exports object rather than triggering an infinite loop.
-            cache[mod] = m.exports;
-            factory(m, m.exports, globalThis.require);
-            // Factories may replace `module.exports` wholesale
-            // (e.g. `module.exports = EventEmitter`). Pick up the final
-            // binding before handing it out.
-            cache[mod] = m.exports;
-            return m.exports;
-        }
-
-        throw new Error("Cannot find module '" + mod + "'");
+        if (typeof factory !== 'function') return undefined;
+        var m = { exports: {} };
+        // Install before invoking so cyclic requires see a partial
+        // exports object rather than triggering an infinite loop.
+        cache[mod] = m.exports;
+        factory(m, m.exports, globalThis.require);
+        // Factories may replace `module.exports` wholesale
+        // (e.g. `module.exports = EventEmitter`). Pick up the final
+        // binding before handing it out.
+        cache[mod] = m.exports;
+        return m.exports;
     }
 
-    globalThis.require = function(name) {
-        return loadModule(stripNodePrefix(name));
-    };
+    // ---- fs + path helpers (internal, do not depend on polyfills) ----------
+    //
+    // The require resolver can be reached before the `path` module's
+    // factory has run on the first user invocation, so we inline the
+    // sliver of path logic we need. Only POSIX-style separators —
+    // Windows hosts normalize to forward slashes in `__host_cwd`.
+
+    // fs host functions have two failure shapes depending on the
+    // backend: the WASI path returns a string prefixed with
+    // `__HOST_ERR__:`, and the native (rquickjs) path throws
+    // directly. Both collapse here to "module not found" so a
+    // sealed-Manifold `require('no-such-module')` surfaces the
+    // Node-shaped "Cannot find module" error rather than leaking
+    // a permission-denied message that sounds like a misconfigured
+    // sandbox.
+
+    function fsExists(p) {
+        var fn = globalThis.__host_fs_exists_sync;
+        if (typeof fn !== 'function') return false;
+        try { return !!fn(String(p)); } catch (_) { return false; }
+    }
+
+    function fsRead(p) {
+        var fn = globalThis.__host_fs_read_file_sync;
+        if (typeof fn !== 'function') return null;
+        try {
+            var out = fn(String(p), 'utf8');
+            if (typeof out === 'string' && out.indexOf('__HOST_ERR__:') === 0) return null;
+            return out;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function fsIsDir(p) {
+        var fn = globalThis.__host_fs_stat_sync;
+        if (typeof fn !== 'function') return false;
+        try {
+            var raw = fn(String(p));
+            if (typeof raw !== 'string' || raw.indexOf('__HOST_ERR__:') === 0) return false;
+            return JSON.parse(raw).isDirectory === true;
+        } catch (_) {
+            return false;
+        }
+    }
+
+    function dirname(p) {
+        if (!p || p === '/') return '/';
+        var trimmed = p.charAt(p.length - 1) === '/' ? p.slice(0, -1) : p;
+        var i = trimmed.lastIndexOf('/');
+        if (i < 0) return '.';
+        if (i === 0) return '/';
+        return trimmed.slice(0, i);
+    }
+
+    function normalize(p) {
+        var absolute = p.charAt(0) === '/';
+        var parts = p.split('/');
+        var out = [];
+        for (var i = 0; i < parts.length; i++) {
+            var seg = parts[i];
+            if (seg === '' || seg === '.') continue;
+            if (seg === '..') {
+                if (out.length > 0 && out[out.length - 1] !== '..') {
+                    out.pop();
+                } else if (!absolute) {
+                    out.push('..');
+                }
+            } else {
+                out.push(seg);
+            }
+        }
+        var joined = out.join('/');
+        return absolute ? '/' + joined : (joined || '.');
+    }
+
+    function resolveJoin(base, rel) {
+        if (rel.charAt(0) === '/') return normalize(rel);
+        return normalize(base + '/' + rel);
+    }
+
+    function isRelativeOrAbsolute(name) {
+        if (typeof name !== 'string' || name.length === 0) return false;
+        var c0 = name.charAt(0);
+        if (c0 === '/') return true;
+        if (c0 !== '.') return false;
+        var c1 = name.charAt(1);
+        return c1 === '/' || (c1 === '.' && name.charAt(2) === '/') || name.length === 1 || name === '..';
+    }
+
+    // Given a candidate absolute path, try the Node CJS resolution
+    // ladder: exact path, `.js`, `.json`, and directory probing with
+    // `package.json "main"` + `index.js` / `index.json`.
+    function resolveCandidate(candidate) {
+        if (fsExists(candidate) && !fsIsDir(candidate)) return candidate;
+        var jsPath = candidate + '.js';
+        if (fsExists(jsPath)) return jsPath;
+        var jsonPath = candidate + '.json';
+        if (fsExists(jsonPath)) return jsonPath;
+        if (fsIsDir(candidate)) {
+            var pkg = candidate + '/package.json';
+            if (fsExists(pkg)) {
+                var data = fsRead(pkg);
+                if (typeof data === 'string') {
+                    try {
+                        var parsed = JSON.parse(data);
+                        var main = parsed && typeof parsed.main === 'string' ? parsed.main : null;
+                        if (main) {
+                            var mainAbs = resolveJoin(candidate, main);
+                            var resolved = resolveCandidate(mainAbs);
+                            if (resolved) return resolved;
+                        }
+                    } catch (_) { /* malformed package.json falls through to index */ }
+                }
+            }
+            var idxJs = candidate + '/index.js';
+            if (fsExists(idxJs)) return idxJs;
+            var idxJson = candidate + '/index.json';
+            if (fsExists(idxJson)) return idxJson;
+        }
+        return null;
+    }
+
+    // Walk up `fromDir` looking for `node_modules/<name>`. Returns the
+    // absolute resolved file path, or null if nothing matches up to
+    // the filesystem root.
+    function resolvePackage(name, fromDir) {
+        var dir = fromDir;
+        // Guard against pathological inputs (empty dir, etc.).
+        if (typeof dir !== 'string' || dir.length === 0) dir = '/';
+        // Safety bound: 64 parent walks is far more than any real tree.
+        for (var i = 0; i < 64; i++) {
+            var cand = dir + '/node_modules/' + name;
+            var r = resolveCandidate(cand);
+            if (r) return r;
+            var parent = dirname(dir);
+            if (parent === dir) break;
+            dir = parent;
+        }
+        return null;
+    }
+
+    function loadAbsoluteFile(absPath, scopedRequire) {
+        if (cache[absPath] !== undefined) return cache[absPath];
+        var source = fsRead(absPath);
+        if (source === null) {
+            var ePerm = new Error("Cannot find module '" + absPath + "'");
+            ePerm.code = 'MODULE_NOT_FOUND';
+            throw ePerm;
+        }
+        if (absPath.slice(-5) === '.json') {
+            var parsed = JSON.parse(source);
+            cache[absPath] = parsed;
+            return parsed;
+        }
+        // Node CJS wrapper — `module.exports` / `exports` are the
+        // user-visible outputs; `require` is the scoped copy; the two
+        // `__filename` / `__dirname` bindings match Node.
+        var modObj = { exports: {}, filename: absPath, loaded: false };
+        // Install before invoking so cyclic requires see a partial
+        // exports object rather than triggering an infinite loop.
+        cache[absPath] = modObj.exports;
+        var dir = dirname(absPath);
+        try {
+            var fn = new Function(
+                'module', 'exports', 'require', '__filename', '__dirname',
+                source
+            );
+            fn(modObj, modObj.exports, scopedRequire, absPath, dir);
+        } catch (e) {
+            // Broken module — evict so a retry can re-run the factory
+            // cleanly.
+            delete cache[absPath];
+            throw e;
+        }
+        modObj.loaded = true;
+        cache[absPath] = modObj.exports;
+        return modObj.exports;
+    }
+
+    // Construct a `require` closure scoped to `fromDir`. This is what
+    // user modules see as their local `require` — `./sibling` resolves
+    // relative to `fromDir`, bare names resolve via stdlib then
+    // `fromDir`-rooted `node_modules` walk.
+    function makeRequire(fromDir) {
+        function resolveOnly(name) {
+            if (typeof name !== 'string') {
+                throw new TypeError('require.resolve(name) expects a string');
+            }
+            var stripped = stripNodePrefix(name);
+            // Pre-registered modules return their registration name
+            // as the "resolved identifier" — no path materializes.
+            if (factories[stripped] || cache[stripped] !== undefined) {
+                return stripped;
+            }
+            if (isRelativeOrAbsolute(name)) {
+                var base = name.charAt(0) === '/' ? name : resolveJoin(fromDir, name);
+                var r = resolveCandidate(base);
+                if (!r) {
+                    var e = new Error("Cannot find module '" + name + "'");
+                    e.code = 'MODULE_NOT_FOUND';
+                    throw e;
+                }
+                return r;
+            }
+            var pkg = resolvePackage(name, fromDir);
+            if (pkg) return pkg;
+            var notFound = new Error("Cannot find module '" + name + "'");
+            notFound.code = 'MODULE_NOT_FOUND';
+            throw notFound;
+        }
+
+        function req(name) {
+            if (typeof name !== 'string') {
+                throw new TypeError('require(name) expects a string');
+            }
+            // Pre-registered modules always win, regardless of name
+            // shape. This matters for programmatic registration (e.g.
+            // FlowEngine::load_bundle) that uses literal names like
+            // './util' to key helper modules into the factory map —
+            // those should short-circuit the filesystem lookup.
+            var preregistered = loadStdlib(stripNodePrefix(name));
+            if (preregistered !== undefined) return preregistered;
+
+            if (isRelativeOrAbsolute(name)) {
+                var base = name.charAt(0) === '/' ? name : resolveJoin(fromDir, name);
+                var r = resolveCandidate(base);
+                if (!r) {
+                    var e = new Error("Cannot find module '" + name + "'");
+                    e.code = 'MODULE_NOT_FOUND';
+                    throw e;
+                }
+                return loadAbsoluteFile(r, makeRequire(dirname(r)));
+            }
+            // Bare name — fall through to `node_modules` walk.
+            var pkg = resolvePackage(name, fromDir);
+            if (pkg) return loadAbsoluteFile(pkg, makeRequire(dirname(pkg)));
+            var notFound = new Error("Cannot find module '" + name + "'");
+            notFound.code = 'MODULE_NOT_FOUND';
+            throw notFound;
+        }
+
+        req.cache = cache;
+        req.resolve = resolveOnly;
+        return req;
+    }
+
+    function entryDir() {
+        // For file-mode invocations (`burn run foo.js`), argv[1] is
+        // the canonicalized absolute script path — its dirname is the
+        // entry module's `__dirname`, matching Node's semantics where
+        // `require('./sibling')` in the entry script resolves next to
+        // the entry file, NOT next to the shell's cwd.
+        var argv = globalThis.__ab_argv;
+        if (argv && typeof argv[1] === 'string') {
+            var label = argv[1];
+            if (label.length > 0 && label.charAt(0) === '/'
+                && label !== '[eval]' && label !== '[test]') {
+                return dirname(label);
+            }
+        }
+        // Eval mode (`-e CODE`, argv[1] = '[eval]') has no file of
+        // its own, so we fall back to the shell's cwd — matches what
+        // the user would expect when they type `burn -e 'require("./x")'`
+        // in a project dir.
+        var cwd = globalThis.__host_cwd;
+        if (typeof cwd === 'string' && cwd.length > 0) return cwd;
+        return '/';
+    }
+
+    // The entry-point require. Re-computed on each access so per-
+    // invocation `__host_cwd` / `__ab_argv` updates are picked up
+    // without a global reset.
+    function installEntryRequire() {
+        var req = makeRequire(entryDir());
+        // Expose the factory-map registration helpers on the entry
+        // require for debugging / tests.
+        req.__plenum_modules_installed = function() {
+            return Object.keys(factories).concat(Object.keys(cache));
+        };
+        globalThis.require = req;
+    }
+
+    installEntryRequire();
 
     globalThis.__register_module = function(name, factory) {
         factories[stripNodePrefix(name)] = factory;
@@ -60,4 +350,10 @@
     globalThis.__plenum_modules_installed = function() {
         return Object.keys(factories).concat(Object.keys(cache));
     };
+
+    // Per-invocation hook: when the host updates `__host_cwd` via the
+    // script envelope, the entry-point `require` should rebase its
+    // starting dir. Called from the plugin's script/daemon-init
+    // wrappers immediately after they set `__host_cwd`.
+    globalThis.__plenum_refresh_entry_require = installEntryRequire;
 })();
