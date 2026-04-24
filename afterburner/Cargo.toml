@@ -29,6 +29,12 @@ clap = { version = "4", features = ["derive"], optional = true }
 rustyline = { version = "14", optional = true }
 anyhow = { version = "1", optional = true }
 tokio = { workspace = true, optional = true }
+# B8 — TypeScript strip-types via oxc. Gated behind `ts` because the
+# oxc graph adds ~3 MiB of binary size and non-TS users never pay it.
+oxc = { version = "=0.127.0", default-features = false, features = [
+    "transformer", "codegen", "semantic",
+], optional = true }
+thiserror = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Serialize tests that spawn long-lived `burn` subprocesses. Each
@@ -61,3 +67,6 @@ bin = [
     "thrust",
     "afterburner-wasi/daemon",
 ]
+# B8 — TypeScript strip-types. `burn foo.ts` transpiles via oxc and
+# runs the resulting JS through the normal pipeline. Opt-in only.
+ts = ["dep:oxc", "dep:thiserror"]

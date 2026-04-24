@@ -47,6 +47,8 @@
 #![warn(missing_debug_implementations)]
 
 mod builder;
+#[cfg(feature = "ts")]
+pub mod ts;
 #[cfg(feature = "bin")]
 pub mod cli;
 pub mod prelude;
