@@ -86,7 +86,7 @@ capabilities.
 | `fs` (sync surface) | 🟡 | [fs](https://nodejs.org/docs/latest-v20.x/api/fs.html) | `Manifold::fs` | `readFileSync`, `writeFileSync`, `existsSync`, `statSync`, `unlinkSync`, `renameSync`, `mkdirSync`, `readdirSync`, plus chunked `createReadStream` / `createWriteStream`. Missing: `watch`, file descriptors, `cp`, `realpath`. |
 | `fs/promises` | 🟡 | [fs#promises-api](https://nodejs.org/docs/latest-v20.x/api/fs.html#promises-api) | `Manifold::fs` | Promise wrappers around the sync surface. Reachable as `require('node:fs/promises')` **or** via `require('fs').promises` — same object. |
 | `crypto` | ✅ | [crypto](https://nodejs.org/docs/latest-v20.x/api/crypto.html) | `Manifold::crypto` | Hashes (`createHash` SHA-1/256/384/512, MD5), HMACs, AES-GCM/CBC, PBKDF2, scrypt, RSA + ECDSA `sign`/`verify` (PEM keys), `randomBytes`, `randomUUID`. Streaming `createHash` / `createSign` / `createVerify`. |
-| `http` | 🟡 | [http](https://nodejs.org/docs/latest-v20.x/api/http.html) | `Manifold::net` | Outbound only via `http.request` / `http.get`. Per-call wall-clock cap via `Manifold::http_timeout_ms`. **Inbound `http.createServer().listen()` lands in B2** of the burn-runtime plan. |
+| `http` | 🟡 | [http](https://nodejs.org/docs/latest-v20.x/api/http.html) | `Manifold::net` | Outbound via `http.request` / `http.get`. **Inbound `http.createServer().listen(port)` works end-to-end** — daemon-mode CLI spawns an axum listener per port, routes requests to the JS handler, and releases the port on `server.close()`. Port collisions emit async `'error'` events with `code: 'EADDRINUSE'`, matching Node. Per-call wall-clock cap via `Manifold::http_timeout_ms`. |
 | `https` | 🟡 | [https](https://nodejs.org/docs/latest-v20.x/api/https.html) | `Manifold::net` | Same surface as `http`; TLS handled by the host. |
 | `dns` | 🟡 | [dns](https://nodejs.org/docs/latest-v20.x/api/dns.html) | `Manifold::net` | `lookup`, `resolve` with bounded per-call wall-clock timeout. Async + promise variants both present. `dns/promises` reachable as its own require target. |
 | `os` | 🟡 | [os](https://nodejs.org/docs/latest-v20.x/api/os.html) | always on | `platform`, `arch`, `type`, `release`, `EOL`, `tmpdir`, `homedir`, `cpus`, `totalmem`, `freemem`. Non-sensitive surface. |
@@ -99,6 +99,49 @@ capabilities.
 |:-------|:------:|:------|
 | `afterburner:state` | ✅ | Cross-invocation key/value store backed by a pluggable `StateStore` trait (default `InMemoryStateStore`). `get`, `set`, `setJSON`, `delete`, `increment`. |
 | `afterburner:host` | ✅ | Host-context bridge: `getEnv`, `emitRow`, `readColumn`, `log`. Embedders supply a `HostContext` impl when constructing the runtime. |
+
+## Module resolution
+
+The `require()` resolver ships full CommonJS semantics:
+
+* `require('node:foo')` / `require('foo')` — Node stdlib (this page's
+  entire "Built-in modules" section).
+* `require('./rel')`, `require('../up')`, `require('/abs/path')` —
+  filesystem resolution through the active `Manifold::fs`.
+  Extension ladder: exact, `.js`, `.json`; directory with
+  `package.json "main"` then `index.js` / `index.json`.
+* `require('pkgname')` (not a stdlib name) — walks up from the
+  requiring module's `__dirname` looking for `node_modules/pkgname`,
+  stopping at the closest match. Matches Node's CJS precedence.
+* Each loaded module's `require` is scoped to that module's
+  `__dirname` — `./sibling` inside a loaded file resolves next to
+  that file, not next to the entry script.
+* `require.cache`, `require.resolve(name)`, and partial-exports
+  semantics for cyclic `require` all match Node.
+* `.json` files are auto-parsed; `require('./cfg.json')` returns the
+  object directly.
+
+Pre-registered polyfills always win — a `./node_modules/path/`
+directory does NOT shadow `require('path')`, matching how Node
+treats built-ins.
+
+## TypeScript
+
+The `ts` cargo feature adds strip-types transpilation via
+[oxc](https://oxc.rs) at the CLI entry point. `.ts`, `.mts`, and
+`.cts` files are detected by extension and transpiled to plain JS
+before dispatch — same pipeline as `.js` from there. No type
+checking: `tsc --noEmit` remains the user's concern. `.tsx` is
+rejected with a typed error because strip-only doesn't cover JSX.
+
+```bash
+cargo install afterburner --features bin,ts
+burn app.ts                    # transpile + run
+```
+
+Without the `ts` feature, `.ts` files surface a clean error
+pointing at the feature flag rather than letting the JS parser
+choke on type annotations.
 
 ## Sandbox model
 
@@ -143,8 +186,8 @@ expected to address them, it's noted.
 | `vm` | ❌ | Running JS inside JS isn't useful when we already are the JS runtime. |
 | `inspector` | ❌ | No DevTools protocol surface today. |
 | `async_hooks` | ❌ | Heavy hooks API not yet wired through Javy / rquickjs. |
-| `tls` (raw socket) | ❌ | Inbound `https.createServer` (B2b); raw `tls.createServer` later. Outbound TLS via `https` works today. |
-| `net` (raw socket) | ❌ | B7 of the runtime plan. |
+| `tls` (raw socket) | ❌ | Inbound `https.createServer` + raw `tls.createServer` are future work. Outbound TLS via `https` works today. |
+| `net` (raw socket) | ❌ | Future work. Outbound HTTP / HTTPS are the supported network surface today. |
 | `dgram` (UDP) | ❌ | Future work. |
 | `repl` (programmatic) | ❌ | `burn repl` is the user-facing REPL; the `node:repl` library API is separate and not implemented. |
 | `readline` | ❌ | Future work. |
