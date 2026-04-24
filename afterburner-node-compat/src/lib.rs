@@ -25,5 +25,9 @@ pub mod sign_handles;
 pub mod state_active;
 pub mod zlib_host;
 
+/// L3 shadows — pure-Rust substitutes for popular native-addon npm
+/// packages. Each sub-module is gated behind its own feature.
+pub mod shadows;
+
 pub use bundle::PLENUM_BUNDLE;
 pub use native_install::register_native_builtins;

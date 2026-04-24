@@ -51,6 +51,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_envelope(linker)?;
     wrap_http_server(linker)?;
     wrap_transpile(linker)?;
+    wrap_shadow_bcrypt(linker)?;
     wrap_process_exit(linker)?;
     wrap_timers(linker)?;
     Ok(())
@@ -1662,6 +1663,144 @@ fn wrap_http_server(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
                     return 0;
                 };
                 if dh.close_listener(server_id) { 1 } else { 0 }
+            },
+        )
+        .map_err(link_err)?;
+
+    Ok(())
+}
+
+// ---- L3 shadows --------------------------------------------------------
+//
+// Plugin always ships the `__host_shadow_bcrypt_*` imports; without
+// the `shadow-bcrypt` feature they return `-1` and set `last_error`
+// to "shadow-bcrypt not enabled". The JS-side polyfill surfaces that
+// to users as a clean "enable the feature" error rather than a WASM
+// instantiation failure.
+
+fn wrap_shadow_bcrypt(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    linker
+        .func_wrap(
+            NS,
+            "host_shadow_bcrypt_hash",
+            |mut caller: Caller<'_, HostState>,
+             pw_ptr: i32,
+             pw_len: i32,
+             cost: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(pw_bytes) = read_bytes(&memory, &caller, pw_ptr, pw_len) else {
+                    return E_OTHER;
+                };
+                let password = match std::str::from_utf8(&pw_bytes) {
+                    Ok(s) => s,
+                    Err(_) => return E_OTHER,
+                };
+                #[cfg(feature = "shadow-bcrypt")]
+                {
+                    let cost_u = if cost <= 0 { 0 } else { cost as u32 };
+                    match afterburner_node_compat::shadows::bcrypt::hash(password, cost_u) {
+                        Ok(s) => write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes()),
+                        Err(e) => {
+                            caller.data_mut().last_error = e;
+                            -1
+                        }
+                    }
+                }
+                #[cfg(not(feature = "shadow-bcrypt"))]
+                {
+                    let _ = (password, cost, out_ptr, out_cap);
+                    caller.data_mut().last_error =
+                        "shadow-bcrypt feature not enabled".into();
+                    -1
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_shadow_bcrypt_verify",
+            |mut caller: Caller<'_, HostState>,
+             pw_ptr: i32,
+             pw_len: i32,
+             h_ptr: i32,
+             h_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(pw_bytes) = read_bytes(&memory, &caller, pw_ptr, pw_len) else {
+                    return E_OTHER;
+                };
+                let Some(h_bytes) = read_bytes(&memory, &caller, h_ptr, h_len) else {
+                    return E_OTHER;
+                };
+                let password = match std::str::from_utf8(&pw_bytes) {
+                    Ok(s) => s,
+                    Err(_) => return E_OTHER,
+                };
+                let hash = match std::str::from_utf8(&h_bytes) {
+                    Ok(s) => s,
+                    Err(_) => return E_OTHER,
+                };
+                #[cfg(feature = "shadow-bcrypt")]
+                {
+                    match afterburner_node_compat::shadows::bcrypt::verify(password, hash) {
+                        Ok(true) => 1,
+                        Ok(false) => 0,
+                        Err(e) => {
+                            caller.data_mut().last_error = e;
+                            -1
+                        }
+                    }
+                }
+                #[cfg(not(feature = "shadow-bcrypt"))]
+                {
+                    let _ = (password, hash);
+                    caller.data_mut().last_error =
+                        "shadow-bcrypt feature not enabled".into();
+                    -1
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_shadow_bcrypt_gen_salt",
+            |mut caller: Caller<'_, HostState>,
+             rounds: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                #[cfg(feature = "shadow-bcrypt")]
+                {
+                    let Some(memory) = guest_memory(&mut caller) else {
+                        return E_OTHER;
+                    };
+                    let cost_u = if rounds <= 0 { 0 } else { rounds as u32 };
+                    match afterburner_node_compat::shadows::bcrypt::gen_salt(cost_u) {
+                        Ok(s) => write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes()),
+                        Err(e) => {
+                            caller.data_mut().last_error = e;
+                            -1
+                        }
+                    }
+                }
+                #[cfg(not(feature = "shadow-bcrypt"))]
+                {
+                    let _ = (rounds, out_ptr, out_cap);
+                    caller.data_mut().last_error =
+                        "shadow-bcrypt feature not enabled".into();
+                    -1
+                }
             },
         )
         .map_err(link_err)?;

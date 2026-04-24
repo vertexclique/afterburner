@@ -373,4 +373,30 @@ unsafe extern "C" {
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
+
+    // ---- L3 shadows --------------------------------------------------
+    //
+    // These imports are always present in the plugin binary so the
+    // WASM linker resolves cleanly regardless of the host's feature
+    // set. When the host was built without `shadow-bcrypt`, the
+    // imports return `-1` + populate `host_last_error` so the JS
+    // polyfill surfaces a clean "feature not enabled" error.
+    pub fn host_shadow_bcrypt_hash(
+        pw_ptr: *const u8,
+        pw_len: u32,
+        cost: i32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_shadow_bcrypt_verify(
+        pw_ptr: *const u8,
+        pw_len: u32,
+        hash_ptr: *const u8,
+        hash_len: u32,
+    ) -> i32;
+    pub fn host_shadow_bcrypt_gen_salt(
+        rounds: i32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
 }

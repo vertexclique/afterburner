@@ -18,6 +18,11 @@ host-http = ["afterburner-core/host-http"]
 # this; library consumers that only run UDF / one-shot scripts
 # leave it off and don't pay the cost.
 daemon = ["dep:axum", "dep:tokio", "dep:hyper", "dep:bytes"]
+# L3 shadows. Each shadow pulls in its own Rust crate (e.g. bcrypt)
+# and wires a host import the plugin's JS-side polyfill calls at
+# require() time. Plugin itself always ships the import stubs;
+# without the feature the host returns "shadow-bcrypt not enabled".
+shadow-bcrypt = ["afterburner-node-compat/shadow-bcrypt"]
 
 [dependencies]
 afterburner-core.workspace = true

@@ -70,3 +70,8 @@ bin = [
 # B8 — TypeScript strip-types. `burn foo.ts` transpiles via oxc and
 # runs the resulting JS through the normal pipeline. Opt-in only.
 ts = ["dep:oxc", "dep:thiserror"]
+# L3 shadow: bcrypt. `require('bcrypt')` resolves to a pure-Rust
+# shadow that works inside the WASM sandbox (where native .node
+# addons cannot load). Forwards the feature through afterburner-wasi
+# to afterburner-node-compat, which pulls in the `bcrypt` crate.
+shadow-bcrypt = ["afterburner-wasi?/shadow-bcrypt"]

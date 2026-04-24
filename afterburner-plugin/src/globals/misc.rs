@@ -171,6 +171,88 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
         }),
     );
 
+    // ---- L3 shadow: bcrypt -------------------------------------------
+    //
+    // Reads `host_last_error` off the host and returns it with the
+    // `__HOST_ERR__:` prefix the require resolver / shadow polyfill
+    // both look for. Fallback message used when the host didn't set
+    // anything (should never happen in practice).
+    fn host_err_or_default(fallback: &str) -> alloc::string::String {
+        let mut buf = alloc::vec![0u8; 2048];
+        let n = unsafe { host_last_error(buf.as_mut_ptr(), buf.len() as u32) };
+        let detail = if n > 0 {
+            alloc::string::String::from_utf8(buf[..n as usize].to_vec())
+                .unwrap_or_else(|_| fallback.into())
+        } else {
+            fallback.into()
+        };
+        alloc::format!("__HOST_ERR__:{detail}")
+    }
+
+    //
+    // Always-present globals that dispatch through the host's
+    // shadow-bcrypt import. The imports themselves return -1 with a
+    // structured error when the host wasn't built with the feature.
+    let _ = globals.set(
+        "__host_shadow_bcrypt_hash",
+        Func::from(|password: String, cost: f64| -> String {
+            let pw = password.as_bytes();
+            let cap: u32 = 128;
+            let mut buf = alloc::vec![0u8; cap as usize];
+            let n = unsafe {
+                host_shadow_bcrypt_hash(
+                    pw.as_ptr(),
+                    pw.len() as u32,
+                    cost as i32,
+                    buf.as_mut_ptr(),
+                    cap,
+                )
+            };
+            if n < 0 {
+                return host_err_or_default("bcrypt hash failed");
+            }
+            match String::from_utf8(buf[..n as usize].to_vec()) {
+                Ok(s) => s,
+                Err(_) => alloc::string::String::from("__HOST_ERR__:bcrypt hash output not utf-8"),
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_shadow_bcrypt_verify",
+        Func::from(|password: String, hash: String| -> f64 {
+            let pw = password.as_bytes();
+            let h = hash.as_bytes();
+            let n = unsafe {
+                host_shadow_bcrypt_verify(
+                    pw.as_ptr(),
+                    pw.len() as u32,
+                    h.as_ptr(),
+                    h.len() as u32,
+                )
+            };
+            // `-1`/`0`/`1` preserved across the f64 bridge; JS side
+            // branches on the value.
+            n as f64
+        }),
+    );
+    let _ = globals.set(
+        "__host_shadow_bcrypt_gen_salt",
+        Func::from(|rounds: f64| -> String {
+            let cap: u32 = 64;
+            let mut buf = alloc::vec![0u8; cap as usize];
+            let n = unsafe {
+                host_shadow_bcrypt_gen_salt(rounds as i32, buf.as_mut_ptr(), cap)
+            };
+            if n < 0 {
+                return host_err_or_default("bcrypt gen_salt failed");
+            }
+            match String::from_utf8(buf[..n as usize].to_vec()) {
+                Ok(s) => s,
+                Err(_) => alloc::string::String::from("__HOST_ERR__:bcrypt gen_salt not utf-8"),
+            }
+        }),
+    );
+
     // B3: process.exit — never returns; the host traps with I32Exit.
     let _ = globals.set(
         "__host_process_exit",

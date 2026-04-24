@@ -32,6 +32,19 @@ ureq.workspace = true
 flate2.workspace = true
 kovan-channel.workspace = true
 
+# L3 shadows — pure-Rust substitutes for popular npm packages with
+# .node native addons. Each shadow gated behind its own feature so
+# binary size scales with opt-in. `require('bcrypt')` etc. work
+# inside the WASM sandbox where loading a .node binary would be
+# impossible.
+bcrypt = { version = "0.17", optional = true }
+
+[features]
+# L3 shadow features. Off by default — enable via
+# `--features shadow-bcrypt` or bundle via
+# `afterburner/bin` if the CLI wants the full shadow set.
+shadow-bcrypt = ["dep:bcrypt"]
+
 [build-dependencies]
 # Phase 1 keeps the bundler in pure Rust (concatenation). Phase 2 pulls in
 # esbuild when AFTERBURNER_REBUILD_PLENUM=1 is set and npm deps are present.
