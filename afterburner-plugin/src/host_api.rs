@@ -357,4 +357,20 @@ unsafe extern "C" {
     // server_id was known, 0 otherwise (idempotent — safe to call
     // twice). Backs `server.close()` in the http polyfill.
     pub fn host_http_close(server_id: i32) -> i32;
+
+    // B8/B9: `host_ts_transpile(src_ptr, src_len, path_ptr, path_len,
+    // out_ptr, out_cap)` hands the TS/ESM source plus its path to the
+    // host's oxc-based transpiler and writes plain CJS-shaped JS into
+    // `out_ptr`. Returns bytes-written on success, or a negative
+    // error code: -1 = no hook registered (host built without the
+    // `ts` feature); -2 = output buffer too small; -3 = transpile
+    // error (detail via `host_last_error`).
+    pub fn host_ts_transpile(
+        src_ptr: *const u8,
+        src_len: u32,
+        path_ptr: *const u8,
+        path_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
 }

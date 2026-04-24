@@ -50,6 +50,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_input(linker)?;
     wrap_envelope(linker)?;
     wrap_http_server(linker)?;
+    wrap_transpile(linker)?;
     wrap_process_exit(linker)?;
     wrap_timers(linker)?;
     Ok(())
@@ -1665,6 +1666,68 @@ fn wrap_http_server(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
         )
         .map_err(link_err)?;
 
+    Ok(())
+}
+
+// ---- transpile hook (B8+B9) ---------------------------------------------
+//
+// `host_ts_transpile(src_ptr, src_len, path_ptr, path_len, out_ptr,
+// out_cap) -> i32` invokes the `transpile_hook` stored on HostState
+// (wired by the CLI when built with the `ts` feature). Returns the
+// number of bytes written into the output buffer, or a negative
+// error code if the hook is absent or transpile failed.
+//
+// Convention: positive = bytes written; 0 = hook returned empty
+// string (legitimate); -1 = no hook; -2 = guest buffer too small;
+// -3 = transpile error (detail via `host_last_error`).
+
+fn wrap_transpile(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    linker
+        .func_wrap(
+            NS,
+            "host_ts_transpile",
+            |mut caller: Caller<'_, HostState>,
+             src_ptr: i32,
+             src_len: i32,
+             path_ptr: i32,
+             path_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(src_bytes) = read_bytes(&memory, &caller, src_ptr, src_len) else {
+                    return E_OTHER;
+                };
+                let Some(path_bytes) = read_bytes(&memory, &caller, path_ptr, path_len) else {
+                    return E_OTHER;
+                };
+                let src = match std::str::from_utf8(&src_bytes) {
+                    Ok(s) => s,
+                    Err(_) => return E_OTHER,
+                };
+                let path = match std::str::from_utf8(&path_bytes) {
+                    Ok(s) => s,
+                    Err(_) => return E_OTHER,
+                };
+                let Some(hook) = caller.data().transpile_hook.clone() else {
+                    // No hook registered — caller should fall back to
+                    // loading the raw source. `-1` signals "no hook".
+                    return -1;
+                };
+                let transpiled = match hook(src, path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        caller.data_mut().last_error = format!("ts_transpile: {e}");
+                        return -3;
+                    }
+                };
+                let bytes = transpiled.into_bytes();
+                write_out(&mut caller, &memory, out_ptr, out_cap, &bytes)
+            },
+        )
+        .map_err(link_err)?;
     Ok(())
 }
 

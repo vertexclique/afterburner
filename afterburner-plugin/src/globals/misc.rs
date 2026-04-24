@@ -119,6 +119,58 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
         }),
     );
 
+    // B8/B9: require() calls this for TS / ESM files. Returns the
+    // transpiled JS string, or a host-error-prefixed string if the
+    // transpile hook is absent / failed.
+    let _ = globals.set(
+        "__host_ts_transpile",
+        Func::from(|source: String, path: String| -> String {
+            let src_bytes = source.as_bytes();
+            let path_bytes = path.as_bytes();
+            // Generous cap — transpile output is usually under 4x
+            // input for common TS+ESM code. If it exceeds the
+            // buffer the import returns -2 and we surface the error.
+            let cap: u32 = core::cmp::max(src_bytes.len() * 4, 16 * 1024) as u32;
+            let mut buf = alloc::vec![0u8; cap as usize];
+            let n = unsafe {
+                host_ts_transpile(
+                    src_bytes.as_ptr(),
+                    src_bytes.len() as u32,
+                    path_bytes.as_ptr(),
+                    path_bytes.len() as u32,
+                    buf.as_mut_ptr(),
+                    cap,
+                )
+            };
+            if n < 0 {
+                // Surface the structured error string the JS side
+                // already looks for (`__HOST_ERR__:` prefix lets the
+                // require resolver convert to a typed Error).
+                let detail = match n {
+                    -1 => alloc::string::String::from("no transpile hook (build with `ts` feature)"),
+                    -2 => alloc::string::String::from("transpile output too large for guest buffer"),
+                    _ => {
+                        let mut err_buf = alloc::vec![0u8; 2048];
+                        let err_n = unsafe {
+                            host_last_error(err_buf.as_mut_ptr(), err_buf.len() as u32)
+                        };
+                        if err_n > 0 {
+                            String::from_utf8(err_buf[..err_n as usize].to_vec())
+                                .unwrap_or_else(|_| alloc::string::String::from("transpile error"))
+                        } else {
+                            alloc::string::String::from("transpile error")
+                        }
+                    }
+                };
+                return alloc::format!("__HOST_ERR__:{detail}");
+            }
+            match String::from_utf8(buf[..n as usize].to_vec()) {
+                Ok(s) => s,
+                Err(_) => alloc::string::String::from("__HOST_ERR__:transpile output not utf-8"),
+            }
+        }),
+    );
+
     // B3: process.exit — never returns; the host traps with I32Exit.
     let _ = globals.set(
         "__host_process_exit",

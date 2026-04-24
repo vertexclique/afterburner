@@ -34,17 +34,21 @@ pub fn run_source(cli: &Cli, source: &str, user_args: &[String]) -> Result<()> {
     execute(cli, source, "[eval]", user_args)
 }
 
-/// If `path` looks like TypeScript (`.ts` / `.mts` / `.cts` / `.tsx`),
-/// transpile `source` to plain JavaScript; otherwise return `source`
-/// unchanged. Decoupled here so the `-e` eval path (which has no
-/// filename) always skips transpile.
+/// With the `ts` feature: TS files are transpiled (strip-types +
+/// ESM→CJS) via oxc, and `.js`/`.mjs` files are ESM-lowered to CJS
+/// so `import`/`export` works under our CJS runtime.
+///
+/// Without the `ts` feature: TS files surface a typed error; `.js`
+/// files pass through unchanged (no ESM lowering available without
+/// the transpile dep graph).
 #[cfg(feature = "ts")]
 fn maybe_transpile_ts(source: &str, path: &std::path::Path) -> Result<String> {
-    if !crate::ts::is_typescript(path) {
-        return Ok(source.to_string());
+    if crate::ts::is_typescript(path) {
+        return crate::ts::transpile(source, path).map_err(|e| anyhow::anyhow!("{e}"));
     }
-    crate::ts::transpile(source, path)
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    // B9: lower ESM in plain JS too. Plain CJS source contains no
+    // ESM declarations and returns unchanged.
+    crate::ts::lower_esm_js(source, path).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 #[cfg(not(feature = "ts"))]

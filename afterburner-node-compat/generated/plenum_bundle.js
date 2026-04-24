@@ -149,14 +149,19 @@
     }
 
     // Given a candidate absolute path, try the Node CJS resolution
-    // ladder: exact path, `.js`, `.json`, and directory probing with
-    // `package.json "main"` + `index.js` / `index.json`.
+    // ladder. Extensions tried (in order): exact, .js, .json, .mjs,
+    // .cjs, .ts, .mts, .cts. TS/ESM extensions are opt-in — the
+    // loader asks the host to transpile them before running. If the
+    // host has no transpile hook (built without `ts`), loading a
+    // .ts/.mjs surfaces a clean error instead of a JS parse failure.
+    var EXTENSION_LADDER = ['.js', '.json', '.mjs', '.cjs', '.ts', '.mts', '.cts'];
+
     function resolveCandidate(candidate) {
         if (fsExists(candidate) && !fsIsDir(candidate)) return candidate;
-        var jsPath = candidate + '.js';
-        if (fsExists(jsPath)) return jsPath;
-        var jsonPath = candidate + '.json';
-        if (fsExists(jsonPath)) return jsonPath;
+        for (var i = 0; i < EXTENSION_LADDER.length; i++) {
+            var p = candidate + EXTENSION_LADDER[i];
+            if (fsExists(p)) return p;
+        }
         if (fsIsDir(candidate)) {
             var pkg = candidate + '/package.json';
             if (fsExists(pkg)) {
@@ -173,12 +178,39 @@
                     } catch (_) { /* malformed package.json falls through to index */ }
                 }
             }
-            var idxJs = candidate + '/index.js';
-            if (fsExists(idxJs)) return idxJs;
-            var idxJson = candidate + '/index.json';
-            if (fsExists(idxJson)) return idxJson;
+            // Directory fallback — match the extension order above.
+            for (var j = 0; j < EXTENSION_LADDER.length; j++) {
+                var idx = candidate + '/index' + EXTENSION_LADDER[j];
+                if (fsExists(idx)) return idx;
+            }
         }
         return null;
+    }
+
+    // Transpile if the extension needs it (TS or ESM .mjs). `.cjs`
+    // is plain CommonJS, no transpile. Returns the transformed
+    // source or throws a "transpile needed but unavailable" error
+    // if the host hook isn't wired.
+    function maybeTranspile(source, absPath) {
+        var lower = absPath.toLowerCase();
+        var needs = lower.slice(-3) === '.ts'
+                 || lower.slice(-4) === '.mts'
+                 || lower.slice(-4) === '.cts'
+                 || lower.slice(-4) === '.mjs';
+        if (!needs) return source;
+        var fn = globalThis.__host_ts_transpile;
+        if (typeof fn !== 'function') {
+            var e = new Error("Loading '" + absPath + "' requires the `ts` cargo feature");
+            e.code = 'ERR_UNSUPPORTED_EXTENSION';
+            throw e;
+        }
+        var out = fn(source, absPath);
+        if (typeof out === 'string' && out.indexOf('__HOST_ERR__:') === 0) {
+            var err = new Error("Transpile failed for '" + absPath + "': " + out.slice('__HOST_ERR__:'.length));
+            err.code = 'ERR_TRANSPILE_FAILED';
+            throw err;
+        }
+        return out;
     }
 
     // Walk up `fromDir` looking for `node_modules/<name>`. Returns the
@@ -213,6 +245,10 @@
             cache[absPath] = parsed;
             return parsed;
         }
+        // B8/B9: .ts/.mts/.cts/.mjs files go through the host's
+        // oxc-based transpiler before landing in the CJS wrapper.
+        // Plain .js / .cjs pass through untouched.
+        source = maybeTranspile(source, absPath);
         // Node CJS wrapper — `module.exports` / `exports` are the
         // user-visible outputs; `require` is the scoped copy; the two
         // `__filename` / `__dirname` bindings match Node.

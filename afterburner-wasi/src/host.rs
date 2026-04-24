@@ -76,7 +76,20 @@ pub struct HostState {
     /// Monotonically increasing timer id counter. Starts at 1 so JS
     /// can use `0` as "no timer".
     pub next_timer_id: i32,
+    /// Optional hook for transpiling JS-flavoured source (TS, ESM)
+    /// to plain CJS-shaped JS at require-time. Wired by the CLI
+    /// when built with the `ts` feature so `require('./x.ts')` and
+    /// `require('./x.mjs')` lower to runnable CJS before the require
+    /// resolver wraps the source in `new Function(...)`. `None`
+    /// disables the hook — any non-`.js`/`.json` file loaded via
+    /// `require` surfaces a "TS support requires `ts` feature"-style
+    /// error downstream.
+    pub transpile_hook: Option<TranspileFn>,
 }
+
+/// Signature of the transpile hook. Takes `(source, path)` and
+/// returns the transpiled JS or a string error message.
+pub type TranspileFn = Arc<dyn Fn(&str, &str) -> Result<String, String> + Send + Sync>;
 
 impl HostState {
     /// Build a `HostState` with the given input JSON piped to stdin and
@@ -123,6 +136,7 @@ impl HostState {
             daemon_http: None,
             timers: Vec::new(),
             next_timer_id: 1,
+            transpile_hook: None,
         }
     }
 

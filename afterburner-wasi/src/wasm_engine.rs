@@ -104,6 +104,12 @@ pub struct WasmConfig {
     /// through this context; unset means `readColumn` returns `[]` and
     /// `emitRow` is a no-op.
     pub host_context: Option<Arc<dyn afterburner_core::HostContext>>,
+    /// B8/B9 — called from the JS-side require resolver when loading
+    /// `.ts` / `.mts` / `.cts` / `.mjs` files. `None` disables those
+    /// extensions (the resolver emits a clean error instead of a JS
+    /// parse failure). The CLI wires this to oxc-backed transpile
+    /// when built with the `ts` feature.
+    pub transpile_hook: Option<crate::host::TranspileFn>,
 }
 
 pub struct WasmCombustor {
@@ -128,6 +134,9 @@ pub struct WasmCombustor {
     state_store: SharedStateStore,
     /// Optional host context — embedder-facing read_column/emit_row hooks.
     host_context: Option<Arc<dyn afterburner_core::HostContext>>,
+    /// Transpile hook threaded into every Store's HostState so the JS
+    /// require resolver can call `__host_ts_transpile` for TS / ESM.
+    transpile_hook: Option<crate::host::TranspileFn>,
     /// Long-lived epoch ticker; one per `WasmCombustor`.
     ticker_shutdown: Arc<AtomicBool>,
     ticker: Option<JoinHandle<()>>,
@@ -176,9 +185,16 @@ impl WasmCombustor {
             instance_pre: Arc::new(instance_pre),
             state_store,
             host_context: config.host_context,
+            transpile_hook: config.transpile_hook,
             ticker_shutdown,
             ticker: Some(ticker),
         })
+    }
+
+    /// Exposed so the daemon path can thread the same hook into its
+    /// long-lived Store's HostState.
+    pub fn transpile_hook(&self) -> Option<crate::host::TranspileFn> {
+        self.transpile_hook.clone()
     }
 
     /// Compile `source` to QuickJS bytecode by spinning up a one-shot
@@ -415,7 +431,7 @@ impl Combustor for WasmCombustor {
         let envelope_bytes = serde_json::to_vec(&envelope)?;
         let input_bytes = serde_json::to_vec(input)?;
 
-        let state = HostState::new_with_input(
+        let mut state = HostState::new_with_input(
             &envelope_bytes,
             input_bytes,
             limits.memory_bytes,
@@ -424,6 +440,7 @@ impl Combustor for WasmCombustor {
             self.state_store.clone(),
             self.host_context.clone(),
         );
+        state.transpile_hook = self.transpile_hook.clone();
         let mut store = Store::new(&self.engine, state);
         store.limiter(|s| &mut s.limits);
 
@@ -529,7 +546,7 @@ impl Combustor for WasmCombustor {
         });
         let envelope_bytes = serde_json::to_vec(&envelope)?;
 
-        let state = HostState::new(
+        let mut state = HostState::new(
             &envelope_bytes,
             limits.memory_bytes,
             STDOUT_CAPACITY,
@@ -537,6 +554,7 @@ impl Combustor for WasmCombustor {
             self.state_store.clone(),
             self.host_context.clone(),
         );
+        state.transpile_hook = self.transpile_hook.clone();
         let mut store = Store::new(&self.engine, state);
         store.limiter(|s| &mut s.limits);
 

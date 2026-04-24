@@ -48,6 +48,8 @@
 
 mod builder;
 #[cfg(feature = "ts")]
+pub mod esm;
+#[cfg(feature = "ts")]
 pub mod ts;
 #[cfg(feature = "bin")]
 pub mod cli;

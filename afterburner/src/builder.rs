@@ -443,6 +443,7 @@ fn build_wasm(
     let cfg = afterburner_wasi::WasmConfig {
         state_store: Some(state_store),
         host_context,
+        transpile_hook: None,
     };
     Ok(Box::new(afterburner_wasi::WasmCombustor::new(cfg)?))
 }
@@ -455,6 +456,7 @@ fn build_adaptive(
     let cfg = afterburner_wasi::WasmConfig {
         state_store: Some(state_store),
         host_context,
+        transpile_hook: None,
     };
     Ok(Box::new(
         afterburner_adaptive::AdaptiveCombustor::with_wasm_config(cfg)?,
@@ -547,6 +549,7 @@ impl ThreadedBuilder {
         let wasm_config = afterburner_wasi::WasmConfig {
             state_store: Some(state_store.clone()),
             host_context: self.parent.host_context.clone(),
+            transpile_hook: None,
         };
 
         let cfg = afterburner_thrust::ThrustEngineConfig {

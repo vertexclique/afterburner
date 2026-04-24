@@ -71,6 +71,7 @@ impl DaemonRuntime {
             state_store,
             host_context,
             daemon_http,
+            None,
         )?;
         d.run_init(source, &ScriptInvocation::default())?;
         Ok(d)
@@ -98,6 +99,7 @@ impl DaemonRuntime {
             state_store,
             host_context,
             daemon_http,
+            None,
         )?;
         d.run_init(source, invocation)?;
         Ok(d)
@@ -107,6 +109,7 @@ impl DaemonRuntime {
     /// daemon-init. Callers that need to inspect partial output on
     /// init failure use `instantiate()` + [`run_init`] separately
     /// instead of the convenience constructors.
+    #[allow(clippy::too_many_arguments)]
     pub fn instantiate(
         engine: &Engine,
         instance_pre: &InstancePre<HostState>,
@@ -114,6 +117,7 @@ impl DaemonRuntime {
         state_store: Option<SharedStateStore>,
         host_context: Option<Arc<dyn HostContext>>,
         daemon_http: Arc<DaemonHttp>,
+        transpile_hook: Option<crate::host::TranspileFn>,
     ) -> Result<Self> {
         let state_store = state_store.unwrap_or_else(InMemoryStateStore::shared);
         let mut state = HostState::new(
@@ -125,6 +129,7 @@ impl DaemonRuntime {
             host_context,
         );
         state.daemon_http = Some(daemon_http.clone());
+        state.transpile_hook = transpile_hook;
 
         let mut store = Store::new(engine, state);
         store.limiter(|s| &mut s.limits);

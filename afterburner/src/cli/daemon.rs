@@ -73,6 +73,7 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
     let combustor = WasmCombustor::new(WasmConfig {
         state_store: None,
         host_context: None,
+        transpile_hook: ts_transpile_hook(),
     })
     .context("wasm combustor")?;
 
@@ -86,6 +87,7 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
         Some(combustor.state_store().clone()),
         None,
         Arc::clone(&daemon_http),
+        combustor.transpile_hook(),
     )
     .context("daemon instantiate")?;
 
@@ -290,4 +292,26 @@ pub fn script_label(path: &Path) -> String {
     path.canonicalize()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| path.to_string_lossy().into_owned())
+}
+
+/// Build the transpile hook the require resolver uses to lower
+/// `.ts` / `.mts` / `.cts` / `.mjs` files to plain CJS when the CLI
+/// is built with the `ts` feature.
+#[cfg(feature = "ts")]
+fn ts_transpile_hook() -> Option<afterburner_wasi::host::TranspileFn> {
+    Some(Arc::new(|source: &str, path: &str| -> Result<String, String> {
+        let p = std::path::PathBuf::from(path);
+        // Treat `.mjs`/`.cjs` / plain JS without TS syntax as ESM-
+        // lowering-only so `import`/`export` still get rewritten.
+        if crate::ts::is_typescript(&p) {
+            crate::ts::transpile(source, &p).map_err(|e| e.to_string())
+        } else {
+            crate::ts::lower_esm_js(source, &p).map_err(|e| e.to_string())
+        }
+    }))
+}
+
+#[cfg(not(feature = "ts"))]
+fn ts_transpile_hook() -> Option<afterburner_wasi::host::TranspileFn> {
+    None
 }

@@ -83,7 +83,26 @@ pub fn transpile(source: &str, path: &Path) -> Result<String, TsError> {
     Transformer::new(&allocator, path, &opts).build_with_scoping(scoping, &mut program);
 
     let codegen = Codegen::new().build(&program);
-    Ok(codegen.code)
+    // B9: after TS strip, lower any remaining ESM declarations to
+    // CJS so `import` / `export` in TS files runs under our existing
+    // CommonJS runtime. Plain CJS code contains no ESM declarations
+    // and passes through unchanged.
+    crate::esm::rewrite_esm_to_cjs(&codegen.code, path)
+        .map_err(|e| TsError::Parse {
+            path: path.display().to_string(),
+            errors: e,
+        })
+}
+
+/// Public helper for the CLI run path so `.js` / `.mjs` files with
+/// `import` / `export` are lowered to CJS even without the TS strip.
+/// No-op for plain CJS source — the function returns the input
+/// unchanged if no ESM declarations are present.
+pub fn lower_esm_js(source: &str, path: &Path) -> Result<String, TsError> {
+    crate::esm::rewrite_esm_to_cjs(source, path).map_err(|e| TsError::Parse {
+        path: path.display().to_string(),
+        errors: e,
+    })
 }
 
 /// Typed errors the transpile step surfaces. Separate from
