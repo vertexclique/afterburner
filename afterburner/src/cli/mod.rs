@@ -22,6 +22,7 @@ mod script;
 mod shim;
 mod thrust;
 mod version;
+mod worker;
 
 use anyhow::Result;
 use clap::Parser;

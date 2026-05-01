@@ -14,6 +14,7 @@
 //! the library API's `Afterburner::run_script` never auto-enters it.
 
 use crate::daemon_http::DaemonHttp;
+use crate::daemon_workers::DaemonWorkers;
 use crate::host::HostState;
 use afterburner_core::{
     AfterburnerError, HostContext, InMemoryStateStore, Manifold, Result, ScriptInvocation,
@@ -218,11 +219,59 @@ impl DaemonRuntime {
     }
 
     /// `true` if the daemon has anything keeping it alive — HTTP
-    /// listeners or ref'd timers. Q2-A locked decision: both
-    /// `.listen()` and `setInterval` / ref'd `setTimeout` keep the
-    /// runtime alive.
+    /// listeners, ref'd timers, or alive worker_threads children.
+    /// Q2-A locked decision: both `.listen()` and `setInterval` /
+    /// ref'd `setTimeout` keep the runtime alive. B10 extends this to
+    /// `new Worker(...)`: while a child is alive the parent stays up
+    /// so messages can flow.
     pub fn has_refs(&self) -> bool {
-        self.daemon_http.listener_count() > 0 || self.store.data().timers.iter().any(|t| t.is_ref)
+        if self.daemon_http.listener_count() > 0 {
+            return true;
+        }
+        if self.store.data().timers.iter().any(|t| t.is_ref) {
+            return true;
+        }
+        if let Some(w) = &self.store.data().daemon_workers {
+            if w.has_alive_workers() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Install a worker_threads coordinator on this daemon's Store.
+    /// Called by the CLI before `run_init` so user code that calls
+    /// `new Worker(...)` during top-level evaluation already sees the
+    /// host import wired. Idempotent — second call replaces the slot.
+    pub fn install_workers(&mut self, workers: Arc<DaemonWorkers>) {
+        self.store.data_mut().daemon_workers = Some(workers);
+    }
+
+    /// Pop the next worker event for the event-loop to dispatch.
+    /// `None` when the queue is empty. Returns nothing in non-worker
+    /// configurations (the slot is `None`).
+    pub fn try_recv_worker_event(&self) -> Option<crate::daemon_workers::WorkerEvent> {
+        self.store.data().daemon_workers.as_ref()?.try_recv_event()
+    }
+
+    /// Drop the active-handle entry for `worker_id` after dispatching
+    /// `Exit` to JS. The reaper-on-Drop path catches anything we miss.
+    pub fn reap_worker(&self, worker_id: i32) {
+        if let Some(w) = &self.store.data().daemon_workers {
+            w.mark_reaped(worker_id);
+        }
+    }
+
+    /// Child-mode signal: the parent closed our stdin (or sent
+    /// `terminate`). Used by the worker child's event loop to know it
+    /// can exit cleanly when no other refs remain.
+    pub fn parent_closed_signaled(&self) -> bool {
+        self.store
+            .data()
+            .daemon_workers
+            .as_ref()
+            .map(|w| w.parent_closed_signaled())
+            .unwrap_or(false)
     }
 
     /// Drain timers whose `fire_at` has passed. Returns the ids that

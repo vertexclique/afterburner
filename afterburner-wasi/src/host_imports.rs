@@ -56,6 +56,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_shadow_jwt(linker)?;
     wrap_process_exit(linker)?;
     wrap_timers(linker)?;
+    wrap_workers(linker)?;
     Ok(())
 }
 
@@ -2289,6 +2290,234 @@ fn wrap_timers(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 {
                     t.is_ref = true;
                 }
+            },
+        )
+        .map_err(link_err)?;
+
+    Ok(())
+}
+
+// ---- worker_threads (B10) -----------------------------------------------
+//
+// Five host imports back the `worker_threads` polyfill:
+//
+// * `host_worker_spawn(path, data, opts)` → worker_id (≥1) | error
+// * `host_worker_post_message(id, payload)` → 0 | error  (parent → child)
+// * `host_worker_terminate(id, force)` → 0 | error
+// * `host_worker_post_to_parent(payload)` → 0 | error    (child → parent)
+// * `host_worker_post_online_to_parent()` → 0 | error    (child → parent)
+//
+// All inputs cross the WASM boundary as `(ptr, len)` pairs read from
+// guest memory; the JS-side polyfill surfaces the negative codes as
+// typed errors. See `crate::daemon_workers::errors` for the full code
+// table.
+
+fn wrap_workers(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    use crate::daemon_workers::errors as werr;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_worker_spawn",
+            |mut caller: Caller<'_, HostState>,
+             path_ptr: i32,
+             path_len: i32,
+             data_ptr: i32,
+             data_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return werr::E_OTHER;
+                };
+                let Some(path) = read_str(&memory, &caller, path_ptr, path_len) else {
+                    record(&mut caller, "worker_spawn: invalid path");
+                    return werr::E_OTHER;
+                };
+                let Some(data) = read_str(&memory, &caller, data_ptr, data_len) else {
+                    record(&mut caller, "worker_spawn: invalid worker_data");
+                    return werr::E_OTHER;
+                };
+                let Some(workers) = caller.data().daemon_workers.clone() else {
+                    record(
+                        &mut caller,
+                        "worker_threads requires daemon mode; run via `burn foo.js`",
+                    );
+                    return werr::E_NO_DAEMON;
+                };
+                let mut last_error = String::new();
+                let result = workers.spawn_worker(&path, &data, &mut last_error);
+                if !last_error.is_empty() {
+                    caller.data_mut().last_error = last_error;
+                }
+                result
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_worker_post_message",
+            |mut caller: Caller<'_, HostState>,
+             worker_id: i32,
+             payload_ptr: i32,
+             payload_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return werr::E_OTHER;
+                };
+                let Some(payload) = read_str(&memory, &caller, payload_ptr, payload_len) else {
+                    record(&mut caller, "worker_post: invalid payload");
+                    return werr::E_OTHER;
+                };
+                let Some(workers) = caller.data().daemon_workers.clone() else {
+                    return werr::E_NO_DAEMON;
+                };
+                let mut last_error = String::new();
+                let result = workers.post_message_to_worker(worker_id, &payload, &mut last_error);
+                if !last_error.is_empty() {
+                    caller.data_mut().last_error = last_error;
+                }
+                result
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_worker_terminate",
+            |caller: Caller<'_, HostState>, worker_id: i32, force: i32| -> i32 {
+                let Some(workers) = caller.data().daemon_workers.clone() else {
+                    return werr::E_NO_DAEMON;
+                };
+                workers.terminate_worker(worker_id, force != 0)
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_worker_post_to_parent",
+            |mut caller: Caller<'_, HostState>,
+             payload_ptr: i32,
+             payload_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return werr::E_OTHER;
+                };
+                let Some(payload) = read_str(&memory, &caller, payload_ptr, payload_len) else {
+                    record(&mut caller, "worker_post_parent: invalid payload");
+                    return werr::E_OTHER;
+                };
+                let Some(workers) = caller.data().daemon_workers.clone() else {
+                    return werr::E_NO_DAEMON;
+                };
+                let mut last_error = String::new();
+                let result = workers.post_to_parent(&payload, &mut last_error);
+                if !last_error.is_empty() {
+                    caller.data_mut().last_error = last_error;
+                }
+                result
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_worker_post_online_to_parent",
+            |mut caller: Caller<'_, HostState>| -> i32 {
+                let Some(workers) = caller.data().daemon_workers.clone() else {
+                    return werr::E_NO_DAEMON;
+                };
+                let mut last_error = String::new();
+                let result = workers.post_online_to_parent(&mut last_error);
+                if !last_error.is_empty() {
+                    caller.data_mut().last_error = last_error;
+                }
+                result
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_worker_post_error_to_parent",
+            |mut caller: Caller<'_, HostState>,
+             msg_ptr: i32,
+             msg_len: i32,
+             stack_ptr: i32,
+             stack_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return werr::E_OTHER;
+                };
+                let Some(message) = read_str(&memory, &caller, msg_ptr, msg_len) else {
+                    return werr::E_OTHER;
+                };
+                let Some(stack) = read_str(&memory, &caller, stack_ptr, stack_len) else {
+                    return werr::E_OTHER;
+                };
+                let Some(workers) = caller.data().daemon_workers.clone() else {
+                    return werr::E_NO_DAEMON;
+                };
+                let mut last_error = String::new();
+                let result = workers.post_error_to_parent(&message, &stack, &mut last_error);
+                if !last_error.is_empty() {
+                    caller.data_mut().last_error = last_error;
+                }
+                result
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_worker_thread_id",
+            |caller: Caller<'_, HostState>| -> i32 {
+                caller
+                    .data()
+                    .daemon_workers
+                    .as_ref()
+                    .map(|w| w.thread_id())
+                    .unwrap_or(0)
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_worker_is_main_thread",
+            |caller: Caller<'_, HostState>| -> i32 {
+                caller
+                    .data()
+                    .daemon_workers
+                    .as_ref()
+                    .map(|w| if w.is_main_thread() { 1 } else { 0 })
+                    .unwrap_or(1)
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_worker_data",
+            |mut caller: Caller<'_, HostState>, out_ptr: i32, out_cap: i32| -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return werr::E_OTHER;
+                };
+                let data = caller
+                    .data()
+                    .daemon_workers
+                    .as_ref()
+                    .map(|w| w.worker_data().to_string())
+                    .unwrap_or_default();
+                write_out(&mut caller, &memory, out_ptr, out_cap, data.as_bytes())
             },
         )
         .map_err(link_err)?;

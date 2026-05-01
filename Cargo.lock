@@ -69,6 +69,7 @@ dependencies = [
  "rustyline",
  "serde_json",
  "serial_test",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -195,6 +196,7 @@ dependencies = [
  "hyper",
  "kovan-channel",
  "kovan-map",
+ "libc",
  "p256",
  "rand 0.8.5",
  "rsa",

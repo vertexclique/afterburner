@@ -4,13 +4,17 @@
 
 pub mod daemon_http;
 pub mod daemon_runtime;
+pub mod daemon_workers;
 pub mod host;
 pub mod host_imports;
 pub mod intake;
+pub mod manifold_codec;
 pub mod nozzle;
 pub mod test_support;
 pub mod wasm_engine;
 
 pub use daemon_http::{DaemonHttp, ReplyEnvelope};
 pub use daemon_runtime::DaemonRuntime;
+pub use daemon_workers::{DaemonWorkers, WorkerConfig, WorkerEvent};
+pub use manifold_codec::manifold_to_cli_args;
 pub use wasm_engine::{WasmCombustor, WasmConfig};

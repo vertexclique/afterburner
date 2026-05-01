@@ -59,6 +59,8 @@ impl CliBuilder {
             allow_all: self.allow_all,
             sandbox: self.sandbox,
             quiet: self.quiet,
+            internal_worker: false,
+            worker_thread_id: None,
             rest_args: Vec::new(),
         }
     }

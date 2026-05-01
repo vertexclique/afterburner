@@ -69,6 +69,12 @@ pub struct HostState {
     /// all one-shot thrust paths so UDF/script callers don't pay the
     /// coordinator's startup cost.
     pub daemon_http: Option<Arc<crate::daemon_http::DaemonHttp>>,
+    /// Optional `worker_threads` coordinator. `Some` in daemon mode
+    /// (parent role) and inside `burn run --internal-worker` (child
+    /// role); `None` everywhere else — `new Worker(...)` then surfaces
+    /// a clear "not in daemon mode" error rather than silently
+    /// spawning a process from the library API.
+    pub daemon_workers: Option<Arc<crate::daemon_workers::DaemonWorkers>>,
     /// Host-managed timers registered by `setTimeout`/`setInterval` in
     /// daemon mode via the `__host_timer_set` import. Empty for one-shot
     /// UDF / script paths.
@@ -134,6 +140,7 @@ impl HostState {
             pending_input: Vec::new(),
             pending_envelope: Vec::new(),
             daemon_http: None,
+            daemon_workers: None,
             timers: Vec::new(),
             next_timer_id: 1,
             transpile_hook: None,

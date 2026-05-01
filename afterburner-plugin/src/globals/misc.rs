@@ -429,6 +429,99 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
         "__host_timer_ref",
         Func::from(|timer_id: f64| unsafe { host_timer_ref(timer_id as i32) }),
     );
+
+    // ---- worker_threads (B10) ---------------------------------------
+    //
+    // The polyfill `polyfills/worker_threads.js` calls these to spawn
+    // child `burn` subprocesses (parent role) or to talk back to the
+    // parent (child role). All take/return scalars + base64-free
+    // strings; large payloads are JSON over the wire.
+    let _ = globals.set(
+        "__host_worker_spawn",
+        Func::from(|path: String, worker_data: String| -> f64 {
+            let pb = path.as_bytes();
+            let db = worker_data.as_bytes();
+            unsafe {
+                host_worker_spawn(
+                    pb.as_ptr(),
+                    pb.len() as u32,
+                    db.as_ptr(),
+                    db.len() as u32,
+                ) as f64
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_worker_post_message",
+        Func::from(|worker_id: f64, payload: String| -> f64 {
+            let pb = payload.as_bytes();
+            unsafe {
+                host_worker_post_message(worker_id as i32, pb.as_ptr(), pb.len() as u32) as f64
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_worker_terminate",
+        Func::from(|worker_id: f64, force: f64| -> f64 {
+            unsafe { host_worker_terminate(worker_id as i32, force as i32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_worker_post_to_parent",
+        Func::from(|payload: String| -> f64 {
+            let pb = payload.as_bytes();
+            unsafe { host_worker_post_to_parent(pb.as_ptr(), pb.len() as u32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_worker_post_online_to_parent",
+        Func::from(|| -> f64 { unsafe { host_worker_post_online_to_parent() as f64 } }),
+    );
+    let _ = globals.set(
+        "__host_worker_post_error_to_parent",
+        Func::from(|message: String, stack: String| -> f64 {
+            let mb = message.as_bytes();
+            let sb = stack.as_bytes();
+            unsafe {
+                host_worker_post_error_to_parent(
+                    mb.as_ptr(),
+                    mb.len() as u32,
+                    sb.as_ptr(),
+                    sb.len() as u32,
+                ) as f64
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_worker_thread_id",
+        Func::from(|| -> f64 { unsafe { host_worker_thread_id() as f64 } }),
+    );
+    let _ = globals.set(
+        "__host_worker_is_main_thread",
+        Func::from(|| -> f64 { unsafe { host_worker_is_main_thread() as f64 } }),
+    );
+    let _ = globals.set(
+        "__host_worker_data",
+        Func::from(|| -> String {
+            // Reuse the variable-length read pattern from
+            // `__AB_GET_INPUT__`: 64 KiB initial buffer covers nearly
+            // every workerData payload; -4 doubles + retries.
+            let mut buf = alloc::vec![0u8; 64 * 1024];
+            loop {
+                let n = unsafe { host_worker_data(buf.as_mut_ptr(), buf.len() as u32) };
+                if n >= 0 {
+                    buf.truncate(n as usize);
+                    return String::from_utf8_lossy(&buf).into_owned();
+                }
+                if n == -4 {
+                    let new_cap = buf.len().saturating_mul(2);
+                    buf.resize(new_cap, 0);
+                    continue;
+                }
+                return String::new();
+            }
+        }),
+    );
 }
 
 fn install_os<'js>(globals: &Object<'js>) {

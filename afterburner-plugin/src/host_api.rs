@@ -457,4 +457,36 @@ unsafe extern "C" {
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
+
+    // ---- worker_threads (B10) ---------------------------------------
+    //
+    // Process-per-worker model: each `new Worker(path, opts)` in the
+    // parent JS runs through `host_worker_spawn` here, which the host
+    // backs by spawning a fresh `burn run --internal-worker <path>`
+    // subprocess and pumping length-prefixed JSON frames over the
+    // pipes. See `afterburner-wasi/src/daemon_workers.rs` for the
+    // wire format and security envelope.
+    pub fn host_worker_spawn(
+        path_ptr: *const u8,
+        path_len: u32,
+        data_ptr: *const u8,
+        data_len: u32,
+    ) -> i32;
+    pub fn host_worker_post_message(
+        worker_id: i32,
+        payload_ptr: *const u8,
+        payload_len: u32,
+    ) -> i32;
+    pub fn host_worker_terminate(worker_id: i32, force: i32) -> i32;
+    pub fn host_worker_post_to_parent(payload_ptr: *const u8, payload_len: u32) -> i32;
+    pub fn host_worker_post_online_to_parent() -> i32;
+    pub fn host_worker_post_error_to_parent(
+        msg_ptr: *const u8,
+        msg_len: u32,
+        stack_ptr: *const u8,
+        stack_len: u32,
+    ) -> i32;
+    pub fn host_worker_thread_id() -> i32;
+    pub fn host_worker_is_main_thread() -> i32;
+    pub fn host_worker_data(out_ptr: *mut u8, out_cap: u32) -> i32;
 }

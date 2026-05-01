@@ -27,10 +27,19 @@ pub fn run_file(cli: &Cli, path: &PathBuf, user_args: &[String]) -> Result<()> {
     let source = fs::read_to_string(path).with_context(|| format!("reading {path:?}"))?;
     let label = script_label(path);
     let js_source = maybe_transpile_ts(&source, path)?;
+    if cli.internal_worker {
+        // B10: worker child mode. Bootstraps a `DaemonWorkers::new_child`
+        // (which blocks on stdin for the init frame) and runs the
+        // script under the same daemon-mode plumbing the parent uses.
+        return super::worker::execute(cli, &js_source, &label, user_args);
+    }
     execute(cli, &js_source, &label, user_args)
 }
 
 pub fn run_source(cli: &Cli, source: &str, user_args: &[String]) -> Result<()> {
+    if cli.internal_worker {
+        return super::worker::execute(cli, source, "[eval]", &[]);
+    }
     execute(cli, source, "[eval]", user_args)
 }
 

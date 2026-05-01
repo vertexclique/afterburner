@@ -64,6 +64,56 @@ const DISPATCH_SOURCE: &str = r#"
                 try { console.error('timer callback error:', (e && e.stack) || e); } catch (_) {}
             }
         }
+    } else if (kind === 'worker-online') {
+        // B10 parent-side: a child worker finished its handshake.
+        const table = globalThis.__ab_worker_handlers || {};
+        const w = table[ev.worker_id];
+        if (w && typeof w._dispatchOnline === 'function') {
+            try { w._dispatchOnline(); } catch (e) {
+                try { console.error('worker online dispatch:', (e && e.stack) || e); } catch (_) {}
+            }
+        }
+    } else if (kind === 'worker-message') {
+        const table = globalThis.__ab_worker_handlers || {};
+        const w = table[ev.worker_id];
+        if (w && typeof w._dispatchMessage === 'function') {
+            try { w._dispatchMessage(ev.payload || ''); } catch (e) {
+                try { console.error('worker message dispatch:', (e && e.stack) || e); } catch (_) {}
+            }
+        }
+    } else if (kind === 'worker-error') {
+        const table = globalThis.__ab_worker_handlers || {};
+        const w = table[ev.worker_id];
+        if (w && typeof w._dispatchError === 'function') {
+            try { w._dispatchError(ev.message || '', ev.stack || ''); } catch (e) {
+                try { console.error('worker error dispatch:', (e && e.stack) || e); } catch (_) {}
+            }
+        }
+    } else if (kind === 'worker-exit') {
+        const table = globalThis.__ab_worker_handlers || {};
+        const w = table[ev.worker_id];
+        if (w && typeof w._dispatchExit === 'function') {
+            try { w._dispatchExit(ev.code | 0); } catch (e) {
+                try { console.error('worker exit dispatch:', (e && e.stack) || e); } catch (_) {}
+            }
+        }
+    } else if (kind === 'worker-parent-message') {
+        // B10 child-side: parent sent us a frame.
+        const port = globalThis.__ab_worker_parent_port_handlers;
+        if (port && typeof port._dispatchMessage === 'function') {
+            try { port._dispatchMessage(ev.payload || ''); } catch (e) {
+                try { console.error('parentPort message dispatch:', (e && e.stack) || e); } catch (_) {}
+            }
+        }
+    } else if (kind === 'worker-terminate-requested') {
+        // B10 child-side: parent has called worker.terminate().
+        const port = globalThis.__ab_worker_parent_port_handlers;
+        if (port && typeof port._dispatchTerminate === 'function') {
+            try { port._dispatchTerminate(); } catch (_) {}
+        }
+        // The CLI's child event loop also sees this on the Rust side
+        // and exits gracefully; the JS-side dispatch is best-effort
+        // for user-facing 'close' listeners.
     } else {
         // Unknown event kind — surface on stderr for diagnosis.
         try { console.error('daemon-event: unknown kind=' + kind); } catch (_) {}

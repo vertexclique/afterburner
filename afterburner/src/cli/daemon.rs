@@ -20,7 +20,9 @@
 //! can auto-transition into daemon mode.
 
 use crate::AfterburnerError;
-use crate::wasm::{DaemonHttp, DaemonRuntime, WasmCombustor, WasmConfig};
+use crate::wasm::{
+    DaemonHttp, DaemonRuntime, DaemonWorkers, WasmCombustor, WasmConfig, WorkerConfig, WorkerEvent,
+};
 use crate::{EnvAccess, ScriptInvocation};
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
@@ -83,13 +85,20 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
     let mut daemon = DaemonRuntime::instantiate(
         combustor.engine(),
         combustor.instance_pre(),
-        manifold,
+        manifold.clone(),
         Some(combustor.state_store().clone()),
         None,
         Arc::clone(&daemon_http),
         combustor.transpile_hook(),
     )
     .context("daemon instantiate")?;
+
+    // B10: install the worker_threads coordinator (parent role) so
+    // `new Worker(...)` from user code routes into the host. The
+    // coordinator carries the *runtime* manifold — children inherit
+    // exactly these capabilities, never wider (see manifold_codec).
+    let workers = DaemonWorkers::new_parent(manifold, WorkerConfig::default());
+    daemon.install_workers(Arc::clone(&workers));
 
     if let Err(e) = daemon.run_init(source, &invocation) {
         flush_streams(&mut daemon)?;
@@ -217,6 +226,34 @@ fn run_event_loop(
             }
         }
 
+        // ---- Worker events (B10) ----
+        // Drain a bounded batch per loop tick so a chatty worker can't
+        // starve HTTP / timer events. The bound is the same as the
+        // event channel cap so we still drain a full backlog promptly
+        // when nothing else is happening.
+        for _ in 0..256 {
+            let Some(evt) = daemon.try_recv_worker_event() else {
+                break;
+            };
+            did_work = true;
+            let (envelope, reap_id) = worker_event_to_envelope(&evt);
+            let res = daemon.dispatch_event(envelope);
+            flush_streams(daemon)?;
+            if let Err(e) = res {
+                if let AfterburnerError::ProcessExit(code) = &e {
+                    std::process::exit(*code);
+                }
+                let _ = std::io::stderr()
+                    .write_all(format!("burn: worker dispatch error: {e}\n").as_bytes());
+            }
+            // Reap *after* JS has seen the exit — guarantees the
+            // 'exit' listener runs before the handle is freed and
+            // drops `has_alive_workers` to false.
+            if let Some(id) = reap_id {
+                daemon.reap_worker(id);
+            }
+        }
+
         // If the last ref'd timer was cleared (or unref'd) during a
         // callback, exit cleanly — matches Node's behaviour where
         // clearing the only active interval lets the process exit.
@@ -249,6 +286,59 @@ fn event_to_envelope(event: &afterburner_wasi::daemon_http::DaemonEvent) -> serd
             "body": String::from_utf8_lossy(&event.body).into_owned(),
         }
     })
+}
+
+/// Translate a [`WorkerEvent`] into the daemon-event envelope shape
+/// the JS dispatcher expects. Returns the envelope plus the worker_id
+/// to reap after dispatch (only `Some` for `Exit`).
+fn worker_event_to_envelope(evt: &WorkerEvent) -> (serde_json::Value, Option<i32>) {
+    match evt {
+        WorkerEvent::Online { worker_id } => (
+            serde_json::json!({"kind": "worker-online", "worker_id": worker_id}),
+            None,
+        ),
+        WorkerEvent::Message { worker_id, payload } => (
+            serde_json::json!({
+                "kind": "worker-message",
+                "worker_id": worker_id,
+                "payload": payload,
+            }),
+            None,
+        ),
+        WorkerEvent::Error {
+            worker_id,
+            message,
+            stack,
+        } => (
+            serde_json::json!({
+                "kind": "worker-error",
+                "worker_id": worker_id,
+                "message": message,
+                "stack": stack,
+            }),
+            None,
+        ),
+        WorkerEvent::Exit { worker_id, code } => (
+            serde_json::json!({
+                "kind": "worker-exit",
+                "worker_id": worker_id,
+                "code": code,
+            }),
+            Some(*worker_id),
+        ),
+        // Child-side events; never observed in parent's drain.
+        WorkerEvent::ParentMessage { payload } => (
+            serde_json::json!({
+                "kind": "worker-parent-message",
+                "payload": payload,
+            }),
+            None,
+        ),
+        WorkerEvent::TerminateRequested => (
+            serde_json::json!({"kind": "worker-terminate-requested"}),
+            None,
+        ),
+    }
 }
 
 /// Write anything the daemon captured since the last call to
@@ -298,7 +388,7 @@ pub fn script_label(path: &Path) -> String {
 /// `.ts` / `.mts` / `.cts` / `.mjs` files to plain CJS when the CLI
 /// is built with the `ts` feature.
 #[cfg(feature = "ts")]
-fn ts_transpile_hook() -> Option<afterburner_wasi::host::TranspileFn> {
+pub(super) fn ts_transpile_hook() -> Option<afterburner_wasi::host::TranspileFn> {
     Some(Arc::new(|source: &str, path: &str| -> Result<String, String> {
         let p = std::path::PathBuf::from(path);
         // Treat `.mjs`/`.cjs` / plain JS without TS syntax as ESM-
@@ -312,6 +402,6 @@ fn ts_transpile_hook() -> Option<afterburner_wasi::host::TranspileFn> {
 }
 
 #[cfg(not(feature = "ts"))]
-fn ts_transpile_hook() -> Option<afterburner_wasi::host::TranspileFn> {
+pub(super) fn ts_transpile_hook() -> Option<afterburner_wasi::host::TranspileFn> {
     None
 }

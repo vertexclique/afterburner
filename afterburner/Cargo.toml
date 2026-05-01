@@ -43,6 +43,9 @@ thiserror = { workspace = true, optional = true }
 # until their timing assertions flake. `#[serial]` pins those tests
 # to a shared lock group while leaving the rest of the suite parallel.
 serial_test = "3"
+tempfile.workspace = true
+afterburner-core.workspace = true
+afterburner-wasi.workspace = true
 
 [features]
 default = ["wasm", "native", "thrust"]

@@ -76,6 +76,26 @@ pub struct Cli {
     #[arg(long = "quiet", short = 'q', global = true)]
     pub quiet: bool,
 
+    /// **Internal — set only by `worker_threads`.** Marks this `burn`
+    /// invocation as a worker child: read the init frame off stdin,
+    /// expose `parentPort`, and pump frames over stdin/stdout per the
+    /// daemon_workers protocol. Hidden from `--help` to discourage
+    /// human use; running `burn --internal-worker foo.js` by hand
+    /// without an init frame on stdin will hang.
+    #[arg(long = "internal-worker", hide = true, global = true)]
+    pub internal_worker: bool,
+
+    /// **Internal — set only by `worker_threads`.** The monotonic
+    /// `threadId` the parent assigned to this worker. Defaults to 0
+    /// (which only the parent process sees) outside worker mode.
+    #[arg(
+        long = "worker-thread-id",
+        value_name = "ID",
+        hide = true,
+        global = true
+    )]
+    pub worker_thread_id: Option<i32>,
+
     /// Positional arguments after the script path — passed through as
     /// `process.argv[2..]`. Only meaningful for the top-level
     /// `burn FILE arg1 arg2…` shape; each subcommand has its own

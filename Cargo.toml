@@ -72,6 +72,7 @@ tempfile = "3"
 flate2 = "1"
 kovan-map = "0.1"
 kovan-channel = "0.1"
+libc = "0.2"
 
 wasmtime = { version = "36", features = ["cranelift", "cache"] }
 wasmtime-wasi = "36"
