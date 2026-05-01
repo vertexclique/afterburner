@@ -115,6 +115,7 @@ fn wasm_host_context_round_trip() {
     let cfg = WasmConfig {
         state_store: None,
         host_context: Some(ctx.clone() as Arc<dyn HostContext>),
+        transpile_hook: None,
     };
     let c = WasmCombustor::new(cfg).unwrap();
     let out = run_on(&c);
@@ -146,6 +147,7 @@ fn wasm_without_host_context_defaults_are_harmless() {
     let cfg = WasmConfig {
         state_store: None,
         host_context: None,
+        transpile_hook: None,
     };
     let c = WasmCombustor::new(cfg).unwrap();
     let id = c

@@ -4,7 +4,7 @@ Source of truth for what's shipped vs. what's left in the
 `burn` runtime plan (`docs/IMPL_PLAN_BURN_RUNTIME.md`) and the
 adjacent L3 shadow plan (locked decision Q3 in that doc).
 
-**Last refreshed:** post commit `dd52bf5` (L3 jsonwebtoken shadow).
+**Last refreshed:** post commit `ead2d7b` (B10 worker_threads).
 Regenerate by hand when a phase lands; `git log --oneline` is
 authoritative if this file drifts.
 
@@ -12,8 +12,8 @@ authoritative if this file drifts.
 
 ## Test count
 
-**216 tests pass workspace-wide** across the `afterburner` crate's
-17 integration-test files plus the other workspace crates' unit/
+**233 tests pass workspace-wide** across the `afterburner` crate's
+19 integration-test files plus the other workspace crates' unit /
 integration suites. Run the full matrix with:
 
 ```bash
@@ -22,7 +22,11 @@ cargo test -p afterburner --features bin,ts,shadow-bcrypt,shadow-argon2,shadow-j
 ```
 
 The plugin is excluded from `cargo test --workspace` because it
-targets `wasm32-wasip1`; rebuild it via `afterburner-plugin/build.sh`.
+targets `wasm32-wasip1` (it can't even compile on the host triple —
+`javy-plugin-api` assumes a WASI environment). It carries no unit
+tests of its own; its behavior is exercised end-to-end by the host
+crates' tests that load the committed `.wasm`. Rebuild it via
+`afterburner-plugin/build.sh` when polyfills or extern decls change.
 
 ---
 
@@ -42,6 +46,7 @@ targets `wasm32-wasip1`; rebuild it via `afterburner-plugin/build.sh`.
 | **B6** — CommonJS `require(pkg)` + `node_modules` walk | `require('./lib')`, `require('pkg')` walk up; `package.json "main"`; `.json` auto-parse; per-module `__dirname` scoping; cyclic partial-exports | ✅ | `f81510a` | 21 |
 | **B8** — TypeScript via oxc (strip-types) | `burn foo.ts` / `.mts` / `.cts` transpile transparently; `.tsx` rejected | ✅ | `be560ad` | 13 |
 | **B9** — ESM → CJS transform | `import X from 'Y'` / `export default X` / named exports / re-exports work in `.mjs` / `.ts` | ✅ | `c7090b2` | 18 |
+| **B10** — `worker_threads` minimal subset | Process-per-worker via `burn run --internal-worker`; length-prefixed JSON IPC; `Worker(path,{workerData})` / `worker.{postMessage,terminate,on('message'\|'online'\|'error'\|'exit')}` / `parentPort.{postMessage,on('message'),close}` / `isMainThread` / `threadId`; capability inheritance never widens; `BURN_WORKER_DEPTH` cap; Linux `PR_SET_PDEATHSIG=SIGKILL`; lock-free runtime (HopscotchMap + kovan_channel) | ✅ | `ead2d7b` | 16 |
 
 ### L3 shadows — pure-Rust substitutes for native-addon npm packages
 
@@ -69,12 +74,6 @@ extern + plugin JS global.
 | **B7 — `fs/promises` expansion** | `watch`, `realpath`, `cp`, `opendir`, file-descriptor APIs | File-watcher scripts, complex fs scripts |
 | **B7 — `dns` expansion** | `dns.resolveMx`, `dns.resolveTxt`, reverse lookup, cache control | Mail servers, service discovery |
 | **B7 — `child_process` for WASM** | WASM-side `spawn` / `exec` — currently native-only (WASM can't `fork(2)`; would need a host proxy) | Scripts that orchestrate subprocesses under the sandbox |
-
-### Niche
-
-| Phase | Scope | Gate |
-|:--|:--|:--|
-| **B10 — `worker_threads` minimal subset** | Multi-process / cluster-style parallelism | Apps that spawn sibling node processes |
 
 ### More L3 shadows
 
@@ -141,7 +140,7 @@ Build the CLI with everything: `cargo install afterburner
 | `require('bcrypt')` / `require('argon2')` / `require('jsonwebtoken')` inside WASM | ✅ |
 | Password hashing in a request handler | ✅ |
 | Issuing + verifying JWTs in auth middleware | ✅ |
+| `new Worker('./bg.js', { workerData })` with `postMessage` round-trip | ✅ |
 | **Database drivers (`pg`, `redis`, `mongodb`)** | ❌ — needs B7 `net` |
-| **Parallel worker threads** | ❌ — B10 |
 | **Raw TCP protocol clients** | ❌ — needs B7 `net` |
 | **File watchers / `fs.watch`** | ❌ — partial `fs/promises` expansion pending |
