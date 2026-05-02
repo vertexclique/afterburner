@@ -665,6 +665,106 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
             unsafe { host_tls_close_server(server_id as i32) as f64 }
         }),
     );
+
+    // ---- L3 shadow: sqlite3 -----------------------------------------
+    //
+    // Db ids are i64 host-side; JS represents them as f64 (Number)
+    // which exactly preserves any integer up to 2^53. We never reach
+    // that — ids increment one per `new Database(...)` and the
+    // process recycles long before we run out.
+    //
+    // `run` / `get` / `all` return JSON strings via `call_read`
+    // (auto-doubling buffer up to 16 MiB). On failure they return
+    // `__HOST_ERR__:<msg>` — same convention as the dns + os
+    // bridges.
+    let _ = globals.set(
+        "__host_shadow_sqlite3_open",
+        Func::from(|path: String| -> f64 {
+            let pb = path.as_bytes();
+            unsafe { host_shadow_sqlite3_open(pb.as_ptr(), pb.len() as u32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_shadow_sqlite3_run",
+        Func::from(|id: f64, sql: String, params_json: String| -> String {
+            let id = id as i64;
+            let sb = sql.as_bytes();
+            let pb = params_json.as_bytes();
+            match call_read(|out, cap| unsafe {
+                host_shadow_sqlite3_run(
+                    id,
+                    sb.as_ptr(),
+                    sb.len() as u32,
+                    pb.as_ptr(),
+                    pb.len() as u32,
+                    out,
+                    cap,
+                )
+            }) {
+                Ok(s) => s,
+                Err(e) => alloc::format!("__HOST_ERR__:{e}"),
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_shadow_sqlite3_get",
+        Func::from(|id: f64, sql: String, params_json: String| -> String {
+            let id = id as i64;
+            let sb = sql.as_bytes();
+            let pb = params_json.as_bytes();
+            match call_read(|out, cap| unsafe {
+                host_shadow_sqlite3_get(
+                    id,
+                    sb.as_ptr(),
+                    sb.len() as u32,
+                    pb.as_ptr(),
+                    pb.len() as u32,
+                    out,
+                    cap,
+                )
+            }) {
+                Ok(s) => s,
+                Err(e) => alloc::format!("__HOST_ERR__:{e}"),
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_shadow_sqlite3_all",
+        Func::from(|id: f64, sql: String, params_json: String| -> String {
+            let id = id as i64;
+            let sb = sql.as_bytes();
+            let pb = params_json.as_bytes();
+            match call_read(|out, cap| unsafe {
+                host_shadow_sqlite3_all(
+                    id,
+                    sb.as_ptr(),
+                    sb.len() as u32,
+                    pb.as_ptr(),
+                    pb.len() as u32,
+                    out,
+                    cap,
+                )
+            }) {
+                Ok(s) => s,
+                Err(e) => alloc::format!("__HOST_ERR__:{e}"),
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_shadow_sqlite3_exec",
+        Func::from(|id: f64, sql: String| -> f64 {
+            let id = id as i64;
+            let sb = sql.as_bytes();
+            unsafe { host_shadow_sqlite3_exec(id, sb.as_ptr(), sb.len() as u32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_shadow_sqlite3_close",
+        Func::from(|id: f64| -> f64 {
+            let id = id as i64;
+            unsafe { host_shadow_sqlite3_close(id) as f64 }
+        }),
+    );
 }
 
 fn install_os<'js>(globals: &Object<'js>) {

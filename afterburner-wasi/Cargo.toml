@@ -34,6 +34,7 @@ daemon = [
 shadow-bcrypt = ["afterburner-node-compat/shadow-bcrypt"]
 shadow-argon2 = ["afterburner-node-compat/shadow-argon2"]
 shadow-jsonwebtoken = ["afterburner-node-compat/shadow-jsonwebtoken"]
+shadow-sqlite3 = ["afterburner-node-compat/shadow-sqlite3"]
 
 [dependencies]
 afterburner-core.workspace = true

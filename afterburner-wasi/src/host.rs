@@ -87,6 +87,15 @@ pub struct HostState {
     /// tokio-backed (and pulls in `tokio-rustls`).
     #[cfg(feature = "daemon")]
     pub daemon_tls: Option<Arc<crate::daemon_tls::DaemonTls>>,
+    /// Per-thrust SQLite shadow registry. Each opened
+    /// `new sqlite3.Database(...)` runs in its own worker thread
+    /// owned by this store; the field is just the lookup table that
+    /// maps db ids to per-conn command senders. Always-present (no
+    /// Option wrapper) because the registry is cheap to construct
+    /// and the host import paths can return a clean "unknown id"
+    /// error without coordinator-presence checks.
+    #[cfg(feature = "shadow-sqlite3")]
+    pub sqlite3_shadow: Arc<afterburner_node_compat::shadows::sqlite3::SqliteShadow>,
     /// Host-managed timers registered by `setTimeout`/`setInterval` in
     /// daemon mode via the `__host_timer_set` import. Empty for one-shot
     /// UDF / script paths.
@@ -157,6 +166,10 @@ impl HostState {
             daemon_net: None,
             #[cfg(feature = "daemon")]
             daemon_tls: None,
+            #[cfg(feature = "shadow-sqlite3")]
+            sqlite3_shadow: Arc::new(
+                afterburner_node_compat::shadows::sqlite3::SqliteShadow::new(),
+            ),
             timers: Vec::new(),
             next_timer_id: 1,
             transpile_hook: None,

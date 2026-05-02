@@ -96,6 +96,14 @@ rustls-pemfile = "2"
 webpki-roots = "0.26"
 rcgen = "0.13"
 
+# L3 shadow for `sqlite3`. `bundled` compiles the SQLite C
+# amalgamation at build time and links it statically into the burn
+# binary — no runtime dependency on `libsqlite3.so`. The Rust crate
+# itself is the only public surface; the C is encapsulated. Gated
+# behind `shadow-sqlite3` so non-SQLite builds don't compile the
+# amalgamation (~2 MB compile-time cost).
+rusqlite = { version = "0.32", default-features = false, features = ["bundled"] }
+
 # B7 dns — `hickory-resolver` (formerly trust-dns-resolver) is the
 # canonical pure-Rust async DNS resolver. We use it synchronously
 # from a worker thread so the host-import boundary stays sync (the

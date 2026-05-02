@@ -27,3 +27,6 @@ pub mod argon2;
 
 #[cfg(feature = "shadow-jsonwebtoken")]
 pub mod jsonwebtoken;
+
+#[cfg(feature = "shadow-sqlite3")]
+pub mod sqlite3;

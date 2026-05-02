@@ -59,6 +59,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_workers(linker)?;
     wrap_net(linker)?;
     wrap_tls(linker)?;
+    wrap_shadow_sqlite3(linker)?;
     Ok(())
 }
 
@@ -3287,6 +3288,317 @@ fn parse_tls_connect_opts(json: &str) -> crate::daemon_tls::ConnectOptions {
         out.ca_pem = s.to_string();
     }
     out
+}
+
+// ---- shadow: sqlite3 (L3) -----------------------------------------------
+//
+// Six host imports back the polyfill:
+//
+//   __host_shadow_sqlite3_open(path)             -> db_id (i64) | -1
+//   __host_shadow_sqlite3_run(id, sql, params)   -> JSON {lastID,changes} | "__HOST_ERR__:..."
+//   __host_shadow_sqlite3_get(id, sql, params)   -> JSON row | "null" | "__HOST_ERR__:..."
+//   __host_shadow_sqlite3_all(id, sql, params)   -> JSON array | "__HOST_ERR__:..."
+//   __host_shadow_sqlite3_exec(id, sql)          -> 0 | -1
+//   __host_shadow_sqlite3_close(id)              -> 0 | -1
+//
+// The path/SQL/params arguments cross as memory ptr+len pairs; the
+// JSON outputs cross via the `(out_ptr, out_cap)` write_out
+// convention shared with the rest of this file.
+
+fn wrap_shadow_sqlite3(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    linker
+        .func_wrap(
+            NS,
+            "host_shadow_sqlite3_open",
+            #[allow(unused_variables)]
+            |mut caller: Caller<'_, HostState>, path_ptr: i32, path_len: i32| -> i64 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return -1;
+                };
+                let Some(path) = read_str(&memory, &caller, path_ptr, path_len) else {
+                    return -1;
+                };
+                #[cfg(feature = "shadow-sqlite3")]
+                {
+                    let shadow = caller.data().sqlite3_shadow.clone();
+                    match shadow.open(&path) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            caller.data_mut().last_error = e.to_string();
+                            -1
+                        }
+                    }
+                }
+                #[cfg(not(feature = "shadow-sqlite3"))]
+                {
+                    let _ = path;
+                    caller.data_mut().last_error =
+                        "shadow-sqlite3 feature not enabled".into();
+                    -1
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    #[cfg(feature = "shadow-sqlite3")]
+    fn write_json_or_err(
+        caller: &mut Caller<'_, HostState>,
+        memory: &Memory,
+        out_ptr: i32,
+        out_cap: i32,
+        json: &serde_json::Value,
+    ) -> i32 {
+        let s = serde_json::to_string(json).unwrap_or_else(|_| "null".into());
+        write_out(caller, memory, out_ptr, out_cap, s.as_bytes())
+    }
+
+    #[cfg(feature = "shadow-sqlite3")]
+    fn parse_params(s: &str) -> Result<Vec<serde_json::Value>, AfterburnerError> {
+        let v: serde_json::Value = serde_json::from_str(s).map_err(|e| {
+            AfterburnerError::Host(format!("sqlite3: params JSON parse: {e}"))
+        })?;
+        match v {
+            serde_json::Value::Array(arr) => Ok(arr),
+            _ => Err(AfterburnerError::Host(
+                "sqlite3: params must be a JSON array".into(),
+            )),
+        }
+    }
+
+    linker
+        .func_wrap(
+            NS,
+            "host_shadow_sqlite3_run",
+            #[allow(unused_variables)]
+            |mut caller: Caller<'_, HostState>,
+             id: i64,
+             sql_ptr: i32,
+             sql_len: i32,
+             params_ptr: i32,
+             params_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(sql) = read_str(&memory, &caller, sql_ptr, sql_len) else {
+                    return E_OTHER;
+                };
+                let Some(params_raw) = read_str(&memory, &caller, params_ptr, params_len)
+                else {
+                    return E_OTHER;
+                };
+                #[cfg(feature = "shadow-sqlite3")]
+                {
+                    let params = match parse_params(&params_raw) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            caller.data_mut().last_error = e.to_string();
+                            return E_OTHER;
+                        }
+                    };
+                    let shadow = caller.data().sqlite3_shadow.clone();
+                    match shadow.run(id, &sql, params) {
+                        Ok(r) => {
+                            let v = serde_json::json!({
+                                "lastID": r.last_insert_rowid,
+                                "changes": r.changes,
+                            });
+                            write_json_or_err(&mut caller, &memory, out_ptr, out_cap, &v)
+                        }
+                        Err(e) => {
+                            caller.data_mut().last_error = e.to_string();
+                            E_OTHER
+                        }
+                    }
+                }
+                #[cfg(not(feature = "shadow-sqlite3"))]
+                {
+                    let _ = (id, sql, params_raw, out_ptr, out_cap);
+                    caller.data_mut().last_error =
+                        "shadow-sqlite3 feature not enabled".into();
+                    E_OTHER
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_shadow_sqlite3_get",
+            #[allow(unused_variables)]
+            |mut caller: Caller<'_, HostState>,
+             id: i64,
+             sql_ptr: i32,
+             sql_len: i32,
+             params_ptr: i32,
+             params_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(sql) = read_str(&memory, &caller, sql_ptr, sql_len) else {
+                    return E_OTHER;
+                };
+                let Some(params_raw) = read_str(&memory, &caller, params_ptr, params_len)
+                else {
+                    return E_OTHER;
+                };
+                #[cfg(feature = "shadow-sqlite3")]
+                {
+                    let params = match parse_params(&params_raw) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            caller.data_mut().last_error = e.to_string();
+                            return E_OTHER;
+                        }
+                    };
+                    let shadow = caller.data().sqlite3_shadow.clone();
+                    match shadow.get(id, &sql, params) {
+                        Ok(opt) => {
+                            let v = opt.unwrap_or(serde_json::Value::Null);
+                            write_json_or_err(&mut caller, &memory, out_ptr, out_cap, &v)
+                        }
+                        Err(e) => {
+                            caller.data_mut().last_error = e.to_string();
+                            E_OTHER
+                        }
+                    }
+                }
+                #[cfg(not(feature = "shadow-sqlite3"))]
+                {
+                    let _ = (id, sql, params_raw, out_ptr, out_cap);
+                    caller.data_mut().last_error =
+                        "shadow-sqlite3 feature not enabled".into();
+                    E_OTHER
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_shadow_sqlite3_all",
+            #[allow(unused_variables)]
+            |mut caller: Caller<'_, HostState>,
+             id: i64,
+             sql_ptr: i32,
+             sql_len: i32,
+             params_ptr: i32,
+             params_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(sql) = read_str(&memory, &caller, sql_ptr, sql_len) else {
+                    return E_OTHER;
+                };
+                let Some(params_raw) = read_str(&memory, &caller, params_ptr, params_len)
+                else {
+                    return E_OTHER;
+                };
+                #[cfg(feature = "shadow-sqlite3")]
+                {
+                    let params = match parse_params(&params_raw) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            caller.data_mut().last_error = e.to_string();
+                            return E_OTHER;
+                        }
+                    };
+                    let shadow = caller.data().sqlite3_shadow.clone();
+                    match shadow.all(id, &sql, params) {
+                        Ok(rows) => {
+                            let v = serde_json::Value::Array(rows);
+                            write_json_or_err(&mut caller, &memory, out_ptr, out_cap, &v)
+                        }
+                        Err(e) => {
+                            caller.data_mut().last_error = e.to_string();
+                            E_OTHER
+                        }
+                    }
+                }
+                #[cfg(not(feature = "shadow-sqlite3"))]
+                {
+                    let _ = (id, sql, params_raw, out_ptr, out_cap);
+                    caller.data_mut().last_error =
+                        "shadow-sqlite3 feature not enabled".into();
+                    E_OTHER
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_shadow_sqlite3_exec",
+            #[allow(unused_variables)]
+            |mut caller: Caller<'_, HostState>, id: i64, sql_ptr: i32, sql_len: i32| -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(sql) = read_str(&memory, &caller, sql_ptr, sql_len) else {
+                    return E_OTHER;
+                };
+                #[cfg(feature = "shadow-sqlite3")]
+                {
+                    let shadow = caller.data().sqlite3_shadow.clone();
+                    match shadow.exec(id, &sql) {
+                        Ok(()) => 0,
+                        Err(e) => {
+                            caller.data_mut().last_error = e.to_string();
+                            E_OTHER
+                        }
+                    }
+                }
+                #[cfg(not(feature = "shadow-sqlite3"))]
+                {
+                    let _ = (id, sql);
+                    caller.data_mut().last_error =
+                        "shadow-sqlite3 feature not enabled".into();
+                    E_OTHER
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_shadow_sqlite3_close",
+            #[allow(unused_variables)]
+            |mut caller: Caller<'_, HostState>, id: i64| -> i32 {
+                #[cfg(feature = "shadow-sqlite3")]
+                {
+                    let shadow = caller.data().sqlite3_shadow.clone();
+                    match shadow.close(id) {
+                        Ok(()) => 0,
+                        Err(e) => {
+                            caller.data_mut().last_error = e.to_string();
+                            E_OTHER
+                        }
+                    }
+                }
+                #[cfg(not(feature = "shadow-sqlite3"))]
+                {
+                    let _ = id;
+                    caller.data_mut().last_error =
+                        "shadow-sqlite3 feature not enabled".into();
+                    E_OTHER
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    Ok(())
 }
 
 // ---- helpers -------------------------------------------------------------

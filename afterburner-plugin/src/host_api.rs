@@ -603,4 +603,47 @@ unsafe extern "C" {
         key_len: u32,
     ) -> i32;
     pub fn host_tls_close_server(server_id: i32) -> i32;
+
+    // ---- L3 shadow: sqlite3 -----------------------------------------
+    //
+    // `open` returns the new db id (i64, ≥1) or -1 on failure. The
+    // worker thread that owns the SQLite Connection lives until
+    // `close` is invoked.
+    //
+    // `run` / `get` / `all` write a JSON-encoded result into
+    // `(out_ptr, out_cap)` and return the byte length, or `E_OTHER`
+    // on failure. `exec` and `close` return 0 on success / -1 on
+    // failure. Parameters arrive as a JSON array; result rows leave
+    // as JSON objects (keyed by SQLite column names). Blobs travel
+    // both directions as `{"$blob_b64": "..."}` markers.
+    pub fn host_shadow_sqlite3_open(path_ptr: *const u8, path_len: u32) -> i64;
+    pub fn host_shadow_sqlite3_run(
+        id: i64,
+        sql_ptr: *const u8,
+        sql_len: u32,
+        params_ptr: *const u8,
+        params_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_shadow_sqlite3_get(
+        id: i64,
+        sql_ptr: *const u8,
+        sql_len: u32,
+        params_ptr: *const u8,
+        params_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_shadow_sqlite3_all(
+        id: i64,
+        sql_ptr: *const u8,
+        sql_len: u32,
+        params_ptr: *const u8,
+        params_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_shadow_sqlite3_exec(id: i64, sql_ptr: *const u8, sql_len: u32) -> i32;
+    pub fn host_shadow_sqlite3_close(id: i64) -> i32;
 }

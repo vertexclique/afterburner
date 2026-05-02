@@ -4,7 +4,7 @@ Source of truth for what's shipped vs. what's left in the
 `burn` runtime plan (`docs/IMPL_PLAN_BURN_RUNTIME.md`) and the
 adjacent L3 shadow plan (locked decision Q3 in that doc).
 
-**Last refreshed:** post B7 dns (record-type-aware resolvers).
+**Last refreshed:** post L3 sqlite3 shadow (`require('sqlite3')`).
 Regenerate by hand when a phase lands; `git log --oneline` is
 authoritative if this file drifts.
 
@@ -12,10 +12,11 @@ authoritative if this file drifts.
 
 ## Test count
 
-**282 tests pass workspace-wide** across the `afterburner` crate's
-24 integration-test files plus the other workspace crates' unit /
+**333 tests pass workspace-wide** across the `afterburner` crate's
+25 integration-test files plus the other workspace crates' unit /
 integration suites (incl. 6 lock-free `DaemonNet` + 6 `DaemonTls`
-+ 5 `dns_host` unit tests). Run the full matrix with:
++ 5 `dns_host` + 28 `SqliteShadow` unit tests). Run the full
+matrix with:
 
 ```bash
 cargo test --workspace --exclude afterburner-plugin
@@ -64,6 +65,7 @@ extern + plugin JS global.
 | `bcrypt` | hash/compare/genSalt (+Sync +async dual shape) | ✅ | `5b5cd25` | 11 |
 | `argon2` | hash/verify/needsRehash with Argon2id/i/d variants | ✅ | `3c5bd8d` | 9 |
 | `jsonwebtoken` | sign/verify/decode with HS/RS/ES/PS/EdDSA algorithms | ✅ | `dd52bf5` | 15 |
+| `sqlite3` | Database / run / get / all / each / exec / close — npm `sqlite3` v5 callback API. Backed by `rusqlite` with `bundled` (SQLite C amalgamation **statically linked into the burn binary**, single-binary deploy, no `libsqlite3.so` runtime dep). Per-connection actor thread (kovan_channel commands + bounded(1) replies) keeps the registry lock-free even though `rusqlite::Connection` is `!Sync`. Buffer round-trips through a `{$blob_b64: ...}` marker. | ✅ | _this commit_ | 28+23 |
 
 ---
 
@@ -78,13 +80,76 @@ extern + plugin JS global.
 
 ### More L3 shadows
 
-The three password/auth primitives cover the highest-frequency
-cases. Remaining L3 targets from the plan:
+**What L3 shadows are.** Burn runs JS inside a WASM sandbox; WASM
+cannot load `.node` files (raw native machine code — loading one
+defeats the sandbox). But many top npm packages ship `.node` addons
+because the pure-JS implementation is too slow or pulls in
+non-portable C++. Without intervention, `require('bcrypt')` inside
+the sandbox fails and the user's existing Node code breaks.
 
-| Package | Backing crate | Complexity |
+The L3 fix intercepts `require('<pkg>')` at resolve time and routes
+to a thin JS-side adapter that presents the same npm API surface,
+**backed by an already-existing Rust crate** through host imports.
+We do **not** reimplement SQLite, libvips, etc. — we shim the npm
+package's JS API onto crates like `rusqlite` (which embeds the real
+SQLite C library, compiled statically into the burn binary at build
+time) and `image` (pure Rust decoding/encoding).
+
+#### Why we cannot run `.node` addons inside the sandbox
+
+This is a hard architectural constraint, not a policy choice:
+
+* `.node` files are **arch-specific native machine code** (x86_64 /
+  arm64 ELF on Linux, Mach-O on macOS). They load via `dlopen`.
+* The WASM sandbox executes WASM bytecode. There is no path that runs
+  native instructions inside the sandbox — the CPU/ISA simply doesn't
+  match. Even with a full x86-emulator-in-WASM, the addon expects to
+  call libc + kernel syscalls; the sandbox surface (WASI) is far
+  smaller than libc.
+* The same constraint is why **Cloudflare Workers and Vercel Edge
+  Functions explicitly do not support `.node` addons**. Deno and Bun
+  load them in their *main* process (no sandbox boundary). Nobody
+  runs untrusted `.node` files inside a WASM sandbox in production.
+* The only realistic "yes" path is a separate process with its own
+  OS-level sandbox (seccomp + landlock + namespaces on Linux), running
+  a Node-API-compatible runtime, with IPC every C-ABI call from the
+  WASM side. That's a substantial new subsystem with its own threat
+  model — not in scope here.
+
+#### Scope cutoff
+
+Four primitives shipped (`bcrypt`, `argon2`, `jsonwebtoken`,
+`sqlite3`). Remaining shadows on the launch list:
+
+| Package | Backing crate | Status |
 |:--|:--|:--|
-| `sqlite3` | `rusqlite` | Medium — needs persistent connection handle map (statement prepare + step + finalize lifecycle), streaming row fetches |
-| `sharp` | `image` + `fast_image_resize` | High — huge API surface (resize, format conversion, composition, metadata) |
+| `sharp` | `image` + `fast_image_resize` (both 100% pure Rust) | Pending |
+
+**After sharp ships, we stop adding shadows.** Anything beyond the
+launch list goes through one of these escape hatches:
+
+| Need | What to use |
+|:--|:--|
+| The npm package has an official or community **WASM build** | The future WASM-npm-loader (see fast-follows below) — burn loads it natively as a WASM module, no shadow code needed |
+| The package has a **pure-JS alternative** that's "good enough" | Use the alternative. Examples: `bcryptjs` instead of `bcrypt`, `jsbn` instead of native big-int helpers, `crypto-js` for many crypto primitives. |
+| The package only ships as `.node` and has no WASM build | Not supported. Same boundary as Cloudflare Workers / Vercel Edge. |
+
+### Polish / follow-ups on already-shipped phases
+
+Smaller items that aren't full new phases — refinements to features
+that are functional today but have stable stub behavior at one or
+two seams.
+
+| Area | Item | Size | Today |
+|:--|:--|:-:|:--|
+| **B7 tls** | `socket.getPeerCertificate()` returns the real chain | S | Returns `{}`. `rustls::ConnectionCommon::peer_certificates()` exposes the DER chain. |
+| **B7 tls** | `socket.getCipher()` returns the real negotiated suite | S | Returns `{name: 'unknown'}`. rustls' negotiated suite is reachable post-handshake. |
+| **B7 tls** | Server-side SNI multi-cert routing (cert callback) | M | `tls.createServer` takes one `cert`/`key` pair; SNI dispatch needs a `ServerName → ServerConfig` map (rustls `ResolvesServerCert`). |
+| **B7 dns** | `Resolver.setServers([...])` actually plumbs through to hickory | S | Stable no-op stub today. Wire into hickory's `ResolverConfig::add_name_server`. |
+| **B7 net** | `socket.setNoDelay` / `setKeepAlive` actually toggle the flags | S | Best-effort no-op. Plumb via `socket2` once we own the raw `TcpStream`. |
+| **B6 require** | `Resolver` cache control / TTLs surface to JS | S | Internal cache works; not user-visible. |
+| **A11 — ergonomics** | `process.binding(*)` clear-error messages | XS | Today: `ERR_NOT_SUPPORTED_IN_SANDBOX` generically; could carry which binding was asked for. |
+| **L3 long tail** | **WASM-npm-loader** — generic loader for WASM-shipped npm packages | M | Detects when a require resolves to a WASM-built npm package (e.g. `sql.js`, `@jsquash/*`, `libheif-js`), instantiates the WASM module via wasmtime alongside the main JS sandbox, bridges its exports to the calling JS. Built **once**; every WASM-built npm package then works without per-package shadow code. This is the architectural escape hatch for everything beyond the L3 launch list. |
 
 ---
 
@@ -138,7 +203,7 @@ Build the CLI with everything: `cargo install afterburner
 | `burn npm install X` (real npm routes `node` via PATH shim) | ✅ |
 | `burn node foo.js` / `burn npx X` / `burn pnpm X` / `burn yarn X` / `burn bun X` | ✅ |
 | `process.exit(n)` / SIGINT / `setInterval` / `.unref()` | ✅ |
-| `require('bcrypt')` / `require('argon2')` / `require('jsonwebtoken')` inside WASM | ✅ |
+| `require('bcrypt')` / `require('argon2')` / `require('jsonwebtoken')` / `require('sqlite3')` inside WASM | ✅ |
 | Password hashing in a request handler | ✅ |
 | Issuing + verifying JWTs in auth middleware | ✅ |
 | `new Worker('./bg.js', { workerData })` with `postMessage` round-trip | ✅ |
