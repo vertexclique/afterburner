@@ -3,6 +3,8 @@
 //! memory, and wall-clock caps.
 
 pub mod daemon_http;
+#[cfg(feature = "daemon")]
+pub mod daemon_net;
 pub mod daemon_runtime;
 pub mod daemon_workers;
 pub mod host;
@@ -14,6 +16,8 @@ pub mod test_support;
 pub mod wasm_engine;
 
 pub use daemon_http::{DaemonHttp, ReplyEnvelope};
+#[cfg(feature = "daemon")]
+pub use daemon_net::{DaemonNet, NetEvent};
 pub use daemon_runtime::DaemonRuntime;
 pub use daemon_workers::{DaemonWorkers, WorkerConfig, WorkerEvent};
 pub use manifold_codec::manifold_to_cli_args;

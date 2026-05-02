@@ -1,16 +1,19 @@
 // Stub modules that throw a helpful NotSupportedInSandbox error on any
-// property access. Registering them means `require('net')` returns an
-// object instead of `Cannot find module 'net'` — scripts get a clear
+// property access. Registering them means `require('tls')` returns an
+// object instead of `Cannot find module 'tls'` — scripts get a clear
 // signal about what's unsupported and why.
+//
+// Only list modules that have NO real polyfill. Bundle concat order is
+// alphabetical, so anything listed here would clobber a real polyfill
+// whose filename sorts before `stubs.js` (e.g. `net.js`). `net` and
+// `worker_threads` ship real polyfills and are intentionally absent.
 
 (function installStubs() {
     var reasons = {
-        net: 'raw TCP sockets',
         tls: 'raw TLS sockets',
         dgram: 'UDP sockets',
         http2: 'HTTP/2 (plain http/https works for outbound requests)',
         cluster: 'multi-process clustering',
-        worker_threads: 'additional JavaScript threads',
         inspector: 'Node inspector protocol',
         vm: 'nested VM contexts',
         v8: 'V8-specific APIs',

@@ -457,9 +457,11 @@ fn wasm_abort_controller() {
 
 #[test]
 fn wasm_stubs_give_clear_error() {
+    // `worker_threads` and `net` graduated to real polyfills (B10 /
+    // B7); `tls` is still a sandbox stub.
     let src = r#"
         module.exports = () => {
-            try { require('worker_threads').Worker; return 'unexpected'; }
+            try { require('tls').connect; return 'unexpected'; }
             catch (e) { return e.code; }
         };
     "#;

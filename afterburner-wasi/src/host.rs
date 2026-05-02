@@ -75,6 +75,13 @@ pub struct HostState {
     /// a clear "not in daemon mode" error rather than silently
     /// spawning a process from the library API.
     pub daemon_workers: Option<Arc<crate::daemon_workers::DaemonWorkers>>,
+    /// Optional `net` (raw TCP) coordinator. `Some` in daemon mode;
+    /// `None` everywhere else — `net.connect` / `net.createServer`
+    /// then surface a clear "requires daemon mode" error rather than
+    /// silently spawning sockets from the library API. Gated behind
+    /// the `daemon` feature because the coordinator is tokio-backed.
+    #[cfg(feature = "daemon")]
+    pub daemon_net: Option<Arc<crate::daemon_net::DaemonNet>>,
     /// Host-managed timers registered by `setTimeout`/`setInterval` in
     /// daemon mode via the `__host_timer_set` import. Empty for one-shot
     /// UDF / script paths.
@@ -141,6 +148,8 @@ impl HostState {
             pending_envelope: Vec::new(),
             daemon_http: None,
             daemon_workers: None,
+            #[cfg(feature = "daemon")]
+            daemon_net: None,
             timers: Vec::new(),
             next_timer_id: 1,
             transpile_hook: None,

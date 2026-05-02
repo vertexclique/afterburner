@@ -2201,6 +2201,575 @@ function __plenum_install_http(moduleName) {
 __plenum_install_http('http');
 __plenum_install_http('https');
 
+// ---- net.js ----
+// net — raw TCP polyfill (B7).
+//
+// `Socket` is the JS-side façade for a host-owned `tokio::TcpStream`.
+// Operations cross into Rust via `__host_net_*` imports; inbound
+// bytes / lifecycle events arrive via the daemon-event dispatcher
+// as `{kind:"net-..."}` envelopes. The dispatcher routes them
+// through `__ab_net_handlers[conn_id]` and
+// `__ab_net_server_handlers[server_id]`.
+//
+// API coverage (minimum-viable for real DB drivers):
+//
+//   net.connect / net.createConnection
+//     ({port, host}[, listener])
+//     (port[, host][, listener])
+//   socket.{write, end, destroy, setNoDelay, setKeepAlive, setTimeout,
+//           address, remoteAddress, remotePort, localAddress, localPort,
+//           bytesRead, bytesWritten, destroyed, connecting, readable,
+//           writable, pause, resume, on('data'|'end'|'close'|'error'|
+//           'connect'|'drain'|'timeout')}
+//   net.createServer([options][, connectionListener])
+//   server.{listen, close, address, getConnections,
+//            on('listening'|'connection'|'close'|'error')}
+//   net.{isIP, isIPv4, isIPv6}
+//
+// Deferred (will throw a clear error if used):
+//   - Unix-domain sockets (path-based listen/connect)
+//   - net.BlockList
+//   - socket.setEncoding (callers should decode bytes themselves)
+//   - allowHalfOpen option on Server (always allowed by default)
+
+(function bootstrapNetGlobals() {
+    if (!globalThis.__ab_net_handlers) globalThis.__ab_net_handlers = {};
+    if (!globalThis.__ab_net_server_handlers) globalThis.__ab_net_server_handlers = {};
+})();
+
+__register_module('net', function(module, exports, require) {
+    var EventEmitter = require('events').EventEmitter;
+    var Buffer = require('buffer').Buffer;
+
+    // ----- error mapping --------------------------------------------
+
+    function mapHostErrorCode(rc) {
+        switch (rc) {
+            case -1: return 'ENO_DAEMON';
+            case -2: return 'EACCES';
+            case -3: return 'ENOTFOUND';
+            case -4: return 'EINVAL';
+            case -5: return 'EINVAL';
+            case -6: return 'EINVAL';
+            default: return 'EOTHER';
+        }
+    }
+
+    function makeError(rc, prefix) {
+        var detail = '';
+        if (typeof globalThis.__host_last_error === 'function') {
+            detail = globalThis.__host_last_error();
+        }
+        var code = mapHostErrorCode(rc);
+        var e = new Error(prefix + ': ' + (detail || ('rc=' + rc)));
+        e.code = code;
+        return e;
+    }
+
+    // ----- Socket ----------------------------------------------------
+
+    function Socket(opts) {
+        if (!(this instanceof Socket)) return new Socket(opts);
+        EventEmitter.call(this);
+        opts = opts || {};
+
+        // Internal state
+        this._connId = 0;            // 0 until connect / accept binds it
+        this._connecting = false;
+        this._destroyed = false;
+        // Separate from `_destroyed` so the host's terminal Close event
+        // can still emit `'close'` after a user-initiated destroy(). The
+        // destroy path flips `_destroyed` synchronously to make
+        // `socket.destroyed === true` observable from inside the
+        // 'close' listener (Node-compat).
+        this._closeEmitted = false;
+        this._readable = true;
+        this._writable = true;
+        this._wantsDrain = false;    // true after write() returned false
+        this._pendingHWM = 64 * 1024;
+        this.bytesRead = 0;
+        this.bytesWritten = 0;
+        this.remoteAddress = undefined;
+        this.remotePort = undefined;
+        this.remoteFamily = undefined;
+        this.localAddress = undefined;
+        this.localPort = undefined;
+
+        this._timeoutMs = 0;
+        this._timeoutHandle = null;
+
+        // Ready-state mirrors Node's. Set as connect/end/close fire.
+        this.readyState = 'opening';
+    }
+    Socket.prototype = Object.create(EventEmitter.prototype);
+    Socket.prototype.constructor = Socket;
+
+    // Internal: bind a host-allocated conn_id to this socket and
+    // register so daemon-event dispatch can find us.
+    Socket.prototype._attach = function(connId) {
+        if (this._connId) {
+            // Should never happen unless a caller reuses a Socket.
+            throw new Error('net.Socket already attached to conn ' + this._connId);
+        }
+        this._connId = connId | 0;
+        globalThis.__ab_net_handlers[this._connId] = this;
+    };
+
+    Socket.prototype._dispatchConnect = function(local, remote) {
+        this._connecting = false;
+        this.readyState = 'open';
+        this.localAddress = local && local.address;
+        this.localPort = local && local.port;
+        this.remoteAddress = remote && remote.address;
+        this.remotePort = remote && remote.port;
+        this.remoteFamily = remote && remote.family;
+        this._resetTimeout();
+        try { this.emit('connect'); } catch (_) {}
+        try { this.emit('ready'); } catch (_) {}
+    };
+
+    Socket.prototype._dispatchData = function(payloadB64) {
+        if (this._destroyed || !this._readable) return;
+        this._resetTimeout();
+        // Default: emit Buffer. Callers needing strings can call
+        // .setEncoding (deferred — they can also decode themselves).
+        var bytes;
+        try {
+            bytes = Buffer.from(payloadB64, 'base64');
+        } catch (_) {
+            return;
+        }
+        this.bytesRead += bytes.length;
+        try { this.emit('data', bytes); } catch (_) {}
+    };
+
+    Socket.prototype._dispatchEnd = function() {
+        if (!this._readable) return;
+        this._readable = false;
+        this.readyState = this._writable ? 'writeOnly' : 'closed';
+        try { this.emit('end'); } catch (_) {}
+    };
+
+    Socket.prototype._dispatchDrain = function() {
+        if (!this._wantsDrain) return;
+        this._wantsDrain = false;
+        try { this.emit('drain'); } catch (_) {}
+    };
+
+    Socket.prototype._dispatchError = function(message, code) {
+        var e = new Error(message || 'net error');
+        e.code = code || 'EOTHER';
+        try { this.emit('error', e); } catch (_) {}
+    };
+
+    Socket.prototype._dispatchClose = function(hadError) {
+        if (this._closeEmitted) return;
+        this._closeEmitted = true;
+        this._destroyed = true;
+        this._readable = false;
+        this._writable = false;
+        this.readyState = 'closed';
+        this._clearTimeout();
+        try { this.emit('close', !!hadError); } catch (_) {}
+        if (this._connId) {
+            delete globalThis.__ab_net_handlers[this._connId];
+        }
+    };
+
+    Socket.prototype.connect = function() {
+        // connect(port, host?, cb?) | connect({port, host}, cb?)
+        var args = Array.prototype.slice.call(arguments);
+        var opts;
+        var cb;
+        if (args.length && typeof args[args.length - 1] === 'function') {
+            cb = args.pop();
+        }
+        if (args.length === 1 && typeof args[0] === 'object' && args[0]) {
+            opts = args[0];
+        } else {
+            opts = { port: args[0], host: args[1] };
+        }
+        var port = opts.port | 0;
+        var host = opts.host || '127.0.0.1';
+        if (!port || port < 1 || port > 65535) {
+            throw new RangeError('net.connect: port out of range: ' + opts.port);
+        }
+        this._connecting = true;
+        this.readyState = 'opening';
+        var rc = globalThis.__host_net_connect(String(host), port);
+        if (rc < 0) {
+            var err = makeError(rc, 'net.connect');
+            // Defer the error event to a microtask so handlers added
+            // after connect() (the typical pattern) still fire.
+            var self = this;
+            Promise.resolve().then(function() {
+                self._connecting = false;
+                self._destroyed = true;
+                self.readyState = 'closed';
+                try { self.emit('error', err); } catch (_) {}
+                try { self.emit('close', true); } catch (_) {}
+            });
+            return this;
+        }
+        this._attach(rc);
+        if (cb) this.once('connect', cb);
+        return this;
+    };
+
+    Socket.prototype.write = function(data, encoding, cb) {
+        if (this._destroyed || !this._writable) {
+            if (cb) Promise.resolve().then(function() { cb(new Error('not writable')); });
+            return false;
+        }
+        if (typeof encoding === 'function') { cb = encoding; encoding = undefined; }
+
+        var b64;
+        if (Buffer.isBuffer(data)) {
+            b64 = data.toString('base64');
+        } else if (typeof data === 'string') {
+            b64 = Buffer.from(data, encoding || 'utf8').toString('base64');
+        } else if (data instanceof Uint8Array) {
+            b64 = Buffer.from(data).toString('base64');
+        } else {
+            var t = typeof data;
+            throw new TypeError('net.Socket.write: unsupported chunk type ' + t);
+        }
+
+        var rc = globalThis.__host_net_write(this._connId, b64);
+        if (rc < 0) {
+            var err = makeError(rc, 'net.write');
+            if (cb) cb(err);
+            try { this.emit('error', err); } catch (_) {}
+            return false;
+        }
+        // bytesWritten counts the raw bytes, not the base64 string.
+        var n = Buffer.isBuffer(data) ? data.length :
+                (typeof data === 'string' ? Buffer.byteLength(data, encoding || 'utf8') :
+                 (data && data.length) || 0);
+        this.bytesWritten += n;
+        this._resetTimeout();
+        if (cb) Promise.resolve().then(cb);
+
+        var pending = globalThis.__host_net_pending(this._connId) | 0;
+        if (pending >= this._pendingHWM) {
+            this._wantsDrain = true;
+            return false;
+        }
+        return true;
+    };
+
+    Socket.prototype.end = function(data, encoding, cb) {
+        if (typeof data === 'function') { cb = data; data = undefined; encoding = undefined; }
+        else if (typeof encoding === 'function') { cb = encoding; encoding = undefined; }
+        if (data !== undefined && data !== null) {
+            this.write(data, encoding);
+        }
+        this._writable = false;
+        if (this._connId && !this._destroyed) {
+            globalThis.__host_net_end(this._connId);
+        }
+        if (cb) this.once('close', cb);
+        return this;
+    };
+
+    Socket.prototype.destroy = function(err) {
+        if (this._destroyed) return this;
+        this._destroyed = true;
+        this._readable = false;
+        this._writable = false;
+        if (this._connId) {
+            globalThis.__host_net_destroy(this._connId);
+        }
+        if (err) {
+            try { this.emit('error', err); } catch (_) {}
+        }
+        return this;
+    };
+
+    Socket.prototype.setNoDelay = function(enable) {
+        if (this._connId) {
+            globalThis.__host_net_set_no_delay(this._connId, enable === false ? 0 : 1);
+        }
+        return this;
+    };
+
+    Socket.prototype.setKeepAlive = function(enable, initialDelay) {
+        if (this._connId) {
+            globalThis.__host_net_set_keep_alive(
+                this._connId,
+                enable ? 1 : 0,
+                (initialDelay | 0) || 0
+            );
+        }
+        return this;
+    };
+
+    Socket.prototype.setTimeout = function(timeout, cb) {
+        this._timeoutMs = timeout | 0;
+        if (cb) this.on('timeout', cb);
+        this._resetTimeout();
+        return this;
+    };
+
+    Socket.prototype._resetTimeout = function() {
+        this._clearTimeout();
+        if (this._timeoutMs > 0) {
+            var self = this;
+            this._timeoutHandle = setTimeout(function() {
+                try { self.emit('timeout'); } catch (_) {}
+            }, this._timeoutMs);
+        }
+    };
+
+    Socket.prototype._clearTimeout = function() {
+        if (this._timeoutHandle) {
+            clearTimeout(this._timeoutHandle);
+            this._timeoutHandle = null;
+        }
+    };
+
+    Socket.prototype.address = function() {
+        if (!this.localAddress) return {};
+        return {
+            address: this.localAddress,
+            family: this.remoteFamily ||
+                    (String(this.localAddress || '').indexOf(':') >= 0 ? 'IPv6' : 'IPv4'),
+            port: this.localPort,
+        };
+    };
+
+    Socket.prototype.pause = function() {
+        // Backpressure on the read side isn't wired in this minimum
+        // subset — host always pumps. This is a no-op so callers that
+        // call .pause() defensively don't crash.
+        return this;
+    };
+    Socket.prototype.resume = function() { return this; };
+    Socket.prototype.ref = function() { return this; };
+    Socket.prototype.unref = function() { return this; };
+    Socket.prototype.setEncoding = function() {
+        // Deferred: callers can decode bytes themselves from the
+        // Buffer instances we emit.
+        throw new Error('net.Socket.setEncoding is not supported in burn yet (decode bytes manually)');
+    };
+
+    Object.defineProperty(Socket.prototype, 'destroyed', {
+        get: function() { return this._destroyed; },
+    });
+    Object.defineProperty(Socket.prototype, 'connecting', {
+        get: function() { return this._connecting; },
+    });
+    Object.defineProperty(Socket.prototype, 'readable', {
+        get: function() { return this._readable; },
+    });
+    Object.defineProperty(Socket.prototype, 'writable', {
+        get: function() { return this._writable; },
+    });
+    Object.defineProperty(Socket.prototype, 'pending', {
+        get: function() {
+            if (!this._connId) return 0;
+            return globalThis.__host_net_pending(this._connId) | 0;
+        },
+    });
+
+    // ----- Server ----------------------------------------------------
+
+    function Server(opts, connectionListener) {
+        if (!(this instanceof Server)) return new Server(opts, connectionListener);
+        EventEmitter.call(this);
+        if (typeof opts === 'function') {
+            connectionListener = opts;
+            opts = {};
+        }
+        this._serverId = 0;
+        this._listening = false;
+        this._closed = false;
+        this._port = 0;
+        this._host = '';
+        this._connections = new Set();
+        if (connectionListener) this.on('connection', connectionListener);
+    }
+    Server.prototype = Object.create(EventEmitter.prototype);
+    Server.prototype.constructor = Server;
+
+    Server.prototype.listen = function() {
+        // listen(port[, host][, backlog][, cb])
+        // listen({port, host, backlog}[, cb])
+        // listen(cb) — port 0
+        var args = Array.prototype.slice.call(arguments);
+        var cb;
+        if (args.length && typeof args[args.length - 1] === 'function') {
+            cb = args.pop();
+        }
+        var opts;
+        if (args.length === 1 && typeof args[0] === 'object' && args[0]) {
+            opts = args[0];
+        } else if (args.length === 0) {
+            opts = { port: 0 };
+        } else {
+            opts = { port: args[0], host: args[1] };
+        }
+        var port = opts.port | 0;
+        var host = opts.host || '0.0.0.0';
+        if (port < 0 || port > 65535) {
+            throw new RangeError('net.listen: port out of range: ' + opts.port);
+        }
+        var rc = globalThis.__host_net_listen(String(host), port);
+        if (rc < 0) {
+            var err = makeError(rc, 'net.listen');
+            var self = this;
+            Promise.resolve().then(function() {
+                try { self.emit('error', err); } catch (_) {}
+            });
+            return this;
+        }
+        this._serverId = rc | 0;
+        this._port = port;
+        this._host = host;
+        globalThis.__ab_net_server_handlers[this._serverId] = this;
+        if (cb) this.once('listening', cb);
+        return this;
+    };
+
+    Server.prototype.address = function() {
+        if (!this._listening) return null;
+        return {
+            address: this._host,
+            family: this._host.indexOf(':') >= 0 ? 'IPv6' : 'IPv4',
+            port: this._port,
+        };
+    };
+
+    Server.prototype.close = function(cb) {
+        if (this._closed) {
+            if (cb) Promise.resolve().then(function() { cb(); });
+            return this;
+        }
+        this._closed = true;
+        if (this._serverId) {
+            globalThis.__host_net_close_server(this._serverId);
+            delete globalThis.__ab_net_server_handlers[this._serverId];
+        }
+        var self = this;
+        Promise.resolve().then(function() {
+            self._listening = false;
+            try { self.emit('close'); } catch (_) {}
+            if (cb) cb();
+        });
+        return this;
+    };
+
+    Server.prototype.getConnections = function(cb) {
+        var n = this._connections.size;
+        Promise.resolve().then(function() { cb(null, n); });
+        return this;
+    };
+
+    Server.prototype.ref = function() { return this; };
+    Server.prototype.unref = function() { return this; };
+
+    Server.prototype._dispatchListening = function(port) {
+        this._listening = true;
+        this._port = (port | 0) || this._port;
+        try { this.emit('listening'); } catch (_) {}
+    };
+
+    Server.prototype._dispatchConnection = function(connId, local, remote) {
+        var sock = new Socket();
+        sock._attach(connId | 0);
+        sock._connecting = false;
+        sock.readyState = 'open';
+        sock.localAddress = local && local.address;
+        sock.localPort = local && local.port;
+        sock.remoteAddress = remote && remote.address;
+        sock.remotePort = remote && remote.port;
+        sock.remoteFamily = remote && remote.family;
+        var self = this;
+        this._connections.add(sock);
+        sock.once('close', function() { self._connections.delete(sock); });
+        try { this.emit('connection', sock); } catch (_) {}
+    };
+
+    Server.prototype._dispatchServerError = function(message) {
+        var err = new Error(message || 'net.Server error');
+        err.code = 'EOTHER';
+        try { this.emit('error', err); } catch (_) {}
+    };
+
+    Object.defineProperty(Server.prototype, 'listening', {
+        get: function() { return this._listening; },
+    });
+
+    // ----- Top-level helpers -----------------------------------------
+
+    function connect() {
+        var s = new Socket();
+        return s.connect.apply(s, arguments);
+    }
+
+    function createServer(opts, listener) {
+        return new Server(opts, listener);
+    }
+
+    function isIPv4(s) {
+        if (typeof s !== 'string') return false;
+        var parts = s.split('.');
+        if (parts.length !== 4) return false;
+        for (var i = 0; i < 4; i++) {
+            var p = parts[i];
+            if (!/^\d+$/.test(p)) return false;
+            var n = parseInt(p, 10);
+            if (n < 0 || n > 255) return false;
+            if (p.length > 1 && p[0] === '0') return false;
+        }
+        return true;
+    }
+
+    function isIPv6(s) {
+        if (typeof s !== 'string' || s.length === 0) return false;
+        // Reject obvious junk before letting the regex chew on it.
+        if (s.indexOf(' ') >= 0) return false;
+        // Permissive match — covers full, compressed (`::`), and
+        // IPv4-mapped (`::ffff:1.2.3.4`) forms. Doesn't enforce the
+        // single-`::` rule rigorously but that's good enough for the
+        // standard library's `isIP` contract.
+        var ipv4Tail = '(?:\\d{1,3}\\.){3}\\d{1,3}';
+        var hex = '[0-9a-fA-F]{1,4}';
+        var regex = new RegExp(
+            '^(?:' +
+                '(?:' + hex + ':){7}' + hex +                              // 8 groups
+                '|(?:' + hex + ':){1,7}:' +                                // ::-prefix
+                '|(?:' + hex + ':){1,6}:' + hex +
+                '|(?:' + hex + ':){1,5}(?::' + hex + '){1,2}' +
+                '|(?:' + hex + ':){1,4}(?::' + hex + '){1,3}' +
+                '|(?:' + hex + ':){1,3}(?::' + hex + '){1,4}' +
+                '|(?:' + hex + ':){1,2}(?::' + hex + '){1,5}' +
+                '|' + hex + ':(?::' + hex + '){1,6}' +
+                '|:(?::' + hex + '){1,7}' +
+                '|::' +
+                '|(?:' + hex + ':){6}' + ipv4Tail +
+                '|::(?:' + hex + ':){0,5}' + ipv4Tail +
+            ')$'
+        );
+        return regex.test(s);
+    }
+
+    function isIP(s) {
+        if (isIPv4(s)) return 4;
+        if (isIPv6(s)) return 6;
+        return 0;
+    }
+
+    exports.Socket = Socket;
+    exports.Server = Server;
+    exports.createConnection = connect;
+    exports.connect = connect;
+    exports.createServer = createServer;
+    exports.isIP = isIP;
+    exports.isIPv4 = isIPv4;
+    exports.isIPv6 = isIPv6;
+});
+
 // ---- node_subpaths.js ----
 // Node exposes several "X/promises" paths (and other sub-module
 // shapes) as separate require targets. They're thin re-exports of a
@@ -3588,18 +4157,21 @@ __register_module('string_decoder', function(module, exports, require) {
 
 // ---- stubs.js ----
 // Stub modules that throw a helpful NotSupportedInSandbox error on any
-// property access. Registering them means `require('net')` returns an
-// object instead of `Cannot find module 'net'` — scripts get a clear
+// property access. Registering them means `require('tls')` returns an
+// object instead of `Cannot find module 'tls'` — scripts get a clear
 // signal about what's unsupported and why.
+//
+// Only list modules that have NO real polyfill. Bundle concat order is
+// alphabetical, so anything listed here would clobber a real polyfill
+// whose filename sorts before `stubs.js` (e.g. `net.js`). `net` and
+// `worker_threads` ship real polyfills and are intentionally absent.
 
 (function installStubs() {
     var reasons = {
-        net: 'raw TCP sockets',
         tls: 'raw TLS sockets',
         dgram: 'UDP sockets',
         http2: 'HTTP/2 (plain http/https works for outbound requests)',
         cluster: 'multi-process clustering',
-        worker_threads: 'additional JavaScript threads',
         inspector: 'Node inspector protocol',
         vm: 'nested VM contexts',
         v8: 'V8-specific APIs',

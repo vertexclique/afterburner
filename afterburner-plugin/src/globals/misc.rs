@@ -522,6 +522,74 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
             }
         }),
     );
+
+    // ---- net (raw TCP, B7) ------------------------------------------
+    //
+    // The polyfill `polyfills/net.js` calls these from `net.connect`,
+    // `socket.write`, `net.createServer`, etc. Byte payloads are
+    // base64-encoded strings on the wire — same convention used by
+    // the zlib + crypto host imports.
+    let _ = globals.set(
+        "__host_net_connect",
+        Func::from(|host: String, port: f64| -> f64 {
+            let hb = host.as_bytes();
+            unsafe { host_net_connect(hb.as_ptr(), hb.len() as u32, port as i32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_net_write",
+        Func::from(|conn_id: f64, payload_b64: String| -> f64 {
+            let pb = payload_b64.as_bytes();
+            unsafe {
+                host_net_write(conn_id as i32, pb.as_ptr(), pb.len() as u32) as f64
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_net_end",
+        Func::from(|conn_id: f64| -> f64 {
+            unsafe { host_net_end(conn_id as i32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_net_destroy",
+        Func::from(|conn_id: f64| -> f64 {
+            unsafe { host_net_destroy(conn_id as i32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_net_pending",
+        Func::from(|conn_id: f64| -> f64 {
+            unsafe { host_net_pending(conn_id as i32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_net_set_no_delay",
+        Func::from(|conn_id: f64, enable: f64| -> f64 {
+            unsafe { host_net_set_no_delay(conn_id as i32, enable as i32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_net_set_keep_alive",
+        Func::from(|conn_id: f64, enable: f64, delay_ms: f64| -> f64 {
+            unsafe {
+                host_net_set_keep_alive(conn_id as i32, enable as i32, delay_ms as i32) as f64
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_net_listen",
+        Func::from(|host: String, port: f64| -> f64 {
+            let hb = host.as_bytes();
+            unsafe { host_net_listen(hb.as_ptr(), hb.len() as u32, port as i32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_net_close_server",
+        Func::from(|server_id: f64| -> f64 {
+            unsafe { host_net_close_server(server_id as i32) as f64 }
+        }),
+    );
 }
 
 fn install_os<'js>(globals: &Object<'js>) {

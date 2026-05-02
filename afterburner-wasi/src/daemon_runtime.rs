@@ -14,6 +14,8 @@
 //! the library API's `Afterburner::run_script` never auto-enters it.
 
 use crate::daemon_http::DaemonHttp;
+#[cfg(feature = "daemon")]
+use crate::daemon_net::DaemonNet;
 use crate::daemon_workers::DaemonWorkers;
 use crate::host::HostState;
 use afterburner_core::{
@@ -219,11 +221,10 @@ impl DaemonRuntime {
     }
 
     /// `true` if the daemon has anything keeping it alive — HTTP
-    /// listeners, ref'd timers, or alive worker_threads children.
-    /// Q2-A locked decision: both `.listen()` and `setInterval` /
-    /// ref'd `setTimeout` keep the runtime alive. B10 extends this to
-    /// `new Worker(...)`: while a child is alive the parent stays up
-    /// so messages can flow.
+    /// listeners, ref'd timers, alive worker_threads children, or
+    /// alive `net` connections / listeners. B7 extends the rule to
+    /// raw TCP: while any socket is open or any listener is bound,
+    /// the daemon stays up so events can flow.
     pub fn has_refs(&self) -> bool {
         if self.daemon_http.listener_count() > 0 {
             return true;
@@ -231,10 +232,16 @@ impl DaemonRuntime {
         if self.store.data().timers.iter().any(|t| t.is_ref) {
             return true;
         }
-        if let Some(w) = &self.store.data().daemon_workers {
-            if w.has_alive_workers() {
-                return true;
-            }
+        if let Some(w) = &self.store.data().daemon_workers
+            && w.has_alive_workers()
+        {
+            return true;
+        }
+        #[cfg(feature = "daemon")]
+        if let Some(n) = &self.store.data().daemon_net
+            && n.has_refs()
+        {
+            return true;
         }
         false
     }
@@ -272,6 +279,29 @@ impl DaemonRuntime {
             .as_ref()
             .map(|w| w.parent_closed_signaled())
             .unwrap_or(false)
+    }
+
+    /// Install a net (raw TCP) coordinator on this daemon's Store.
+    /// Called by the CLI (parent + worker) before `run_init` so user
+    /// code that calls `net.connect(...)` / `net.createServer(...)`
+    /// during top-level evaluation already sees the host imports.
+    #[cfg(feature = "daemon")]
+    pub fn install_net(&mut self, net: Arc<DaemonNet>) {
+        self.store.data_mut().daemon_net = Some(net);
+    }
+
+    #[cfg(feature = "daemon")]
+    pub fn try_recv_net_event(&self) -> Option<crate::daemon_net::NetEvent> {
+        self.store.data().daemon_net.as_ref()?.try_recv_event()
+    }
+
+    /// Drop the registry entry for `conn_id` after dispatching `Close`
+    /// to JS — same role as `reap_worker` for `worker_threads`.
+    #[cfg(feature = "daemon")]
+    pub fn mark_net_closed(&self, conn_id: i32) {
+        if let Some(n) = &self.store.data().daemon_net {
+            n.mark_closed(conn_id);
+        }
     }
 
     /// Drain timers whose `fire_at` has passed. Returns the ids that

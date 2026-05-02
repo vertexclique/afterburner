@@ -144,7 +144,7 @@ cd afterburner-plugin
 | Command | What it does |
 |:--------|:-------------|
 | `cargo build` | Builds the six host crates (skips the plugin). |
-| `cargo test --workspace --exclude afterburner-plugin` | Runs the full 233-test suite. |
+| `cargo test --workspace --exclude afterburner-plugin` | Runs the full 252-test suite. |
 | `cargo clippy --workspace --exclude afterburner-plugin --all-targets` | Linter check. |
 | `cargo test -p afterburner-ignite --release perf_smoke` | Native throughput smoke. |
 | `cargo test -p afterburner-wasi --release perf_smoke` | WASM throughput smoke. |
@@ -191,6 +191,7 @@ lives in **[`docs/NODE_COMPAT.md`](./docs/NODE_COMPAT.md)**.
 | | `zlib` (deflate/inflate/gzip/gunzip via Rust `flate2`) | always on (pure compute) |
 | | `child_process` | `Manifold::child_process` — **native path only** |
 | | `worker_threads` (Worker / parentPort / workerData / postMessage / terminate / threadId) | `Manifold` — children inherit the parent's manifold (never widened); `BURN_WORKER_DEPTH` ≤ 8 |
+| | `net` (raw TCP) — `net.connect` / `net.createServer` / Socket / Server / `isIP{,v4,v6}`; daemon-only inbound listening; 64 KiB write HWM with `'drain'` backpressure | `Manifold::net` — outbound requires `OutboundFull` (raw TCP escapes URL-shaped policy, so `OutboundHttp` is rejected); host allow-list supports exact, `*`, and `*.suffix` |
 | **Custom** | `afterburner:state` — cross-invocation key/value store | implicit — host installs the `StateStore` |
 
 The library default manifold is `Manifold::sealed()` — safe to hand

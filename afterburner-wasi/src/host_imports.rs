@@ -57,6 +57,80 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_process_exit(linker)?;
     wrap_timers(linker)?;
     wrap_workers(linker)?;
+    wrap_net(linker)?;
+    Ok(())
+}
+
+// `wrap_net` registers either the real tokio-backed coordinator (when
+// the `daemon` feature is on) or stubs that always return E_NO_DAEMON
+// (when it's off). The plugin's WASM module unconditionally imports
+// the eight `host_net_*` symbols, so we must always declare them.
+#[cfg(not(feature = "daemon"))]
+fn wrap_net(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    const E_NO_DAEMON: i32 = -1;
+    linker
+        .func_wrap(
+            NS,
+            "host_net_connect",
+            |_: Caller<'_, HostState>, _h_p: i32, _h_l: i32, _port: i32| -> i32 { E_NO_DAEMON },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_net_write",
+            |_: Caller<'_, HostState>, _id: i32, _p_p: i32, _p_l: i32| -> i32 { E_NO_DAEMON },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_net_end",
+            |_: Caller<'_, HostState>, _id: i32| -> i32 { E_NO_DAEMON },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_net_destroy",
+            |_: Caller<'_, HostState>, _id: i32| -> i32 { E_NO_DAEMON },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_net_pending",
+            |_: Caller<'_, HostState>, _id: i32| -> i32 { 0 },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_net_set_no_delay",
+            |_: Caller<'_, HostState>, _id: i32, _en: i32| -> i32 { E_NO_DAEMON },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_net_set_keep_alive",
+            |_: Caller<'_, HostState>, _id: i32, _en: i32, _d: i32| -> i32 { E_NO_DAEMON },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_net_listen",
+            |_: Caller<'_, HostState>, _h_p: i32, _h_l: i32, _port: i32| -> i32 { E_NO_DAEMON },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_net_close_server",
+            |_: Caller<'_, HostState>, _id: i32| -> i32 { E_NO_DAEMON },
+        )
+        .map_err(link_err)?;
     Ok(())
 }
 
@@ -2518,6 +2592,222 @@ fn wrap_workers(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
                     .map(|w| w.worker_data().to_string())
                     .unwrap_or_default();
                 write_out(&mut caller, &memory, out_ptr, out_cap, data.as_bytes())
+            },
+        )
+        .map_err(link_err)?;
+
+    Ok(())
+}
+
+// ---- net (raw TCP, B7) --------------------------------------------------
+//
+// Nine host imports back the `net` polyfill:
+//
+//   __host_net_connect(host, port)            -> conn_id | error
+//   __host_net_write(conn_id, payload_b64)    -> 0 | error
+//   __host_net_end(conn_id)                   -> 0 | error
+//   __host_net_destroy(conn_id)               -> 0 | error
+//   __host_net_pending(conn_id)               -> bytes (≥0) | 0
+//   __host_net_set_no_delay(conn_id, enable)  -> 0 | error
+//   __host_net_set_keep_alive(conn_id, en, d) -> 0 | error
+//   __host_net_listen(host, port)             -> server_id | error
+//   __host_net_close_server(server_id)        -> 0 | error
+//
+// Manifold gating happens in `DaemonNet::connect`; the coordinator
+// also returns `E_NO_DAEMON` from every entry point if the slot on
+// `HostState` is `None` (library mode never installs one).
+
+#[cfg(feature = "daemon")]
+fn wrap_net(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    use crate::daemon_net::errors as nerr;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_net_connect",
+            |mut caller: Caller<'_, HostState>,
+             host_ptr: i32,
+             host_len: i32,
+             port: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return nerr::E_OTHER;
+                };
+                let Some(host) = read_str(&memory, &caller, host_ptr, host_len) else {
+                    record(&mut caller, "net_connect: invalid host");
+                    return nerr::E_OTHER;
+                };
+                if !(1..=65535).contains(&port) {
+                    record(&mut caller, &format!("net_connect: invalid port {port}"));
+                    return nerr::E_BAD_PORT;
+                }
+                let Some(net) = caller.data().daemon_net.clone() else {
+                    record(&mut caller, "net.connect requires daemon mode");
+                    return nerr::E_NO_DAEMON;
+                };
+                let mut last_error = String::new();
+                let result = net.connect(&host, port as u16, &mut last_error);
+                if !last_error.is_empty() {
+                    caller.data_mut().last_error = last_error;
+                }
+                result
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_net_write",
+            |mut caller: Caller<'_, HostState>,
+             conn_id: i32,
+             payload_ptr: i32,
+             payload_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return nerr::E_OTHER;
+                };
+                let Some(payload) = read_str(&memory, &caller, payload_ptr, payload_len) else {
+                    record(&mut caller, "net_write: invalid payload");
+                    return nerr::E_BAD_PAYLOAD;
+                };
+                let Some(net) = caller.data().daemon_net.clone() else {
+                    return nerr::E_NO_DAEMON;
+                };
+                let mut last_error = String::new();
+                let bytes = match crate::daemon_net::decode_payload(&payload, &mut last_error) {
+                    Some(b) => b,
+                    None => {
+                        caller.data_mut().last_error = last_error;
+                        return nerr::E_BAD_PAYLOAD;
+                    }
+                };
+                let result = net.write(conn_id, bytes, &mut last_error);
+                if !last_error.is_empty() {
+                    caller.data_mut().last_error = last_error;
+                }
+                result
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_net_end",
+            |mut caller: Caller<'_, HostState>, conn_id: i32| -> i32 {
+                let Some(net) = caller.data().daemon_net.clone() else {
+                    return nerr::E_NO_DAEMON;
+                };
+                let mut last_error = String::new();
+                let result = net.end(conn_id, &mut last_error);
+                if !last_error.is_empty() {
+                    caller.data_mut().last_error = last_error;
+                }
+                result
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_net_destroy",
+            |caller: Caller<'_, HostState>, conn_id: i32| -> i32 {
+                let Some(net) = caller.data().daemon_net.clone() else {
+                    return nerr::E_NO_DAEMON;
+                };
+                net.destroy(conn_id)
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_net_pending",
+            |caller: Caller<'_, HostState>, conn_id: i32| -> i32 {
+                caller
+                    .data()
+                    .daemon_net
+                    .as_ref()
+                    .map(|n| n.pending_bytes(conn_id))
+                    .unwrap_or(0)
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_net_set_no_delay",
+            |caller: Caller<'_, HostState>, conn_id: i32, enable: i32| -> i32 {
+                let Some(net) = caller.data().daemon_net.clone() else {
+                    return nerr::E_NO_DAEMON;
+                };
+                net.set_no_delay(conn_id, enable != 0)
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_net_set_keep_alive",
+            |caller: Caller<'_, HostState>, conn_id: i32, enable: i32, delay_ms: i32| -> i32 {
+                let Some(net) = caller.data().daemon_net.clone() else {
+                    return nerr::E_NO_DAEMON;
+                };
+                net.set_keep_alive(conn_id, enable != 0, delay_ms)
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_net_listen",
+            |mut caller: Caller<'_, HostState>,
+             host_ptr: i32,
+             host_len: i32,
+             port: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return nerr::E_OTHER;
+                };
+                let Some(host) = read_str(&memory, &caller, host_ptr, host_len) else {
+                    record(&mut caller, "net_listen: invalid host");
+                    return nerr::E_OTHER;
+                };
+                // Accept port 0 here — the OS picks a port and we
+                // surface it via the `Listening` event.
+                if !(0..=65535).contains(&port) {
+                    record(&mut caller, &format!("net_listen: invalid port {port}"));
+                    return nerr::E_BAD_PORT;
+                }
+                let Some(net) = caller.data().daemon_net.clone() else {
+                    record(&mut caller, "net.createServer requires daemon mode");
+                    return nerr::E_NO_DAEMON;
+                };
+                let mut last_error = String::new();
+                let result = net.listen(&host, port as u16, &mut last_error);
+                if !last_error.is_empty() {
+                    caller.data_mut().last_error = last_error;
+                }
+                result
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_net_close_server",
+            |caller: Caller<'_, HostState>, server_id: i32| -> i32 {
+                let Some(net) = caller.data().daemon_net.clone() else {
+                    return nerr::E_NO_DAEMON;
+                };
+                net.close_server(server_id)
             },
         )
         .map_err(link_err)?;

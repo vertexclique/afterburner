@@ -627,9 +627,12 @@ fn buffer_compare_indexof() {
 
 #[test]
 fn stubs_give_clear_error() {
+    // `tls` is still a stub (no real polyfill ships yet); `net` and
+    // `worker_threads` were removed from the stub list once their
+    // polyfills landed.
     let src = r#"
         module.exports = () => {
-            try { require('net').createServer(); return 'unexpected'; }
+            try { require('tls').connect(); return 'unexpected'; }
             catch (e) { return { msg: e.message, code: e.code }; }
         };
     "#;

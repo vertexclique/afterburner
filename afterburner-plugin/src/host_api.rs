@@ -489,4 +489,37 @@ unsafe extern "C" {
     pub fn host_worker_thread_id() -> i32;
     pub fn host_worker_is_main_thread() -> i32;
     pub fn host_worker_data(out_ptr: *mut u8, out_cap: u32) -> i32;
+
+    // ---- net (raw TCP, B7) ------------------------------------------
+    //
+    // Process-wide tokio coordinator (`afterburner-wasi/daemon_net.rs`)
+    // owns every TcpStream / TcpListener; the plugin's `net.js`
+    // polyfill calls these to drive client connections, server
+    // listeners, and writes. Inbound bytes / lifecycle events arrive
+    // via the daemon-event dispatcher as `{kind: "net-..."}` envelopes.
+    //
+    // Payloads cross the boundary as base64-encoded strings — keeps
+    // the i32 ABI uniform with the rest of the host_api surface and
+    // avoids JSON / UTF-8 issues with arbitrary binary data.
+    pub fn host_net_connect(
+        host_ptr: *const u8,
+        host_len: u32,
+        port: i32,
+    ) -> i32;
+    pub fn host_net_write(
+        conn_id: i32,
+        payload_ptr: *const u8,
+        payload_len: u32,
+    ) -> i32;
+    pub fn host_net_end(conn_id: i32) -> i32;
+    pub fn host_net_destroy(conn_id: i32) -> i32;
+    pub fn host_net_pending(conn_id: i32) -> i32;
+    pub fn host_net_set_no_delay(conn_id: i32, enable: i32) -> i32;
+    pub fn host_net_set_keep_alive(conn_id: i32, enable: i32, delay_ms: i32) -> i32;
+    pub fn host_net_listen(
+        host_ptr: *const u8,
+        host_len: u32,
+        port: i32,
+    ) -> i32;
+    pub fn host_net_close_server(server_id: i32) -> i32;
 }

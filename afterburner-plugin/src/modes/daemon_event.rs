@@ -114,6 +114,64 @@ const DISPATCH_SOURCE: &str = r#"
         // The CLI's child event loop also sees this on the Rust side
         // and exits gracefully; the JS-side dispatch is best-effort
         // for user-facing 'close' listeners.
+    } else if (kind === 'net-connect') {
+        // B7: outbound TCP connect succeeded.
+        const table = globalThis.__ab_net_handlers || {};
+        const sock = table[ev.conn_id];
+        if (sock && typeof sock._dispatchConnect === 'function') {
+            try { sock._dispatchConnect(ev.local || null, ev.remote || null); }
+            catch (e) { try { console.error('net connect dispatch:', (e && e.stack) || e); } catch (_) {} }
+        }
+    } else if (kind === 'net-data') {
+        const table = globalThis.__ab_net_handlers || {};
+        const sock = table[ev.conn_id];
+        if (sock && typeof sock._dispatchData === 'function') {
+            try { sock._dispatchData(ev.payload_b64 || ''); }
+            catch (e) { try { console.error('net data dispatch:', (e && e.stack) || e); } catch (_) {} }
+        }
+    } else if (kind === 'net-end') {
+        const table = globalThis.__ab_net_handlers || {};
+        const sock = table[ev.conn_id];
+        if (sock && typeof sock._dispatchEnd === 'function') {
+            try { sock._dispatchEnd(); } catch (_) {}
+        }
+    } else if (kind === 'net-drain') {
+        const table = globalThis.__ab_net_handlers || {};
+        const sock = table[ev.conn_id];
+        if (sock && typeof sock._dispatchDrain === 'function') {
+            try { sock._dispatchDrain(); } catch (_) {}
+        }
+    } else if (kind === 'net-error') {
+        const table = globalThis.__ab_net_handlers || {};
+        const sock = table[ev.conn_id];
+        if (sock && typeof sock._dispatchError === 'function') {
+            try { sock._dispatchError(ev.message || '', ev.code || ''); } catch (_) {}
+        }
+    } else if (kind === 'net-close') {
+        const table = globalThis.__ab_net_handlers || {};
+        const sock = table[ev.conn_id];
+        if (sock && typeof sock._dispatchClose === 'function') {
+            try { sock._dispatchClose(!!ev.had_error); } catch (_) {}
+        }
+    } else if (kind === 'net-listening') {
+        const table = globalThis.__ab_net_server_handlers || {};
+        const srv = table[ev.server_id];
+        if (srv && typeof srv._dispatchListening === 'function') {
+            try { srv._dispatchListening(ev.port | 0); } catch (_) {}
+        }
+    } else if (kind === 'net-connection') {
+        const table = globalThis.__ab_net_server_handlers || {};
+        const srv = table[ev.server_id];
+        if (srv && typeof srv._dispatchConnection === 'function') {
+            try { srv._dispatchConnection(ev.conn_id | 0, ev.local || null, ev.remote || null); }
+            catch (e) { try { console.error('net connection dispatch:', (e && e.stack) || e); } catch (_) {} }
+        }
+    } else if (kind === 'net-server-error') {
+        const table = globalThis.__ab_net_server_handlers || {};
+        const srv = table[ev.server_id];
+        if (srv && typeof srv._dispatchServerError === 'function') {
+            try { srv._dispatchServerError(ev.message || ''); } catch (_) {}
+        }
     } else {
         // Unknown event kind — surface on stderr for diagnosis.
         try { console.error('daemon-event: unknown kind=' + kind); } catch (_) {}

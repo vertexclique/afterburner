@@ -21,7 +21,8 @@
 
 use crate::AfterburnerError;
 use crate::wasm::{
-    DaemonHttp, DaemonRuntime, DaemonWorkers, WasmCombustor, WasmConfig, WorkerConfig, WorkerEvent,
+    DaemonHttp, DaemonNet, DaemonRuntime, DaemonWorkers, NetEvent, WasmCombustor, WasmConfig,
+    WorkerConfig, WorkerEvent,
 };
 use crate::{EnvAccess, ScriptInvocation};
 use anyhow::{Context, Result};
@@ -97,8 +98,13 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
     // `new Worker(...)` from user code routes into the host. The
     // coordinator carries the *runtime* manifold — children inherit
     // exactly these capabilities, never wider (see manifold_codec).
-    let workers = DaemonWorkers::new_parent(manifold, WorkerConfig::default());
+    let workers = DaemonWorkers::new_parent(manifold.clone(), WorkerConfig::default());
     daemon.install_workers(Arc::clone(&workers));
+
+    // B7: install the net (raw TCP) coordinator. Same lifecycle —
+    // pinned to the tokio runtime that already drives axum/HTTP.
+    let net = DaemonNet::new(rt.handle().clone(), manifold);
+    daemon.install_net(Arc::clone(&net));
 
     if let Err(e) = daemon.run_init(source, &invocation) {
         flush_streams(&mut daemon)?;
@@ -254,6 +260,27 @@ fn run_event_loop(
             }
         }
 
+        // ---- Net events (B7) ----
+        for _ in 0..256 {
+            let Some(evt) = daemon.try_recv_net_event() else {
+                break;
+            };
+            did_work = true;
+            let (envelope, reap_id) = net_event_to_envelope(&evt);
+            let res = daemon.dispatch_event(envelope);
+            flush_streams(daemon)?;
+            if let Err(e) = res {
+                if let AfterburnerError::ProcessExit(code) = &e {
+                    std::process::exit(*code);
+                }
+                let _ = std::io::stderr()
+                    .write_all(format!("burn: net dispatch error: {e}\n").as_bytes());
+            }
+            if let Some(id) = reap_id {
+                daemon.mark_net_closed(id);
+            }
+        }
+
         // If the last ref'd timer was cleared (or unref'd) during a
         // callback, exit cleanly — matches Node's behaviour where
         // clearing the only active interval lets the process exit.
@@ -286,6 +313,113 @@ fn event_to_envelope(event: &afterburner_wasi::daemon_http::DaemonEvent) -> serd
             "body": String::from_utf8_lossy(&event.body).into_owned(),
         }
     })
+}
+
+/// Translate a [`NetEvent`] into the daemon-event envelope shape
+/// the JS dispatcher expects. Returns the envelope plus the conn_id
+/// to reap after dispatch (only `Some` for `Close`, since that's the
+/// terminal lifecycle event).
+fn net_event_to_envelope(evt: &NetEvent) -> (serde_json::Value, Option<i32>) {
+    match evt {
+        NetEvent::Connect {
+            conn_id,
+            local,
+            remote,
+        } => (
+            serde_json::json!({
+                "kind": "net-connect",
+                "conn_id": conn_id,
+                "local": addr_json(local),
+                "remote": addr_json(remote),
+            }),
+            None,
+        ),
+        NetEvent::Connection {
+            server_id,
+            conn_id,
+            local,
+            remote,
+        } => (
+            serde_json::json!({
+                "kind": "net-connection",
+                "server_id": server_id,
+                "conn_id": conn_id,
+                "local": addr_json(local),
+                "remote": addr_json(remote),
+            }),
+            None,
+        ),
+        NetEvent::Data {
+            conn_id,
+            payload_b64,
+        } => (
+            serde_json::json!({
+                "kind": "net-data",
+                "conn_id": conn_id,
+                "payload_b64": payload_b64,
+            }),
+            None,
+        ),
+        NetEvent::End { conn_id } => (
+            serde_json::json!({"kind": "net-end", "conn_id": conn_id}),
+            None,
+        ),
+        NetEvent::Drain { conn_id } => (
+            serde_json::json!({"kind": "net-drain", "conn_id": conn_id}),
+            None,
+        ),
+        NetEvent::Close { conn_id, had_error } => (
+            serde_json::json!({
+                "kind": "net-close",
+                "conn_id": conn_id,
+                "had_error": had_error,
+            }),
+            Some(*conn_id),
+        ),
+        NetEvent::Error {
+            conn_id,
+            message,
+            code,
+        } => (
+            serde_json::json!({
+                "kind": "net-error",
+                "conn_id": conn_id,
+                "message": message,
+                "code": code,
+            }),
+            None,
+        ),
+        NetEvent::Listening { server_id, port } => (
+            serde_json::json!({
+                "kind": "net-listening",
+                "server_id": server_id,
+                "port": port,
+            }),
+            None,
+        ),
+        NetEvent::ServerError { server_id, message } => (
+            serde_json::json!({
+                "kind": "net-server-error",
+                "server_id": server_id,
+                "message": message,
+            }),
+            None,
+        ),
+    }
+}
+
+fn addr_json(addr: &Option<std::net::SocketAddr>) -> serde_json::Value {
+    match addr {
+        Some(a) => {
+            let family = if a.is_ipv4() { "IPv4" } else { "IPv6" };
+            serde_json::json!({
+                "address": a.ip().to_string(),
+                "family": family,
+                "port": a.port(),
+            })
+        }
+        None => serde_json::Value::Null,
+    }
 }
 
 /// Translate a [`WorkerEvent`] into the daemon-event envelope shape

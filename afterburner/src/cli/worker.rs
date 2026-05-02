@@ -33,7 +33,8 @@ use std::time::{Duration, Instant};
 
 use crate::AfterburnerError;
 use crate::ScriptInvocation;
-use crate::wasm::{DaemonHttp, DaemonRuntime, DaemonWorkers, WasmCombustor, WasmConfig};
+use crate::wasm::{DaemonHttp, DaemonNet, DaemonRuntime, DaemonWorkers, WasmCombustor, WasmConfig};
+use afterburner_wasi::daemon_net::NetEvent;
 use afterburner_wasi::daemon_workers::WorkerEvent;
 
 use super::args::Cli;
@@ -74,7 +75,7 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
     let mut daemon = DaemonRuntime::instantiate(
         combustor.engine(),
         combustor.instance_pre(),
-        manifold,
+        manifold.clone(),
         Some(combustor.state_store().clone()),
         None,
         daemon_http,
@@ -82,6 +83,12 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
     )
     .context("daemon instantiate (worker)")?;
     daemon.install_workers(Arc::clone(&workers));
+
+    // B7: workers can use net too. Inherits the (already-narrowed)
+    // manifold from the parent's CLI flags — capability inheritance
+    // is enforced one level up at spawn-time, not here.
+    let net = DaemonNet::new(rt.handle().clone(), manifold);
+    daemon.install_net(Arc::clone(&net));
 
     if let Err(e) = daemon.run_init(source, &invocation) {
         flush_streams(&mut daemon)?;
@@ -190,6 +197,27 @@ fn run_child_event_loop(
             }
         }
 
+        // Net events.
+        for _ in 0..256 {
+            let Some(evt) = daemon.try_recv_net_event() else {
+                break;
+            };
+            did_work = true;
+            let (envelope, reap_id) = net_event_to_envelope(&evt);
+            let res = daemon.dispatch_event(envelope);
+            flush_streams(daemon)?;
+            if let Err(e) = res {
+                if let AfterburnerError::ProcessExit(code) = &e {
+                    std::process::exit(*code);
+                }
+                let _ = std::io::stderr()
+                    .write_all(format!("burn worker: net error: {e}\n").as_bytes());
+            }
+            if let Some(id) = reap_id {
+                daemon.mark_net_closed(id);
+            }
+        }
+
         // Exit conditions: parent closed our stdin AND nothing else
         // is keeping us alive (no ref'd timer / listener). Workers
         // that registered a `parentPort.on('message')` only stay alive
@@ -209,6 +237,110 @@ fn run_child_event_loop(
         }
     }
     Ok(())
+}
+
+/// Same shape as `cli::daemon::net_event_to_envelope`. Duplicated to
+/// avoid widening the public surface of cli::daemon for one helper.
+fn net_event_to_envelope(evt: &NetEvent) -> (serde_json::Value, Option<i32>) {
+    fn addr_json(addr: &Option<std::net::SocketAddr>) -> serde_json::Value {
+        match addr {
+            Some(a) => {
+                let family = if a.is_ipv4() { "IPv4" } else { "IPv6" };
+                serde_json::json!({
+                    "address": a.ip().to_string(),
+                    "family": family,
+                    "port": a.port(),
+                })
+            }
+            None => serde_json::Value::Null,
+        }
+    }
+    match evt {
+        NetEvent::Connect {
+            conn_id,
+            local,
+            remote,
+        } => (
+            serde_json::json!({
+                "kind": "net-connect",
+                "conn_id": conn_id,
+                "local": addr_json(local),
+                "remote": addr_json(remote),
+            }),
+            None,
+        ),
+        NetEvent::Connection {
+            server_id,
+            conn_id,
+            local,
+            remote,
+        } => (
+            serde_json::json!({
+                "kind": "net-connection",
+                "server_id": server_id,
+                "conn_id": conn_id,
+                "local": addr_json(local),
+                "remote": addr_json(remote),
+            }),
+            None,
+        ),
+        NetEvent::Data {
+            conn_id,
+            payload_b64,
+        } => (
+            serde_json::json!({
+                "kind": "net-data",
+                "conn_id": conn_id,
+                "payload_b64": payload_b64,
+            }),
+            None,
+        ),
+        NetEvent::End { conn_id } => (
+            serde_json::json!({"kind": "net-end", "conn_id": conn_id}),
+            None,
+        ),
+        NetEvent::Drain { conn_id } => (
+            serde_json::json!({"kind": "net-drain", "conn_id": conn_id}),
+            None,
+        ),
+        NetEvent::Close { conn_id, had_error } => (
+            serde_json::json!({
+                "kind": "net-close",
+                "conn_id": conn_id,
+                "had_error": had_error,
+            }),
+            Some(*conn_id),
+        ),
+        NetEvent::Error {
+            conn_id,
+            message,
+            code,
+        } => (
+            serde_json::json!({
+                "kind": "net-error",
+                "conn_id": conn_id,
+                "message": message,
+                "code": code,
+            }),
+            None,
+        ),
+        NetEvent::Listening { server_id, port } => (
+            serde_json::json!({
+                "kind": "net-listening",
+                "server_id": server_id,
+                "port": port,
+            }),
+            None,
+        ),
+        NetEvent::ServerError { server_id, message } => (
+            serde_json::json!({
+                "kind": "net-server-error",
+                "server_id": server_id,
+                "message": message,
+            }),
+            None,
+        ),
+    }
 }
 
 fn build_invocation(cli: &Cli, script_label: &str, user_args: &[String]) -> ScriptInvocation {
