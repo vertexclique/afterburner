@@ -104,6 +104,17 @@ rcgen = "0.13"
 # amalgamation (~2 MB compile-time cost).
 rusqlite = { version = "0.32", default-features = false, features = ["bundled"] }
 
+# L3 shadow for `sharp`. Both crates are 100% pure Rust:
+#   * `image` — codec layer (PNG, JPEG, WebP, GIF, BMP, TIFF)
+#   * `fast_image_resize` — SIMD-accelerated resampling (much
+#     faster than image's built-in `imageops::resize`)
+# Gated behind `shadow-sharp` so non-image builds don't pull these
+# in (~2 MB of compiled deps).
+image = { version = "0.25", default-features = false, features = [
+    "png", "jpeg", "webp", "gif", "bmp",
+] }
+fast_image_resize = { version = "5", features = ["image"] }
+
 # B7 dns — `hickory-resolver` (formerly trust-dns-resolver) is the
 # canonical pure-Rust async DNS resolver. We use it synchronously
 # from a worker thread so the host-import boundary stays sync (the

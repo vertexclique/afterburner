@@ -765,6 +765,36 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
             unsafe { host_shadow_sqlite3_close(id) as f64 }
         }),
     );
+
+    // ---- L3 shadow: sharp -------------------------------------------
+    //
+    // `run` returns base64-encoded image bytes (decoded by polyfill);
+    // `metadata` returns a JSON string. Both error paths use the
+    // `__HOST_ERR__:` sentinel.
+    let _ = globals.set(
+        "__host_shadow_sharp_run",
+        Func::from(|json: String| -> String {
+            let jb = json.as_bytes();
+            match call_read(|out, cap| unsafe {
+                host_shadow_sharp_run(jb.as_ptr(), jb.len() as u32, out, cap)
+            }) {
+                Ok(s) => s,
+                Err(e) => alloc::format!("__HOST_ERR__:{e}"),
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_shadow_sharp_metadata",
+        Func::from(|json: String| -> String {
+            let jb = json.as_bytes();
+            match call_read(|out, cap| unsafe {
+                host_shadow_sharp_metadata(jb.as_ptr(), jb.len() as u32, out, cap)
+            }) {
+                Ok(s) => s,
+                Err(e) => alloc::format!("__HOST_ERR__:{e}"),
+            }
+        }),
+    );
 }
 
 fn install_os<'js>(globals: &Object<'js>) {

@@ -4,7 +4,9 @@ Source of truth for what's shipped vs. what's left in the
 `burn` runtime plan (`docs/IMPL_PLAN_BURN_RUNTIME.md`) and the
 adjacent L3 shadow plan (locked decision Q3 in that doc).
 
-**Last refreshed:** post L3 sqlite3 shadow (`require('sqlite3')`).
+**Last refreshed:** post L3 sharp shadow (last item on the L3 launch list) +
+binary-safe `fs.readFileSync`/`writeFileSync` polyfill (Node-compat: returns
+`Buffer` when no encoding is given, accepts `Buffer` for writes).
 Regenerate by hand when a phase lands; `git log --oneline` is
 authoritative if this file drifts.
 
@@ -12,11 +14,11 @@ authoritative if this file drifts.
 
 ## Test count
 
-**333 tests pass workspace-wide** across the `afterburner` crate's
-25 integration-test files plus the other workspace crates' unit /
-integration suites (incl. 6 lock-free `DaemonNet` + 6 `DaemonTls`
-+ 5 `dns_host` + 28 `SqliteShadow` unit tests). Run the full
-matrix with:
+**397 tests pass workspace-wide** across the `afterburner` crate's
+26 integration-test files plus the other workspace crates' unit /
+integration suites (incl. 6 lock-free `DaemonNet` + 6 `DaemonTls` +
+5 `dns_host` + 28 `SqliteShadow` + 33 `Sharp` unit tests). Run the
+full matrix with:
 
 ```bash
 cargo test --workspace --exclude afterburner-plugin
@@ -65,7 +67,8 @@ extern + plugin JS global.
 | `bcrypt` | hash/compare/genSalt (+Sync +async dual shape) | ✅ | `5b5cd25` | 11 |
 | `argon2` | hash/verify/needsRehash with Argon2id/i/d variants | ✅ | `3c5bd8d` | 9 |
 | `jsonwebtoken` | sign/verify/decode with HS/RS/ES/PS/EdDSA algorithms | ✅ | `dd52bf5` | 15 |
-| `sqlite3` | Database / run / get / all / each / exec / close — npm `sqlite3` v5 callback API. Backed by `rusqlite` with `bundled` (SQLite C amalgamation **statically linked into the burn binary**, single-binary deploy, no `libsqlite3.so` runtime dep). Per-connection actor thread (kovan_channel commands + bounded(1) replies) keeps the registry lock-free even though `rusqlite::Connection` is `!Sync`. Buffer round-trips through a `{$blob_b64: ...}` marker. | ✅ | _this commit_ | 28+23 |
+| `sqlite3` | Database / run / get / all / each / exec / close — npm `sqlite3` v5 callback API. Backed by `rusqlite` with `bundled` (SQLite C amalgamation **statically linked into the burn binary**, single-binary deploy, no `libsqlite3.so` runtime dep). Per-connection actor thread (kovan_channel commands + bounded(1) replies) keeps the registry lock-free even though `rusqlite::Connection` is `!Sync`. Buffer round-trips through a `{$blob_b64: ...}` marker. | ✅ | `b4ee395` | 28+23 |
+| `sharp` | npm `sharp` fluent builder: resize / rotate (0/90/180/270) / grayscale / flip / flop / extract / blur / negate / `jpeg` / `png` / `webp`; `toBuffer` / `toFile` / `metadata`. Stateless host calls — JS accumulates ops in an array, one host roundtrip per terminal op. Backed by 100% pure-Rust `image` (codec layer) + `fast_image_resize` (SIMD-accelerated resampling). | ✅ | _this commit_ | 33+31 |
 
 ---
 
@@ -118,15 +121,11 @@ This is a hard architectural constraint, not a policy choice:
 
 #### Scope cutoff
 
-Four primitives shipped (`bcrypt`, `argon2`, `jsonwebtoken`,
-`sqlite3`). Remaining shadows on the launch list:
+All five L3 launch-list shadows shipped: `bcrypt`, `argon2`,
+`jsonwebtoken`, `sqlite3`, `sharp`.
 
-| Package | Backing crate | Status |
-|:--|:--|:--|
-| `sharp` | `image` + `fast_image_resize` (both 100% pure Rust) | Pending |
-
-**After sharp ships, we stop adding shadows.** Anything beyond the
-launch list goes through one of these escape hatches:
+**We are now done adding shadows.** Anything beyond the launch list
+goes through one of these escape hatches:
 
 | Need | What to use |
 |:--|:--|
@@ -203,7 +202,7 @@ Build the CLI with everything: `cargo install afterburner
 | `burn npm install X` (real npm routes `node` via PATH shim) | ✅ |
 | `burn node foo.js` / `burn npx X` / `burn pnpm X` / `burn yarn X` / `burn bun X` | ✅ |
 | `process.exit(n)` / SIGINT / `setInterval` / `.unref()` | ✅ |
-| `require('bcrypt')` / `require('argon2')` / `require('jsonwebtoken')` / `require('sqlite3')` inside WASM | ✅ |
+| `require('bcrypt')` / `require('argon2')` / `require('jsonwebtoken')` / `require('sqlite3')` / `require('sharp')` inside WASM | ✅ |
 | Password hashing in a request handler | ✅ |
 | Issuing + verifying JWTs in auth middleware | ✅ |
 | `new Worker('./bg.js', { workerData })` with `postMessage` round-trip | ✅ |

@@ -55,7 +55,7 @@ fn fs_read_write_roundtrip_under_readwrite_policy() {
         module.exports = () => {{
             const fs = require('fs');
             fs.writeFileSync({path:?}, 'hello afterburner');
-            return fs.readFileSync({path:?});
+            return fs.readFileSync({path:?}, 'utf8');
         }};
         "#,
         path = path,
@@ -103,7 +103,7 @@ fn fs_read_only_rejects_writes() {
         r#"
         module.exports = () => {{
             const fs = require('fs');
-            const read = fs.readFileSync({p:?});
+            const read = fs.readFileSync({p:?}, 'utf8');
             try {{
                 fs.writeFileSync({p:?}, 'nope');
                 return {{ read: read, wrote: true }};
@@ -572,7 +572,7 @@ fn fs_create_write_stream_writes_chunks() {
             w.write('hello ');
             w.write('streaming');
             w.end();
-            return fs.readFileSync({p:?});
+            return fs.readFileSync({p:?}, 'utf8');
         }};
         "#,
         p = path

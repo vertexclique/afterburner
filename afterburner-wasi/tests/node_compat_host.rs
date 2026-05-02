@@ -58,7 +58,7 @@ fn wasm_fs_roundtrip_under_readwrite() {
         module.exports = () => {{
             const fs = require('fs');
             fs.writeFileSync({p:?}, 'wasm-sandbox');
-            return fs.readFileSync({p:?});
+            return fs.readFileSync({p:?}, 'utf8');
         }};
         "#,
         p = path
@@ -516,7 +516,7 @@ fn wasm_create_write_stream_with_w_flag_truncates_existing_file() {
             const w = fs.createWriteStream({p:?});
             w.write('abcdefghij');
             w.end();
-            const after = fs.readFileSync({p:?});
+            const after = fs.readFileSync({p:?}, 'utf8');
             return {{ after: after, len: after.length }};
         }};
         "#,

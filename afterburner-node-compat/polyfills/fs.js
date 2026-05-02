@@ -31,17 +31,61 @@ __register_module('fs', function(module, exports, require) {
         return result;
     }
 
+    // Match Node.js exactly: the host bridge always sends bytes as
+    // base64 (binary-safe wire format). The polyfill decodes and
+    // converts based on the caller's encoding choice.
+    //
+    //   fs.readFileSync(path)              → Buffer        (Node default)
+    //   fs.readFileSync(path, 'utf8')      → string
+    //   fs.readFileSync(path, {encoding})  → string
+    //   fs.readFileSync(path, {encoding: null}) → Buffer
+    var BufferLazy;
+    function bufferModule() {
+        if (!BufferLazy) BufferLazy = require('buffer').Buffer;
+        return BufferLazy;
+    }
+
+    function pickEncoding(options) {
+        if (typeof options === 'string') return options;
+        if (options && typeof options === 'object') {
+            // Node treats `encoding: null` as "give me a Buffer".
+            return options.encoding === undefined ? undefined : options.encoding;
+        }
+        return undefined;
+    }
+
     exports.readFileSync = function(path, options) {
-        var encoding = typeof options === 'string' ? options
-            : (options && options.encoding) || 'utf8';
-        var out = requireHost('read_file_sync')(String(path), encoding);
-        return checkHostError(out, 'readFileSync');
+        var encoding = pickEncoding(options);
+        // The encoding hint goes to the host so native (rquickjs)
+        // bindings can short-circuit if they want; the WASM path
+        // ignores it and always returns base64. Either way the
+        // decode below is the source of truth.
+        var b64 = requireHost('read_file_sync')(String(path), 'base64');
+        b64 = checkHostError(b64, 'readFileSync');
+        var Buffer = bufferModule();
+        var buf = Buffer.from(b64, 'base64');
+        if (encoding == null) return buf;
+        return buf.toString(encoding);
     };
 
     exports.writeFileSync = function(path, data, options) {
-        var encoding = typeof options === 'string' ? options
-            : (options && options.encoding) || 'utf8';
-        var out = requireHost('write_file_sync')(String(path), String(data), encoding);
+        var encoding = pickEncoding(options);
+        var Buffer = bufferModule();
+        var bytes;
+        if (Buffer.isBuffer(data)) {
+            bytes = data;
+        } else if (data instanceof Uint8Array) {
+            bytes = Buffer.from(data);
+        } else if (typeof data === 'string') {
+            bytes = Buffer.from(data, encoding || 'utf8');
+        } else {
+            throw new TypeError('fs.writeFileSync: data must be Buffer, Uint8Array, or string');
+        }
+        var b64 = bytes.toString('base64');
+        // Pass 'base64' through as the encoding hint (the WASM bridge
+        // reads bytes from memory either way; this just keeps the
+        // 3-arg shape stable for the native binding).
+        var out = requireHost('write_file_sync')(String(path), b64, 'base64');
         checkHostError(out, 'writeFileSync');
     };
 

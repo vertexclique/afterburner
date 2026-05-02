@@ -80,12 +80,72 @@
         var fn = globalThis.__host_fs_read_file_sync;
         if (typeof fn !== 'function') return null;
         try {
-            var out = fn(String(p), 'utf8');
-            if (typeof out === 'string' && out.indexOf('__HOST_ERR__:') === 0) return null;
-            return out;
+            // The host bridge always sends bytes as base64 (binary-safe
+            // wire format — see `polyfills/fs.js` for the full
+            // contract). Decode to a UTF-8 string here; require()
+            // never reads non-text files.
+            var b64 = fn(String(p), 'base64');
+            if (typeof b64 === 'string' && b64.indexOf('__HOST_ERR__:') === 0) return null;
+            // We can't `require('buffer')` from inside require.js
+            // (circular bootstrap), so decode base64 inline. The
+            // implementation matches `Buffer.from(b64, 'base64')` →
+            // UTF-8 decode but without crossing the module boundary.
+            return base64ToUtf8(b64);
         } catch (_) {
             return null;
         }
+    }
+
+    // Tiny inlined base64→UTF-8 decoder. Used only by the require
+    // resolver's source loader; cleaner than calling out to
+    // `Buffer` (which lives in a module we may be in the middle of
+    // bootstrapping). globalThis.atob produces a "binary string"
+    // (each char = one byte, ≤255), then we re-decode as UTF-8.
+    var B64_INV = (function() {
+        var alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+        var inv = new Int16Array(256);
+        for (var i = 0; i < 256; i++) inv[i] = -1;
+        for (var j = 0; j < alphabet.length; j++) inv[alphabet.charCodeAt(j)] = j;
+        return inv;
+    })();
+
+    function base64ToUtf8(s) {
+        // Strip padding for length math.
+        var clean = s.replace(/=+$/, '');
+        var bytesLen = Math.floor(clean.length * 3 / 4);
+        var bytes = new Uint8Array(bytesLen);
+        var bi = 0;
+        for (var i = 0; i + 4 <= clean.length; i += 4) {
+            var n = (B64_INV[clean.charCodeAt(i)]   << 18) |
+                    (B64_INV[clean.charCodeAt(i+1)] << 12) |
+                    (B64_INV[clean.charCodeAt(i+2)] << 6)  |
+                    (B64_INV[clean.charCodeAt(i+3)]);
+            bytes[bi++] = (n >> 16) & 0xff;
+            bytes[bi++] = (n >> 8)  & 0xff;
+            bytes[bi++] = n & 0xff;
+        }
+        var rem = clean.length - i;
+        if (rem === 2) {
+            var n2 = (B64_INV[clean.charCodeAt(i)]   << 18) |
+                     (B64_INV[clean.charCodeAt(i+1)] << 12);
+            bytes[bi++] = (n2 >> 16) & 0xff;
+        } else if (rem === 3) {
+            var n3 = (B64_INV[clean.charCodeAt(i)]   << 18) |
+                     (B64_INV[clean.charCodeAt(i+1)] << 12) |
+                     (B64_INV[clean.charCodeAt(i+2)] << 6);
+            bytes[bi++] = (n3 >> 16) & 0xff;
+            bytes[bi++] = (n3 >> 8)  & 0xff;
+        }
+        if (typeof TextDecoder === 'function') {
+            return new TextDecoder('utf-8').decode(bytes.subarray(0, bi));
+        }
+        // Fallback — correct for ASCII; user source under burn is JS
+        // which is overwhelmingly ASCII / latin-1 friendly. Non-ASCII
+        // identifiers would require the TextDecoder path above
+        // (always present in QuickJS post-Phase E).
+        var out = '';
+        for (var k = 0; k < bi; k++) out += String.fromCharCode(bytes[k]);
+        return out;
     }
 
     function fsIsDir(p) {

@@ -646,4 +646,22 @@ unsafe extern "C" {
     ) -> i32;
     pub fn host_shadow_sqlite3_exec(id: i64, sql_ptr: *const u8, sql_len: u32) -> i32;
     pub fn host_shadow_sqlite3_close(id: i64) -> i32;
+
+    // ---- L3 shadow: sharp -------------------------------------------
+    //
+    // Stateless: every call carries the whole pipeline (or just the
+    // source for metadata). Output bytes come back base64-encoded so
+    // they fit the shared `call_read` String pipeline.
+    pub fn host_shadow_sharp_run(
+        json_ptr: *const u8,
+        json_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_shadow_sharp_metadata(
+        json_ptr: *const u8,
+        json_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
 }

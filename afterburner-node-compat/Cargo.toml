@@ -49,6 +49,9 @@ jsonwebtoken = { version = "10", optional = true, default-features = false, feat
 # L3 shadow: sqlite3. `bundled` compiles the SQLite C amalgamation
 # into the burn binary (no runtime dependency on libsqlite3.so).
 rusqlite = { workspace = true, optional = true }
+# L3 shadow: sharp.
+image = { workspace = true, optional = true }
+fast_image_resize = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Used by shadow tests that need a real on-disk SQLite file.
@@ -62,6 +65,7 @@ shadow-bcrypt = ["dep:bcrypt"]
 shadow-argon2 = ["dep:argon2", "dep:password-hash"]
 shadow-jsonwebtoken = ["dep:jsonwebtoken"]
 shadow-sqlite3 = ["dep:rusqlite"]
+shadow-sharp = ["dep:image", "dep:fast_image_resize"]
 
 [build-dependencies]
 # Phase 1 keeps the bundler in pure Rust (concatenation). Phase 2 pulls in

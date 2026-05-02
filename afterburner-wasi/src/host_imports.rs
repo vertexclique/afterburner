@@ -60,6 +60,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_net(linker)?;
     wrap_tls(linker)?;
     wrap_shadow_sqlite3(linker)?;
+    wrap_shadow_sharp(linker)?;
     Ok(())
 }
 
@@ -243,6 +244,14 @@ fn wrap_fs(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
              out_ptr: i32,
              out_cap: i32|
              -> i32 {
+                // The plugin's `call_read` helper UTF-8-decodes the
+                // bytes it pulls back through this import. That path
+                // is fine for valid-UTF-8 files but would corrupt
+                // binary content (PNGs, .wasm, archives, …). To stay
+                // binary-safe we base64-encode the bytes here so the
+                // wire format is always pure ASCII; the polyfill
+                // decodes back to a Buffer (or to the requested
+                // text encoding via `Buffer.toString(...)`).
                 let Some(memory) = guest_memory(&mut caller) else {
                     record(&mut caller, "memory export missing");
                     return E_OTHER;
@@ -256,7 +265,12 @@ fn wrap_fs(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 };
                 let m = caller.data().manifold.clone();
                 match fs_host::read_file_sync(&path, &m) {
-                    Ok(bytes) => write_out(&mut caller, &memory, out_ptr, out_cap, &bytes),
+                    Ok(bytes) => {
+                        use base64::Engine as _;
+                        let encoded =
+                            base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        write_out(&mut caller, &memory, out_ptr, out_cap, encoded.as_bytes())
+                    }
                     Err(e) => map_err(&mut caller, e),
                 }
             },
@@ -273,6 +287,10 @@ fn wrap_fs(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
              data_ptr: i32,
              data_len: i32|
              -> i32 {
+                // Companion to the binary-safe read path above: the
+                // polyfill base64-encodes whatever it received from
+                // the user (Buffer or string→Buffer-with-encoding).
+                // We decode here before handing bytes to the FS host.
                 let Some(memory) = guest_memory(&mut caller) else {
                     return E_OTHER;
                 };
@@ -280,9 +298,20 @@ fn wrap_fs(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     Some(p) => p,
                     None => return E_OTHER,
                 };
-                let data = match read_bytes(&memory, &caller, data_ptr, data_len) {
-                    Some(d) => d,
-                    None => return E_OTHER,
+                let data_b64 = match read_str(&memory, &caller, data_ptr, data_len) {
+                    Some(s) => s,
+                    None => {
+                        record(&mut caller, "invalid utf-8 in fs write data");
+                        return E_OTHER;
+                    }
+                };
+                use base64::Engine as _;
+                let data = match base64::engine::general_purpose::STANDARD.decode(&data_b64) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        record(&mut caller, &format!("fs.write base64: {e}"));
+                        return E_OTHER;
+                    }
                 };
                 let m = caller.data().manifold.clone();
                 match fs_host::write_file_sync(&path, &data, &m) {
@@ -3592,6 +3621,104 @@ fn wrap_shadow_sqlite3(linker: &mut Linker<HostState>) -> Result<(), Afterburner
                     let _ = id;
                     caller.data_mut().last_error =
                         "shadow-sqlite3 feature not enabled".into();
+                    E_OTHER
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    Ok(())
+}
+
+// ---- shadow: sharp (L3) -------------------------------------------------
+//
+// Two stateless host imports back the polyfill:
+//
+//   __host_shadow_sharp_run(pipeline_json)  -> bytes (base64 string) | __HOST_ERR__:...
+//   __host_shadow_sharp_metadata(source_json) -> JSON | __HOST_ERR__:...
+//
+// `run` returns the encoded image bytes as a base64 string so it
+// fits the shared `call_read` String-output convention. The polyfill
+// converts back to Buffer before handing it to the user.
+
+fn wrap_shadow_sharp(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    linker
+        .func_wrap(
+            NS,
+            "host_shadow_sharp_run",
+            #[allow(unused_variables)]
+            |mut caller: Caller<'_, HostState>,
+             json_ptr: i32,
+             json_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(json) = read_str(&memory, &caller, json_ptr, json_len) else {
+                    return E_OTHER;
+                };
+                #[cfg(feature = "shadow-sharp")]
+                {
+                    use base64::Engine as _;
+                    match afterburner_node_compat::shadows::sharp::run(&json) {
+                        Ok(bytes) => {
+                            let b64 =
+                                base64::engine::general_purpose::STANDARD.encode(&bytes);
+                            write_out(&mut caller, &memory, out_ptr, out_cap, b64.as_bytes())
+                        }
+                        Err(e) => {
+                            caller.data_mut().last_error = e;
+                            E_OTHER
+                        }
+                    }
+                }
+                #[cfg(not(feature = "shadow-sharp"))]
+                {
+                    let _ = (json, out_ptr, out_cap);
+                    caller.data_mut().last_error =
+                        "shadow-sharp feature not enabled".into();
+                    E_OTHER
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_shadow_sharp_metadata",
+            #[allow(unused_variables)]
+            |mut caller: Caller<'_, HostState>,
+             json_ptr: i32,
+             json_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(json) = read_str(&memory, &caller, json_ptr, json_len) else {
+                    return E_OTHER;
+                };
+                #[cfg(feature = "shadow-sharp")]
+                {
+                    match afterburner_node_compat::shadows::sharp::metadata(&json) {
+                        Ok(s) => {
+                            write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes())
+                        }
+                        Err(e) => {
+                            caller.data_mut().last_error = e;
+                            E_OTHER
+                        }
+                    }
+                }
+                #[cfg(not(feature = "shadow-sharp"))]
+                {
+                    let _ = (json, out_ptr, out_cap);
+                    caller.data_mut().last_error =
+                        "shadow-sharp feature not enabled".into();
                     E_OTHER
                 }
             },

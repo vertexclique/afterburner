@@ -58,7 +58,7 @@ fn flow_fs_round_trip_with_scoped_manifold() {
         module.exports = (input) => {{
             const fs = require('fs');
             fs.writeFileSync({p:?}, input.body);
-            return fs.readFileSync({p:?});
+            return fs.readFileSync({p:?}, 'utf8');
         }};
         "#,
         p = path

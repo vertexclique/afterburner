@@ -54,6 +54,10 @@ tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 rcgen = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "io-util", "net", "macros"] }
+# B7 sharp test fixtures — generate small PNGs / RGBA images at
+# test time so we don't ship binary fixture files.
+image = { workspace = true }
+base64 = { workspace = true }
 
 [features]
 default = ["wasm", "native", "thrust"]
@@ -89,3 +93,4 @@ shadow-bcrypt = ["afterburner-wasi?/shadow-bcrypt"]
 shadow-argon2 = ["afterburner-wasi?/shadow-argon2"]
 shadow-jsonwebtoken = ["afterburner-wasi?/shadow-jsonwebtoken"]
 shadow-sqlite3 = ["afterburner-wasi?/shadow-sqlite3"]
+shadow-sharp = ["afterburner-wasi?/shadow-sharp"]

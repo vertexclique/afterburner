@@ -30,3 +30,6 @@ pub mod jsonwebtoken;
 
 #[cfg(feature = "shadow-sqlite3")]
 pub mod sqlite3;
+
+#[cfg(feature = "shadow-sharp")]
+pub mod sharp;
