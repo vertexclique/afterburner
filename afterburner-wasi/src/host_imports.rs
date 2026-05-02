@@ -595,6 +595,14 @@ fn wrap_http(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
 }
 
 // ---- dns -----------------------------------------------------------------
+//
+// `host_dns_lookup` returns a single IP. The record-type-aware
+// resolvers (`host_dns_resolve_*` / `host_dns_reverse`) all return
+// JSON-encoded result strings — a uniform cross-boundary shape that
+// keeps the i32 ABI stable even as the result list shape varies
+// (`["1.2.3.4"]` vs `[{"exchange": "...", "priority": 10}]` vs
+// `[["fragment", ...]]`). The plugin's polyfill JSON.parse's the
+// payload before handing it to user callbacks.
 
 fn wrap_dns(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
     linker
@@ -622,6 +630,161 @@ fn wrap_dns(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
             },
         )
         .map_err(link_err)?;
+
+    fn write_json(
+        caller: &mut Caller<'_, HostState>,
+        memory: &Memory,
+        out_ptr: i32,
+        out_cap: i32,
+        value: &serde_json::Value,
+    ) -> i32 {
+        let json = match serde_json::to_string(value) {
+            Ok(s) => s,
+            Err(e) => {
+                record(caller, &format!("dns: serialize result: {e}"));
+                return E_OTHER;
+            }
+        };
+        write_out(caller, memory, out_ptr, out_cap, json.as_bytes())
+    }
+
+    // resolve4 / resolve6 / resolveCname / resolveNs / reverse all
+    // share the same `(ptr, len, out_ptr, out_cap) -> i32` shape and
+    // a `Vec<String>` result. Macro to dedup; the macro body lives at
+    // the top of this function so each `func_wrap` keeps a unique
+    // closure type.
+    macro_rules! wrap_string_list {
+        ($name:literal, $impl:expr, $label:literal) => {
+            linker
+                .func_wrap(
+                    NS,
+                    $name,
+                    |mut caller: Caller<'_, HostState>,
+                     ptr: i32,
+                     len: i32,
+                     out_ptr: i32,
+                     out_cap: i32|
+                     -> i32 {
+                        let Some(memory) = guest_memory(&mut caller) else {
+                            return E_OTHER;
+                        };
+                        let arg = match read_str(&memory, &caller, ptr, len) {
+                            Some(s) => s,
+                            None => return E_OTHER,
+                        };
+                        let m = caller.data().manifold.clone();
+                        match $impl(&arg, &m) {
+                            Ok(list) => {
+                                let v: Vec<serde_json::Value> = list
+                                    .into_iter()
+                                    .map(serde_json::Value::String)
+                                    .collect();
+                                write_json(&mut caller, &memory, out_ptr, out_cap, &serde_json::Value::Array(v))
+                            }
+                            Err(e) => {
+                                record(&mut caller, &format!("{}: {e}", $label));
+                                map_err(&mut caller, e)
+                            }
+                        }
+                    },
+                )
+                .map_err(link_err)?;
+        };
+    }
+
+    wrap_string_list!("host_dns_resolve4", dns_host::resolve4, "dns.resolve4");
+    wrap_string_list!("host_dns_resolve6", dns_host::resolve6, "dns.resolve6");
+    wrap_string_list!(
+        "host_dns_resolve_cname",
+        dns_host::resolve_cname,
+        "dns.resolveCname"
+    );
+    wrap_string_list!("host_dns_resolve_ns", dns_host::resolve_ns, "dns.resolveNs");
+    wrap_string_list!("host_dns_reverse", dns_host::reverse, "dns.reverse");
+
+    linker
+        .func_wrap(
+            NS,
+            "host_dns_resolve_mx",
+            |mut caller: Caller<'_, HostState>,
+             ptr: i32,
+             len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let name = match read_str(&memory, &caller, ptr, len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let m = caller.data().manifold.clone();
+                match dns_host::resolve_mx(&name, &m) {
+                    Ok(list) => {
+                        let v: Vec<serde_json::Value> =
+                            list.iter().map(|r| r.to_json()).collect();
+                        write_json(
+                            &mut caller,
+                            &memory,
+                            out_ptr,
+                            out_cap,
+                            &serde_json::Value::Array(v),
+                        )
+                    }
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_dns_resolve_txt",
+            |mut caller: Caller<'_, HostState>,
+             ptr: i32,
+             len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let name = match read_str(&memory, &caller, ptr, len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let m = caller.data().manifold.clone();
+                match dns_host::resolve_txt(&name, &m) {
+                    Ok(records) => {
+                        // Node's resolveTxt yields `string[][]` —
+                        // outer per RR, inner per character-string.
+                        let v: Vec<serde_json::Value> = records
+                            .into_iter()
+                            .map(|fragments| {
+                                serde_json::Value::Array(
+                                    fragments
+                                        .into_iter()
+                                        .map(serde_json::Value::String)
+                                        .collect(),
+                                )
+                            })
+                            .collect();
+                        write_json(
+                            &mut caller,
+                            &memory,
+                            out_ptr,
+                            out_cap,
+                            &serde_json::Value::Array(v),
+                        )
+                    }
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
     Ok(())
 }
 

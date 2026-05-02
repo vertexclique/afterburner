@@ -96,6 +96,16 @@ rustls-pemfile = "2"
 webpki-roots = "0.26"
 rcgen = "0.13"
 
+# B7 dns — `hickory-resolver` (formerly trust-dns-resolver) is the
+# canonical pure-Rust async DNS resolver. We use it synchronously
+# from a worker thread so the host-import boundary stays sync (the
+# plugin can't host-call from inside an async stack — it's running
+# inside Wasmtime). Default features pull in tokio + ring; we keep
+# them off and use the resolver's `Resolver` (sync) entry points.
+hickory-resolver = { version = "0.24", default-features = false, features = [
+    "tokio-runtime", "system-config",
+] }
+
 rquickjs = { version = "0.11", features = ["bindgen"] }
 
 fastrace = { version = "0.7", features = ["enable"] }

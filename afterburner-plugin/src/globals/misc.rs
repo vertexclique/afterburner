@@ -728,6 +728,33 @@ fn install_http_dns<'js>(globals: &Object<'js>) {
             }
         }),
     );
+
+    // Record-type-aware resolvers. Every bridge returns a JSON string
+    // (success) or `__HOST_ERR__:<msg>` (failure). The polyfill is
+    // responsible for `JSON.parse`-ing the success path.
+    macro_rules! bind_dns_str {
+        ($name:literal, $fn:ident) => {
+            let _ = globals.set(
+                $name,
+                Func::from(|name: String| -> String {
+                    let nb = name.as_bytes();
+                    match call_read(|out, cap| unsafe {
+                        $fn(nb.as_ptr(), nb.len() as u32, out, cap)
+                    }) {
+                        Ok(s) => s,
+                        Err(e) => format!("__HOST_ERR__:{e}"),
+                    }
+                }),
+            );
+        };
+    }
+    bind_dns_str!("__host_dns_resolve4", host_dns_resolve4);
+    bind_dns_str!("__host_dns_resolve6", host_dns_resolve6);
+    bind_dns_str!("__host_dns_resolve_mx", host_dns_resolve_mx);
+    bind_dns_str!("__host_dns_resolve_txt", host_dns_resolve_txt);
+    bind_dns_str!("__host_dns_resolve_cname", host_dns_resolve_cname);
+    bind_dns_str!("__host_dns_resolve_ns", host_dns_resolve_ns);
+    bind_dns_str!("__host_dns_reverse", host_dns_reverse);
 }
 
 fn install_zlib<'js>(globals: &Object<'js>) {

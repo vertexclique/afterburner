@@ -31,6 +31,11 @@ uuid.workspace = true
 ureq.workspace = true
 flate2.workspace = true
 kovan-channel.workspace = true
+# B7 dns expansion — hickory-resolver replaces ToSocketAddrs for
+# record-type-aware lookups (MX/TXT/CNAME/...). We run it
+# synchronously from a worker thread; the timeout pattern is shared
+# with `lookup`.
+hickory-resolver = { workspace = true }
 
 # L3 shadows — pure-Rust substitutes for popular npm packages with
 # .node native addons. Each shadow gated behind its own feature so

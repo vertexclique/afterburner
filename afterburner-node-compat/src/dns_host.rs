@@ -1,27 +1,38 @@
-//! `dns.lookup` host function. Synchronous — we have no event loop, and
-//! `ToSocketAddrs` blocks on the resolver anyway. Gated by
-//! `Manifold::net`: any non-`None` value unlocks DNS since the concrete
-//! network operations (HTTP) already require net access.
+//! `dns` host functions — synchronous lookups built on `hickory-resolver`
+//! and `ToSocketAddrs`. We have no event loop, and the plugin can't
+//! host-call from inside an async stack (it's running synchronously
+//! inside Wasmtime), so every entry point here runs the actual
+//! resolver call on a short-lived worker thread and `select!`s on
+//! the result vs. an `after()` timer. The configurable cap lives on
+//! the `Manifold` (`http_timeout_ms` is shared across all
+//! network-adjacent host ops; DNS piggybacks on it).
 //!
-//! Returns the first resolved address, matching the ergonomics of
-//! Node's `dns.lookup(host, cb)` default path (first, no ALL flag).
+//! ### Coverage
+//!
+//! * `lookup` — A/AAAA via `ToSocketAddrs` (matches Node's default
+//!   `lookup` semantics: first IP, family detected).
+//! * `resolve4` / `resolve6` — A / AAAA via hickory.
+//! * `resolve_mx` — MX records `[{exchange, priority}]`.
+//! * `resolve_txt` — TXT records `[["fragment", ...]]` (Node's
+//!   "array of arrays" shape — TXT records can have multiple
+//!   character-strings per record).
+//! * `resolve_cname` — CNAME chain.
+//! * `resolve_ns` — NS records.
+//! * `reverse` — PTR (reverse-IP → hostname).
 //!
 //! ### Timeouts (P5)
 //!
-//! A hung resolver can otherwise wedge the calling thread forever —
-//! `ToSocketAddrs` doesn't honor any timeout. We run the lookup on a
-//! short-lived worker thread and `kovan_channel::select!` on the
-//! result vs. an `after()` timer. The configurable cap lives on the
-//! `Manifold` (`http_timeout_ms` is shared across all network-adjacent
-//! host ops; DNS piggybacks on it). If the timeout fires, we return
-//! a typed `AfterburnerError::Host` — the detached worker thread is
-//! orphaned and cleans itself up when the OS resolver eventually
-//! returns.
+//! A hung resolver can otherwise wedge the calling thread forever.
+//! Same `kovan_channel::select!` pattern as `lookup`. If the timeout
+//! fires, we return a typed `AfterburnerError::Host` — the detached
+//! worker thread is orphaned and cleans itself up when the resolver
+//! eventually returns.
 
 use afterburner_core::{AfterburnerError, Manifold, NetAccess, Result};
+use hickory_resolver::Resolver;
 use kovan_channel::flavors::after::after;
 use kovan_channel::{bounded, select};
-use std::net::ToSocketAddrs;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::thread;
 use std::time::Duration;
 
@@ -31,50 +42,207 @@ use std::time::Duration;
 /// without a hard cap.
 const DEFAULT_DNS_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub fn lookup(hostname: &str, m: &Manifold) -> Result<String> {
+fn check_net(m: &Manifold, label: &str) -> Result<()> {
     if matches!(m.net, NetAccess::None) {
-        return Err(AfterburnerError::PermissionDenied(format!(
-            "dns.lookup({hostname})"
-        )));
+        Err(AfterburnerError::PermissionDenied(label.to_string()))
+    } else {
+        Ok(())
     }
+}
 
-    let timeout = m
-        .http_timeout_ms
+fn timeout(m: &Manifold) -> Duration {
+    m.http_timeout_ms
         .map(Duration::from_millis)
-        .unwrap_or(DEFAULT_DNS_TIMEOUT);
+        .unwrap_or(DEFAULT_DNS_TIMEOUT)
+}
 
-    // One-shot channel for the result. `bounded(1)` — we send exactly
-    // one value.
-    let (tx, rx) = bounded::<Result<String>>(1);
-    let probe = format!("{hostname}:0");
-    let hn = hostname.to_string();
+/// Run `f` on a worker thread and `select!` on its result vs. the
+/// configured timeout. Same pattern shared by every entry below —
+/// keeping it factored out drops a hundred lines of boilerplate and
+/// guarantees uniform timeout semantics.
+fn with_timeout<T, F>(m: &Manifold, label: String, f: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    let (tx, rx) = bounded::<Result<T>>(1);
     thread::spawn(move || {
-        let r = probe
+        tx.send(f());
+    });
+    let timer = after(timeout(m));
+    select! {
+        got = rx => got,
+        _tick = timer => Err(AfterburnerError::Host(format!(
+            "{label}: timed out after {}ms",
+            timeout(m).as_millis()
+        ))),
+    }
+}
+
+/// Build a hickory `Resolver` from `/etc/resolv.conf`. Falls back to
+/// Cloudflare's 1.1.1.1 if the system config can't be read (rare —
+/// happens in chroots / containers without `/etc/resolv.conf`). We
+/// build per-call rather than caching: avoiding a global resolver
+/// keeps the code simpler and the `Resolver` constructor is cheap
+/// (~microseconds; no I/O until a lookup runs).
+fn make_resolver() -> Result<Resolver> {
+    match Resolver::from_system_conf() {
+        Ok(r) => Ok(r),
+        Err(_) => {
+            // Fall back to Cloudflare's resolver. Hickory ships preset
+            // configs for the major public resolvers.
+            use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+            Ok(Resolver::new(ResolverConfig::cloudflare(), ResolverOpts::default())
+                .map_err(|e| AfterburnerError::Host(format!("dns resolver init: {e}")))?)
+        }
+    }
+}
+
+// ----- lookup (A/AAAA via ToSocketAddrs) ----------------------------------
+
+pub fn lookup(hostname: &str, m: &Manifold) -> Result<String> {
+    check_net(m, &format!("dns.lookup({hostname})"))?;
+    let probe = format!("{hostname}:0");
+    let label = format!("dns.lookup({hostname})");
+    let hn = hostname.to_string();
+    with_timeout(m, label.clone(), move || {
+        probe
             .to_socket_addrs()
-            .map_err(|e| AfterburnerError::Host(format!("dns.lookup({hn}): {e}")))
+            .map_err(|e| AfterburnerError::Host(format!("{label}: {e}")))
             .and_then(|mut iter| {
                 iter.next()
                     .map(|sa| sa.ip().to_string())
                     .ok_or_else(|| AfterburnerError::Host(format!("dns.lookup({hn}): no result")))
-            });
-        // If the receiver timed out and got dropped, this send is a
-        // no-op — the worker thread leaks for a bounded duration (the
-        // OS resolver's own internal timeout), then completes and
-        // returns.
-        tx.send(r);
-    });
+            })
+    })
+}
 
-    let timer = after(timeout);
-    // `select!` unwraps `Option<T>` from each Receiver's `try_recv`
-    // and binds the inner `T` to the branch name. So `got: Result<String>`
-    // (since rx is `Receiver<Result<String>>`), and the timer binding is
-    // the fired `Instant` (unused).
-    select! {
-        got = rx => got,
-        _tick = timer => Err(AfterburnerError::Host(format!(
-            "dns.lookup({hostname}): timed out after {}ms",
-            timeout.as_millis()
-        ))),
+// ----- record-type-aware resolvers ----------------------------------------
+
+pub fn resolve4(hostname: &str, m: &Manifold) -> Result<Vec<String>> {
+    check_net(m, &format!("dns.resolve4({hostname})"))?;
+    let hn = hostname.to_string();
+    with_timeout(m, format!("dns.resolve4({hostname})"), move || {
+        let resolver = make_resolver()?;
+        let lookup = resolver
+            .ipv4_lookup(&hn)
+            .map_err(|e| AfterburnerError::Host(format!("dns.resolve4({hn}): {e}")))?;
+        Ok(lookup.iter().map(|a| a.0.to_string()).collect())
+    })
+}
+
+pub fn resolve6(hostname: &str, m: &Manifold) -> Result<Vec<String>> {
+    check_net(m, &format!("dns.resolve6({hostname})"))?;
+    let hn = hostname.to_string();
+    with_timeout(m, format!("dns.resolve6({hostname})"), move || {
+        let resolver = make_resolver()?;
+        let lookup = resolver
+            .ipv6_lookup(&hn)
+            .map_err(|e| AfterburnerError::Host(format!("dns.resolve6({hn}): {e}")))?;
+        Ok(lookup.iter().map(|a| a.0.to_string()).collect())
+    })
+}
+
+pub fn resolve_mx(hostname: &str, m: &Manifold) -> Result<Vec<MxRecord>> {
+    check_net(m, &format!("dns.resolveMx({hostname})"))?;
+    let hn = hostname.to_string();
+    with_timeout(m, format!("dns.resolveMx({hostname})"), move || {
+        let resolver = make_resolver()?;
+        let lookup = resolver
+            .mx_lookup(&hn)
+            .map_err(|e| AfterburnerError::Host(format!("dns.resolveMx({hn}): {e}")))?;
+        Ok(lookup
+            .iter()
+            .map(|r| MxRecord {
+                exchange: r.exchange().to_string(),
+                priority: r.preference(),
+            })
+            .collect())
+    })
+}
+
+pub fn resolve_txt(hostname: &str, m: &Manifold) -> Result<Vec<Vec<String>>> {
+    check_net(m, &format!("dns.resolveTxt({hostname})"))?;
+    let hn = hostname.to_string();
+    with_timeout(m, format!("dns.resolveTxt({hostname})"), move || {
+        let resolver = make_resolver()?;
+        let lookup = resolver
+            .txt_lookup(&hn)
+            .map_err(|e| AfterburnerError::Host(format!("dns.resolveTxt({hn}): {e}")))?;
+        // Node's `resolveTxt` returns `string[][]` — outer per record,
+        // inner per character-string fragment. TXT records can have
+        // multiple <character-string>s per RR (RFC 1035 §3.3.14).
+        Ok(lookup
+            .iter()
+            .map(|rec| {
+                rec.iter()
+                    .map(|frag| String::from_utf8_lossy(frag).into_owned())
+                    .collect::<Vec<_>>()
+            })
+            .collect())
+    })
+}
+
+pub fn resolve_cname(hostname: &str, m: &Manifold) -> Result<Vec<String>> {
+    check_net(m, &format!("dns.resolveCname({hostname})"))?;
+    let hn = hostname.to_string();
+    with_timeout(m, format!("dns.resolveCname({hostname})"), move || {
+        use hickory_resolver::proto::rr::RecordType;
+        let resolver = make_resolver()?;
+        let lookup = resolver
+            .lookup(&hn, RecordType::CNAME)
+            .map_err(|e| AfterburnerError::Host(format!("dns.resolveCname({hn}): {e}")))?;
+        Ok(lookup
+            .iter()
+            .filter_map(|r| r.as_cname().map(|n| n.to_string()))
+            .collect())
+    })
+}
+
+pub fn resolve_ns(hostname: &str, m: &Manifold) -> Result<Vec<String>> {
+    check_net(m, &format!("dns.resolveNs({hostname})"))?;
+    let hn = hostname.to_string();
+    with_timeout(m, format!("dns.resolveNs({hostname})"), move || {
+        use hickory_resolver::proto::rr::RecordType;
+        let resolver = make_resolver()?;
+        let lookup = resolver
+            .lookup(&hn, RecordType::NS)
+            .map_err(|e| AfterburnerError::Host(format!("dns.resolveNs({hn}): {e}")))?;
+        Ok(lookup
+            .iter()
+            .filter_map(|r| r.as_ns().map(|n| n.to_string()))
+            .collect())
+    })
+}
+
+pub fn reverse(ip: &str, m: &Manifold) -> Result<Vec<String>> {
+    check_net(m, &format!("dns.reverse({ip})"))?;
+    let parsed: IpAddr = ip
+        .parse()
+        .map_err(|_| AfterburnerError::Host(format!("dns.reverse({ip}): not a valid IP address")))?;
+    with_timeout(m, format!("dns.reverse({ip})"), move || {
+        let resolver = make_resolver()?;
+        let lookup = resolver
+            .reverse_lookup(parsed)
+            .map_err(|e| AfterburnerError::Host(format!("dns.reverse: {e}")))?;
+        Ok(lookup.iter().map(|n| n.to_string()).collect())
+    })
+}
+
+// ----- helpers carried over the host-import boundary ----------------------
+
+#[derive(Debug, Clone)]
+pub struct MxRecord {
+    pub exchange: String,
+    pub priority: u16,
+}
+
+impl MxRecord {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "exchange": self.exchange,
+            "priority": self.priority,
+        })
     }
 }
 
@@ -119,5 +287,47 @@ mod tests {
             elapsed < Duration::from_millis(1_500),
             "hung past 1.5 s ({elapsed:?}); timeout knob not honored"
         );
+    }
+
+    #[test]
+    fn resolve_methods_respect_sealed_manifold() {
+        // Every entry checks `check_net` first — none of them get to
+        // the resolver under `Manifold::sealed`.
+        let m = Manifold::sealed();
+        assert!(matches!(
+            resolve4("example.com", &m),
+            Err(AfterburnerError::PermissionDenied(_))
+        ));
+        assert!(matches!(
+            resolve6("example.com", &m),
+            Err(AfterburnerError::PermissionDenied(_))
+        ));
+        assert!(matches!(
+            resolve_mx("example.com", &m),
+            Err(AfterburnerError::PermissionDenied(_))
+        ));
+        assert!(matches!(
+            resolve_txt("example.com", &m),
+            Err(AfterburnerError::PermissionDenied(_))
+        ));
+        assert!(matches!(
+            resolve_cname("example.com", &m),
+            Err(AfterburnerError::PermissionDenied(_))
+        ));
+        assert!(matches!(
+            resolve_ns("example.com", &m),
+            Err(AfterburnerError::PermissionDenied(_))
+        ));
+        assert!(matches!(
+            reverse("8.8.8.8", &m),
+            Err(AfterburnerError::PermissionDenied(_))
+        ));
+    }
+
+    #[test]
+    fn reverse_rejects_non_ip() {
+        let m = Manifold::open();
+        let result = reverse("not-an-ip", &m);
+        assert!(matches!(result, Err(AfterburnerError::Host(_))));
     }
 }

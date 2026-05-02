@@ -86,6 +86,53 @@ unsafe extern "C" {
         out_cap: u32,
     ) -> i32;
 
+    // Record-type-aware resolvers. All return JSON-encoded result
+    // strings: `["addr", ...]` for resolve4 / resolve6 / cname / ns /
+    // reverse, `[{"exchange": "...", "priority": N}, ...]` for mx,
+    // and `[["fragment", ...], ...]` for txt.
+    pub fn host_dns_resolve4(
+        name_ptr: *const u8,
+        name_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_dns_resolve6(
+        name_ptr: *const u8,
+        name_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_dns_resolve_mx(
+        name_ptr: *const u8,
+        name_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_dns_resolve_txt(
+        name_ptr: *const u8,
+        name_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_dns_resolve_cname(
+        name_ptr: *const u8,
+        name_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_dns_resolve_ns(
+        name_ptr: *const u8,
+        name_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_dns_reverse(
+        ip_ptr: *const u8,
+        ip_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+
     // ---- zlib --------------------------------------------------------
     pub fn host_zlib_deflate_sync(
         in_ptr: *const u8,

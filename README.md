@@ -144,7 +144,7 @@ cd afterburner-plugin
 | Command | What it does |
 |:--------|:-------------|
 | `cargo build` | Builds the six host crates (skips the plugin). |
-| `cargo test --workspace --exclude afterburner-plugin` | Runs the full 268-test suite. |
+| `cargo test --workspace --exclude afterburner-plugin` | Runs the full 282-test suite. |
 | `cargo clippy --workspace --exclude afterburner-plugin --all-targets` | Linter check. |
 | `cargo test -p afterburner-ignite --release perf_smoke` | Native throughput smoke. |
 | `cargo test -p afterburner-wasi --release perf_smoke` | WASM throughput smoke. |
@@ -186,7 +186,7 @@ lives in **[`docs/NODE_COMPAT.md`](./docs/NODE_COMPAT.md)**.
 | **Host-backed** | `fs` (incl. `createReadStream` / `createWriteStream`, `fs.promises`) | `Manifold::fs` (`None` / `ReadOnly(roots)` / `ReadWrite(roots)`) |
 | | `crypto` (hash, hmac, AES-GCM/CBC, PBKDF2, scrypt, RSA & ECDSA sign/verify, randomBytes/UUID) | `Manifold::crypto` |
 | | `http` / `https` | `Manifold::net` (outbound only) |
-| | `dns` | `Manifold::net` |
+| | `dns` — `lookup` + `resolve{4,6,Mx,Txt,Cname,Ns}` + `reverse` (record-type-aware via `hickory-resolver`); `dns.Resolver` class; callback + `dns.promises.*` shapes | `Manifold::net` (any non-`None` unlocks DNS; `None` → `EACCES`) |
 | | `os` | always on (non-sensitive) |
 | | `zlib` (deflate/inflate/gzip/gunzip via Rust `flate2`) | always on (pure compute) |
 | | `child_process` | `Manifold::child_process` — **native path only** |
