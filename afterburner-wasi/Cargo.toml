@@ -17,7 +17,16 @@ host-http = ["afterburner-core/host-http"]
 # Pulls axum + tokio + hyper into the crate. The `burn` CLI enables
 # this; library consumers that only run UDF / one-shot scripts
 # leave it off and don't pay the cost.
-daemon = ["dep:axum", "dep:tokio", "dep:hyper", "dep:bytes"]
+daemon = [
+    "dep:axum",
+    "dep:tokio",
+    "dep:hyper",
+    "dep:bytes",
+    "dep:rustls",
+    "dep:tokio-rustls",
+    "dep:rustls-pemfile",
+    "dep:webpki-roots",
+]
 # L3 shadows. Each shadow pulls in its own Rust crate (e.g. bcrypt)
 # and wires a host import the plugin's JS-side polyfill calls at
 # require() time. Plugin itself always ships the import stubs;
@@ -47,12 +56,19 @@ axum = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
 
 [dev-dependencies]
 afterburner-ignite.workspace = true
 rsa.workspace = true
 p256.workspace = true
 rand = "0.8"
+# B7 tls — generate self-signed certs in unit tests for the
+# server-config builder.
+rcgen = { workspace = true }
 
 [build-dependencies]
 sha2.workspace = true

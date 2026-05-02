@@ -46,6 +46,14 @@ serial_test = "3"
 tempfile.workspace = true
 afterburner-core.workspace = true
 afterburner-wasi.workspace = true
+# B7 tls test fixtures — generate self-signed certs and spin up a
+# tokio-rustls server in a background thread so the burn-as-client
+# tests don't need any external infrastructure.
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+rcgen = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "io-util", "net", "macros"] }
 
 [features]
 default = ["wasm", "native", "thrust"]

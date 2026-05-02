@@ -69,11 +69,11 @@ pub mod wasm {
         DaemonHttp, DaemonRuntime, DaemonWorkers, WasmCombustor, WasmConfig, WorkerConfig,
         WorkerEvent,
     };
-    // `DaemonNet` is gated behind afterburner-wasi/daemon; the `bin`
-    // feature pulls that in. Library callers without `bin` don't see
-    // the type — net is daemon-only by design.
+    // `DaemonNet` / `DaemonTls` are gated behind afterburner-wasi/daemon;
+    // the `bin` feature pulls that in. Library callers without `bin`
+    // don't see the types — net + tls are daemon-only by design.
     #[cfg(feature = "bin")]
-    pub use afterburner_wasi::{DaemonNet, NetEvent};
+    pub use afterburner_wasi::{DaemonNet, DaemonTls, NetEvent, TlsEvent};
 }
 
 #[cfg(feature = "native")]

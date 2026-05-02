@@ -16,6 +16,8 @@
 use crate::daemon_http::DaemonHttp;
 #[cfg(feature = "daemon")]
 use crate::daemon_net::DaemonNet;
+#[cfg(feature = "daemon")]
+use crate::daemon_tls::DaemonTls;
 use crate::daemon_workers::DaemonWorkers;
 use crate::host::HostState;
 use afterburner_core::{
@@ -243,6 +245,12 @@ impl DaemonRuntime {
         {
             return true;
         }
+        #[cfg(feature = "daemon")]
+        if let Some(t) = &self.store.data().daemon_tls
+            && t.has_refs()
+        {
+            return true;
+        }
         false
     }
 
@@ -301,6 +309,25 @@ impl DaemonRuntime {
     pub fn mark_net_closed(&self, conn_id: i32) {
         if let Some(n) = &self.store.data().daemon_net {
             n.mark_closed(conn_id);
+        }
+    }
+
+    /// Install a tls coordinator on this daemon's Store. Same posture
+    /// as `install_net`: parent + worker call this before `run_init`.
+    #[cfg(feature = "daemon")]
+    pub fn install_tls(&mut self, tls: Arc<DaemonTls>) {
+        self.store.data_mut().daemon_tls = Some(tls);
+    }
+
+    #[cfg(feature = "daemon")]
+    pub fn try_recv_tls_event(&self) -> Option<crate::daemon_tls::TlsEvent> {
+        self.store.data().daemon_tls.as_ref()?.try_recv_event()
+    }
+
+    #[cfg(feature = "daemon")]
+    pub fn mark_tls_closed(&self, conn_id: i32) {
+        if let Some(t) = &self.store.data().daemon_tls {
+            t.mark_closed(conn_id);
         }
     }
 

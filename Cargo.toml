@@ -87,6 +87,15 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "macros", "
 hyper = "1"
 bytes = "1"
 
+# B7 tls — `tls.connect` / `tls.createServer`, gated the same way as
+# the daemon HTTP plumbing above. `webpki-roots` ships the Mozilla
+# root CA bundle so client connects work without filesystem access.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = "2"
+webpki-roots = "0.26"
+rcgen = "0.13"
+
 rquickjs = { version = "0.11", features = ["bindgen"] }
 
 fastrace = { version = "0.7", features = ["enable"] }

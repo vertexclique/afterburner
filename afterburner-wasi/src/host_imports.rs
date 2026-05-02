@@ -58,6 +58,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_timers(linker)?;
     wrap_workers(linker)?;
     wrap_net(linker)?;
+    wrap_tls(linker)?;
     Ok(())
 }
 
@@ -128,6 +129,78 @@ fn wrap_net(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         .func_wrap(
             NS,
             "host_net_close_server",
+            |_: Caller<'_, HostState>, _id: i32| -> i32 { E_NO_DAEMON },
+        )
+        .map_err(link_err)?;
+    Ok(())
+}
+
+// `wrap_tls` mirrors `wrap_net` — daemon-on registers the real
+// coordinator, daemon-off registers stubs returning E_NO_DAEMON. The
+// plugin imports these unconditionally so we always declare them.
+#[cfg(not(feature = "daemon"))]
+fn wrap_tls(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    const E_NO_DAEMON: i32 = -1;
+    linker
+        .func_wrap(
+            NS,
+            "host_tls_connect",
+            |_: Caller<'_, HostState>,
+             _h_p: i32,
+             _h_l: i32,
+             _port: i32,
+             _o_p: i32,
+             _o_l: i32|
+             -> i32 { E_NO_DAEMON },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_tls_write",
+            |_: Caller<'_, HostState>, _id: i32, _p_p: i32, _p_l: i32| -> i32 { E_NO_DAEMON },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_tls_end",
+            |_: Caller<'_, HostState>, _id: i32| -> i32 { E_NO_DAEMON },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_tls_destroy",
+            |_: Caller<'_, HostState>, _id: i32| -> i32 { E_NO_DAEMON },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_tls_pending",
+            |_: Caller<'_, HostState>, _id: i32| -> i32 { 0 },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_tls_listen",
+            |_: Caller<'_, HostState>,
+             _h_p: i32,
+             _h_l: i32,
+             _port: i32,
+             _c_p: i32,
+             _c_l: i32,
+             _k_p: i32,
+             _k_l: i32|
+             -> i32 { E_NO_DAEMON },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_tls_close_server",
             |_: Caller<'_, HostState>, _id: i32| -> i32 { E_NO_DAEMON },
         )
         .map_err(link_err)?;
@@ -2813,6 +2886,244 @@ fn wrap_net(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         .map_err(link_err)?;
 
     Ok(())
+}
+
+// ---- tls (B7) -----------------------------------------------------------
+//
+// Seven host imports back the `tls` polyfill:
+//
+//   __host_tls_connect(host, port, opts_json)        -> conn_id | error
+//   __host_tls_write(conn_id, payload_b64)           -> 0 | error
+//   __host_tls_end(conn_id)                          -> 0 | error
+//   __host_tls_destroy(conn_id)                      -> 0 | error
+//   __host_tls_pending(conn_id)                      -> bytes (≥0) | 0
+//   __host_tls_listen(host, port, cert_pem, key_pem) -> server_id | error
+//   __host_tls_close_server(server_id)               -> 0 | error
+//
+// The connect-options JSON carries `rejectUnauthorized`, `servername`,
+// `alpn` (string array), and `ca` (PEM blob). Schema is locked at the
+// polyfill boundary; the host treats every field as optional and
+// defensively defaults to safe values (full CA verification ON).
+
+#[cfg(feature = "daemon")]
+fn wrap_tls(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    use crate::daemon_tls::errors as terr;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_tls_connect",
+            |mut caller: Caller<'_, HostState>,
+             host_ptr: i32,
+             host_len: i32,
+             port: i32,
+             opts_ptr: i32,
+             opts_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return terr::E_OTHER;
+                };
+                let Some(host) = read_str(&memory, &caller, host_ptr, host_len) else {
+                    record(&mut caller, "tls_connect: invalid host");
+                    return terr::E_OTHER;
+                };
+                if !(1..=65535).contains(&port) {
+                    record(&mut caller, &format!("tls_connect: invalid port {port}"));
+                    return terr::E_BAD_PORT;
+                }
+                let opts_json = read_str(&memory, &caller, opts_ptr, opts_len).unwrap_or_default();
+                let opts = parse_tls_connect_opts(&opts_json);
+                let Some(tls) = caller.data().daemon_tls.clone() else {
+                    record(&mut caller, "tls.connect requires daemon mode");
+                    return terr::E_NO_DAEMON;
+                };
+                let mut last_error = String::new();
+                let result = tls.connect(&host, port as u16, opts, &mut last_error);
+                if !last_error.is_empty() {
+                    caller.data_mut().last_error = last_error;
+                }
+                result
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_tls_write",
+            |mut caller: Caller<'_, HostState>,
+             conn_id: i32,
+             payload_ptr: i32,
+             payload_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return terr::E_OTHER;
+                };
+                let Some(payload) = read_str(&memory, &caller, payload_ptr, payload_len) else {
+                    record(&mut caller, "tls_write: invalid payload");
+                    return terr::E_BAD_PAYLOAD;
+                };
+                let Some(tls) = caller.data().daemon_tls.clone() else {
+                    return terr::E_NO_DAEMON;
+                };
+                let mut last_error = String::new();
+                let bytes = match crate::daemon_tls::decode_payload(&payload, &mut last_error) {
+                    Some(b) => b,
+                    None => {
+                        caller.data_mut().last_error = last_error;
+                        return terr::E_BAD_PAYLOAD;
+                    }
+                };
+                let result = tls.write(conn_id, bytes, &mut last_error);
+                if !last_error.is_empty() {
+                    caller.data_mut().last_error = last_error;
+                }
+                result
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_tls_end",
+            |mut caller: Caller<'_, HostState>, conn_id: i32| -> i32 {
+                let Some(tls) = caller.data().daemon_tls.clone() else {
+                    return terr::E_NO_DAEMON;
+                };
+                let mut last_error = String::new();
+                let result = tls.end(conn_id, &mut last_error);
+                if !last_error.is_empty() {
+                    caller.data_mut().last_error = last_error;
+                }
+                result
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_tls_destroy",
+            |caller: Caller<'_, HostState>, conn_id: i32| -> i32 {
+                let Some(tls) = caller.data().daemon_tls.clone() else {
+                    return terr::E_NO_DAEMON;
+                };
+                tls.destroy(conn_id)
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_tls_pending",
+            |caller: Caller<'_, HostState>, conn_id: i32| -> i32 {
+                caller
+                    .data()
+                    .daemon_tls
+                    .as_ref()
+                    .map(|t| t.pending_bytes(conn_id))
+                    .unwrap_or(0)
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_tls_listen",
+            |mut caller: Caller<'_, HostState>,
+             host_ptr: i32,
+             host_len: i32,
+             port: i32,
+             cert_ptr: i32,
+             cert_len: i32,
+             key_ptr: i32,
+             key_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return terr::E_OTHER;
+                };
+                let Some(host) = read_str(&memory, &caller, host_ptr, host_len) else {
+                    record(&mut caller, "tls_listen: invalid host");
+                    return terr::E_OTHER;
+                };
+                if !(0..=65535).contains(&port) {
+                    record(&mut caller, &format!("tls_listen: invalid port {port}"));
+                    return terr::E_BAD_PORT;
+                }
+                let Some(cert_pem) = read_str(&memory, &caller, cert_ptr, cert_len) else {
+                    record(&mut caller, "tls_listen: invalid cert PEM");
+                    return terr::E_BAD_CERT;
+                };
+                let Some(key_pem) = read_str(&memory, &caller, key_ptr, key_len) else {
+                    record(&mut caller, "tls_listen: invalid key PEM");
+                    return terr::E_BAD_CERT;
+                };
+                let Some(tls) = caller.data().daemon_tls.clone() else {
+                    record(&mut caller, "tls.createServer requires daemon mode");
+                    return terr::E_NO_DAEMON;
+                };
+                let mut last_error = String::new();
+                let result =
+                    tls.listen(&host, port as u16, &cert_pem, &key_pem, &mut last_error);
+                if !last_error.is_empty() {
+                    caller.data_mut().last_error = last_error;
+                }
+                result
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_tls_close_server",
+            |caller: Caller<'_, HostState>, server_id: i32| -> i32 {
+                let Some(tls) = caller.data().daemon_tls.clone() else {
+                    return terr::E_NO_DAEMON;
+                };
+                tls.close_server(server_id)
+            },
+        )
+        .map_err(link_err)?;
+
+    Ok(())
+}
+
+#[cfg(feature = "daemon")]
+fn parse_tls_connect_opts(json: &str) -> crate::daemon_tls::ConnectOptions {
+    use crate::daemon_tls::ConnectOptions;
+    let mut out = ConnectOptions {
+        // Node default is `rejectUnauthorized: true`. Mirror it: the
+        // polyfill always sends the value, but treat missing/invalid
+        // JSON as the safe value rather than the "skip verify" one.
+        reject_unauthorized: true,
+        servername: String::new(),
+        alpn: Vec::new(),
+        ca_pem: String::new(),
+    };
+    let v: serde_json::Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return out,
+    };
+    if let Some(b) = v.get("rejectUnauthorized").and_then(|x| x.as_bool()) {
+        out.reject_unauthorized = b;
+    }
+    if let Some(s) = v.get("servername").and_then(|x| x.as_str()) {
+        out.servername = s.to_string();
+    }
+    if let Some(arr) = v.get("alpn").and_then(|x| x.as_array()) {
+        out.alpn = arr
+            .iter()
+            .filter_map(|x| x.as_str().map(str::to_string))
+            .collect();
+    }
+    if let Some(s) = v.get("ca").and_then(|x| x.as_str()) {
+        out.ca_pem = s.to_string();
+    }
+    out
 }
 
 // ---- helpers -------------------------------------------------------------

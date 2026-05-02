@@ -172,6 +172,82 @@ const DISPATCH_SOURCE: &str = r#"
         if (srv && typeof srv._dispatchServerError === 'function') {
             try { srv._dispatchServerError(ev.message || ''); } catch (_) {}
         }
+    } else if (kind === 'tls-connect') {
+        // B7 tls: outbound TLS handshake completed.
+        const table = globalThis.__ab_tls_handlers || {};
+        const sock = table[ev.conn_id];
+        if (sock && typeof sock._dispatchSecureConnect === 'function') {
+            try {
+                sock._dispatchSecureConnect(
+                    ev.local || null,
+                    ev.remote || null,
+                    ev.alpn_protocol || null,
+                    ev.protocol || null,
+                    !!ev.authorized
+                );
+            } catch (e) {
+                try { console.error('tls connect dispatch:', (e && e.stack) || e); } catch (_) {}
+            }
+        }
+    } else if (kind === 'tls-data') {
+        const table = globalThis.__ab_tls_handlers || {};
+        const sock = table[ev.conn_id];
+        if (sock && typeof sock._dispatchData === 'function') {
+            try { sock._dispatchData(ev.payload_b64 || ''); }
+            catch (e) { try { console.error('tls data dispatch:', (e && e.stack) || e); } catch (_) {} }
+        }
+    } else if (kind === 'tls-end') {
+        const table = globalThis.__ab_tls_handlers || {};
+        const sock = table[ev.conn_id];
+        if (sock && typeof sock._dispatchEnd === 'function') {
+            try { sock._dispatchEnd(); } catch (_) {}
+        }
+    } else if (kind === 'tls-drain') {
+        const table = globalThis.__ab_tls_handlers || {};
+        const sock = table[ev.conn_id];
+        if (sock && typeof sock._dispatchDrain === 'function') {
+            try { sock._dispatchDrain(); } catch (_) {}
+        }
+    } else if (kind === 'tls-error') {
+        const table = globalThis.__ab_tls_handlers || {};
+        const sock = table[ev.conn_id];
+        if (sock && typeof sock._dispatchError === 'function') {
+            try { sock._dispatchError(ev.message || '', ev.code || ''); } catch (_) {}
+        }
+    } else if (kind === 'tls-close') {
+        const table = globalThis.__ab_tls_handlers || {};
+        const sock = table[ev.conn_id];
+        if (sock && typeof sock._dispatchClose === 'function') {
+            try { sock._dispatchClose(!!ev.had_error); } catch (_) {}
+        }
+    } else if (kind === 'tls-listening') {
+        const table = globalThis.__ab_tls_server_handlers || {};
+        const srv = table[ev.server_id];
+        if (srv && typeof srv._dispatchListening === 'function') {
+            try { srv._dispatchListening(ev.port | 0); } catch (_) {}
+        }
+    } else if (kind === 'tls-connection') {
+        const table = globalThis.__ab_tls_server_handlers || {};
+        const srv = table[ev.server_id];
+        if (srv && typeof srv._dispatchConnection === 'function') {
+            try {
+                srv._dispatchConnection(
+                    ev.conn_id | 0,
+                    ev.local || null,
+                    ev.remote || null,
+                    ev.alpn_protocol || null,
+                    ev.protocol || null
+                );
+            } catch (e) {
+                try { console.error('tls connection dispatch:', (e && e.stack) || e); } catch (_) {}
+            }
+        }
+    } else if (kind === 'tls-server-error') {
+        const table = globalThis.__ab_tls_server_handlers || {};
+        const srv = table[ev.server_id];
+        if (srv && typeof srv._dispatchServerError === 'function') {
+            try { srv._dispatchServerError(ev.message || ''); } catch (_) {}
+        }
     } else {
         // Unknown event kind — surface on stderr for diagnosis.
         try { console.error('daemon-event: unknown kind=' + kind); } catch (_) {}

@@ -627,12 +627,12 @@ fn buffer_compare_indexof() {
 
 #[test]
 fn stubs_give_clear_error() {
-    // `tls` is still a stub (no real polyfill ships yet); `net` and
-    // `worker_threads` were removed from the stub list once their
-    // polyfills landed.
+    // `net`, `tls`, and `worker_threads` were removed from the stub
+    // list once their polyfills landed (B7 / B10). `dgram` (UDP) is
+    // still stubbed.
     let src = r#"
         module.exports = () => {
-            try { require('tls').connect(); return 'unexpected'; }
+            try { require('dgram').createSocket(); return 'unexpected'; }
             catch (e) { return { msg: e.message, code: e.code }; }
         };
     "#;

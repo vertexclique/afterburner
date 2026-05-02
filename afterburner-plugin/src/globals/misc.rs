@@ -590,6 +590,81 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
             unsafe { host_net_close_server(server_id as i32) as f64 }
         }),
     );
+
+    // ---- tls (B7) -------------------------------------------------
+    //
+    // Connect carries an opts JSON blob (rejectUnauthorized,
+    // servername, alpn, ca PEM) so the host can build the rustls
+    // ClientConfig in one shot. Server `listen` carries cert+key PEM
+    // strings.
+    let _ = globals.set(
+        "__host_tls_connect",
+        Func::from(|host: String, port: f64, opts_json: String| -> f64 {
+            let hb = host.as_bytes();
+            let ob = opts_json.as_bytes();
+            unsafe {
+                host_tls_connect(
+                    hb.as_ptr(),
+                    hb.len() as u32,
+                    port as i32,
+                    ob.as_ptr(),
+                    ob.len() as u32,
+                ) as f64
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_tls_write",
+        Func::from(|conn_id: f64, payload_b64: String| -> f64 {
+            let pb = payload_b64.as_bytes();
+            unsafe {
+                host_tls_write(conn_id as i32, pb.as_ptr(), pb.len() as u32) as f64
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_tls_end",
+        Func::from(|conn_id: f64| -> f64 {
+            unsafe { host_tls_end(conn_id as i32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_tls_destroy",
+        Func::from(|conn_id: f64| -> f64 {
+            unsafe { host_tls_destroy(conn_id as i32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_tls_pending",
+        Func::from(|conn_id: f64| -> f64 {
+            unsafe { host_tls_pending(conn_id as i32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_tls_listen",
+        Func::from(|host: String, port: f64, cert_pem: String, key_pem: String| -> f64 {
+            let hb = host.as_bytes();
+            let cb = cert_pem.as_bytes();
+            let kb = key_pem.as_bytes();
+            unsafe {
+                host_tls_listen(
+                    hb.as_ptr(),
+                    hb.len() as u32,
+                    port as i32,
+                    cb.as_ptr(),
+                    cb.len() as u32,
+                    kb.as_ptr(),
+                    kb.len() as u32,
+                ) as f64
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_tls_close_server",
+        Func::from(|server_id: f64| -> f64 {
+            unsafe { host_tls_close_server(server_id as i32) as f64 }
+        }),
+    );
 }
 
 fn install_os<'js>(globals: &Object<'js>) {

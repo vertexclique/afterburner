@@ -33,8 +33,11 @@ use std::time::{Duration, Instant};
 
 use crate::AfterburnerError;
 use crate::ScriptInvocation;
-use crate::wasm::{DaemonHttp, DaemonNet, DaemonRuntime, DaemonWorkers, WasmCombustor, WasmConfig};
+use crate::wasm::{
+    DaemonHttp, DaemonNet, DaemonRuntime, DaemonTls, DaemonWorkers, WasmCombustor, WasmConfig,
+};
 use afterburner_wasi::daemon_net::NetEvent;
+use afterburner_wasi::daemon_tls::TlsEvent;
 use afterburner_wasi::daemon_workers::WorkerEvent;
 
 use super::args::Cli;
@@ -87,8 +90,12 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
     // B7: workers can use net too. Inherits the (already-narrowed)
     // manifold from the parent's CLI flags — capability inheritance
     // is enforced one level up at spawn-time, not here.
-    let net = DaemonNet::new(rt.handle().clone(), manifold);
+    let net = DaemonNet::new(rt.handle().clone(), manifold.clone());
     daemon.install_net(Arc::clone(&net));
+
+    // B7 tls — same posture as net.
+    let tls = DaemonTls::new(rt.handle().clone(), manifold);
+    daemon.install_tls(Arc::clone(&tls));
 
     if let Err(e) = daemon.run_init(source, &invocation) {
         flush_streams(&mut daemon)?;
@@ -218,6 +225,27 @@ fn run_child_event_loop(
             }
         }
 
+        // TLS events.
+        for _ in 0..256 {
+            let Some(evt) = daemon.try_recv_tls_event() else {
+                break;
+            };
+            did_work = true;
+            let (envelope, reap_id) = tls_event_to_envelope(&evt);
+            let res = daemon.dispatch_event(envelope);
+            flush_streams(daemon)?;
+            if let Err(e) = res {
+                if let AfterburnerError::ProcessExit(code) = &e {
+                    std::process::exit(*code);
+                }
+                let _ = std::io::stderr()
+                    .write_all(format!("burn worker: tls error: {e}\n").as_bytes());
+            }
+            if let Some(id) = reap_id {
+                daemon.mark_tls_closed(id);
+            }
+        }
+
         // Exit conditions: parent closed our stdin AND nothing else
         // is keeping us alive (no ref'd timer / listener). Workers
         // that registered a `parentPort.on('message')` only stay alive
@@ -335,6 +363,113 @@ fn net_event_to_envelope(evt: &NetEvent) -> (serde_json::Value, Option<i32>) {
         NetEvent::ServerError { server_id, message } => (
             serde_json::json!({
                 "kind": "net-server-error",
+                "server_id": server_id,
+                "message": message,
+            }),
+            None,
+        ),
+    }
+}
+
+/// Same shape as `cli::daemon::tls_event_to_envelope`. Duplicated for
+/// the same reason as `net_event_to_envelope`.
+fn tls_event_to_envelope(evt: &TlsEvent) -> (serde_json::Value, Option<i32>) {
+    fn addr_json(addr: &Option<std::net::SocketAddr>) -> serde_json::Value {
+        match addr {
+            Some(a) => {
+                let family = if a.is_ipv4() { "IPv4" } else { "IPv6" };
+                serde_json::json!({
+                    "address": a.ip().to_string(),
+                    "family": family,
+                    "port": a.port(),
+                })
+            }
+            None => serde_json::Value::Null,
+        }
+    }
+    match evt {
+        TlsEvent::Connect {
+            conn_id,
+            local,
+            remote,
+            alpn_protocol,
+            protocol,
+            authorized,
+        } => (
+            serde_json::json!({
+                "kind": "tls-connect",
+                "conn_id": conn_id,
+                "local": addr_json(local),
+                "remote": addr_json(remote),
+                "alpn_protocol": alpn_protocol,
+                "protocol": protocol,
+                "authorized": authorized,
+            }),
+            None,
+        ),
+        TlsEvent::Connection {
+            server_id,
+            conn_id,
+            local,
+            remote,
+            alpn_protocol,
+            protocol,
+        } => (
+            serde_json::json!({
+                "kind": "tls-connection",
+                "server_id": server_id,
+                "conn_id": conn_id,
+                "local": addr_json(local),
+                "remote": addr_json(remote),
+                "alpn_protocol": alpn_protocol,
+                "protocol": protocol,
+            }),
+            None,
+        ),
+        TlsEvent::Data { conn_id, payload_b64 } => (
+            serde_json::json!({
+                "kind": "tls-data",
+                "conn_id": conn_id,
+                "payload_b64": payload_b64,
+            }),
+            None,
+        ),
+        TlsEvent::End { conn_id } => (
+            serde_json::json!({"kind": "tls-end", "conn_id": conn_id}),
+            None,
+        ),
+        TlsEvent::Drain { conn_id } => (
+            serde_json::json!({"kind": "tls-drain", "conn_id": conn_id}),
+            None,
+        ),
+        TlsEvent::Close { conn_id, had_error } => (
+            serde_json::json!({
+                "kind": "tls-close",
+                "conn_id": conn_id,
+                "had_error": had_error,
+            }),
+            Some(*conn_id),
+        ),
+        TlsEvent::Error { conn_id, message, code } => (
+            serde_json::json!({
+                "kind": "tls-error",
+                "conn_id": conn_id,
+                "message": message,
+                "code": code,
+            }),
+            None,
+        ),
+        TlsEvent::Listening { server_id, port } => (
+            serde_json::json!({
+                "kind": "tls-listening",
+                "server_id": server_id,
+                "port": port,
+            }),
+            None,
+        ),
+        TlsEvent::ServerError { server_id, message } => (
+            serde_json::json!({
+                "kind": "tls-server-error",
                 "server_id": server_id,
                 "message": message,
             }),

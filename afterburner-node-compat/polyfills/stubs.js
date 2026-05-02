@@ -1,16 +1,15 @@
 // Stub modules that throw a helpful NotSupportedInSandbox error on any
-// property access. Registering them means `require('tls')` returns an
-// object instead of `Cannot find module 'tls'` — scripts get a clear
+// property access. Registering them means `require('dgram')` returns an
+// object instead of `Cannot find module 'dgram'` — scripts get a clear
 // signal about what's unsupported and why.
 //
 // Only list modules that have NO real polyfill. Bundle concat order is
 // alphabetical, so anything listed here would clobber a real polyfill
-// whose filename sorts before `stubs.js` (e.g. `net.js`). `net` and
-// `worker_threads` ship real polyfills and are intentionally absent.
+// whose filename sorts before `stubs.js` (e.g. `net.js`). `net`, `tls`,
+// and `worker_threads` ship real polyfills and are intentionally absent.
 
 (function installStubs() {
     var reasons = {
-        tls: 'raw TLS sockets',
         dgram: 'UDP sockets',
         http2: 'HTTP/2 (plain http/https works for outbound requests)',
         cluster: 'multi-process clustering',

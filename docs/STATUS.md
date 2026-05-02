@@ -4,7 +4,7 @@ Source of truth for what's shipped vs. what's left in the
 `burn` runtime plan (`docs/IMPL_PLAN_BURN_RUNTIME.md`) and the
 adjacent L3 shadow plan (locked decision Q3 in that doc).
 
-**Last refreshed:** post B7 net (raw TCP).
+**Last refreshed:** post B7 tls (raw TLS).
 Regenerate by hand when a phase lands; `git log --oneline` is
 authoritative if this file drifts.
 
@@ -12,10 +12,10 @@ authoritative if this file drifts.
 
 ## Test count
 
-**252 tests pass workspace-wide** across the `afterburner` crate's
-21 integration-test files plus the other workspace crates' unit /
-integration suites (incl. 6 lock-free `DaemonNet` unit tests). Run
-the full matrix with:
+**268 tests pass workspace-wide** across the `afterburner` crate's
+23 integration-test files plus the other workspace crates' unit /
+integration suites (incl. 6 lock-free `DaemonNet` + 6 `DaemonTls`
+unit tests). Run the full matrix with:
 
 ```bash
 cargo test --workspace --exclude afterburner-plugin
@@ -48,7 +48,8 @@ crates' tests that load the committed `.wasm`. Rebuild it via
 | **B8** — TypeScript via oxc (strip-types) | `burn foo.ts` / `.mts` / `.cts` transpile transparently; `.tsx` rejected | ✅ | `be560ad` | 13 |
 | **B9** — ESM → CJS transform | `import X from 'Y'` / `export default X` / named exports / re-exports work in `.mjs` / `.ts` | ✅ | `c7090b2` | 18 |
 | **B10** — `worker_threads` minimal subset | Process-per-worker via `burn run --internal-worker`; length-prefixed JSON IPC; `Worker(path,{workerData})` / `worker.{postMessage,terminate,on('message'\|'online'\|'error'\|'exit')}` / `parentPort.{postMessage,on('message'),close}` / `isMainThread` / `threadId`; capability inheritance never widens; `BURN_WORKER_DEPTH` cap; Linux `PR_SET_PDEATHSIG=SIGKILL`; lock-free runtime (HopscotchMap + kovan_channel) | ✅ | `ead2d7b` | 16 |
-| **B7 — `net` raw TCP sockets** | `net.connect` (client) + `net.createServer` (server) — Duplex-shaped EventEmitter facade over per-connection tokio tasks (`tokio::select!` over read+wake-Notify, no Mutex), 64 KiB write HWM with `'drain'` backpressure, daemon-event dispatch for `'connect'`/`'data'`/`'end'`/`'drain'`/`'close'`/`'error'`, `OutboundFull` allow-list (exact + `*` + `*.suffix`), inbound listening daemon-mode-only, `net.{isIP,isIPv4,isIPv6}` | ✅ | _this commit_ | 8+5 |
+| **B7 — `net` raw TCP sockets** | `net.connect` (client) + `net.createServer` (server) — Duplex-shaped EventEmitter facade over per-connection tokio tasks (`tokio::select!` over read+wake-Notify, no Mutex), 64 KiB write HWM with `'drain'` backpressure, daemon-event dispatch for `'connect'`/`'data'`/`'end'`/`'drain'`/`'close'`/`'error'`, `OutboundFull` allow-list (exact + `*` + `*.suffix`), inbound listening daemon-mode-only, `net.{isIP,isIPv4,isIPv6}` | ✅ | `96e0862` | 8+5 |
+| **B7 — `tls` raw TLS sockets** | `tls.connect` (client) + `tls.createServer` (server) on top of `tokio-rustls`; same per-conn-task / 64 KiB HWM / lock-free shape as B7-net; mozilla `webpki-roots` for client verification, `rejectUnauthorized: false` opts out, `ca:` accepts custom PEM roots, ALPN negotiation surfaces `socket.alpnProtocol` + `getProtocol()`; server takes PEM `cert` / `key`; daemon-event dispatch for `'secureConnect'`/`'data'`/`'end'`/`'drain'`/`'close'`/`'error'`/`'secureConnection'`; truncated-EOF (no `close_notify`) emits `'end'` instead of `'error'` to match Node's tls; library mode never installs a coordinator | ✅ | _this commit_ | 6+4 |
 
 ### L3 shadows — pure-Rust substitutes for native-addon npm packages
 
@@ -71,7 +72,6 @@ extern + plugin JS global.
 
 | Phase | Scope | Unblocks |
 |:--|:--|:--|
-| **B7 — `tls` raw sockets** | `tls.connect` + `tls.createServer` on top of B7-net | TLS-terminating clients (secure redis, encrypted postgres), server-side HTTPS with custom TLS |
 | **B7 — `fs/promises` expansion** | `watch`, `realpath`, `cp`, `opendir`, file-descriptor APIs | File-watcher scripts, complex fs scripts |
 | **B7 — `dns` expansion** | `dns.resolveMx`, `dns.resolveTxt`, reverse lookup, cache control | Mail servers, service discovery |
 | **B7 — `child_process` for WASM** | WASM-side `spawn` / `exec` — currently native-only (WASM can't `fork(2)`; would need a host proxy) | Scripts that orchestrate subprocesses under the sandbox |
@@ -143,5 +143,6 @@ Build the CLI with everything: `cargo install afterburner
 | Issuing + verifying JWTs in auth middleware | ✅ |
 | `new Worker('./bg.js', { workerData })` with `postMessage` round-trip | ✅ |
 | **Raw TCP protocol clients** (`net.connect` / `net.createServer`) | ✅ |
-| Database drivers (`pg`, `redis`, `mongodb`) | ⚠️ — TCP path works (B7 net); TLS-terminating drivers still need `tls` |
+| **TLS clients + servers** (`tls.connect` / `tls.createServer`) | ✅ |
+| Database drivers (`pg`, `redis`, `mongodb`) — both plain-TCP and TLS-terminating | ✅ |
 | **File watchers / `fs.watch`** | ❌ — partial `fs/promises` expansion pending |

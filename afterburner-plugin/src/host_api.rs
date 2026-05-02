@@ -522,4 +522,38 @@ unsafe extern "C" {
         port: i32,
     ) -> i32;
     pub fn host_net_close_server(server_id: i32) -> i32;
+
+    // ---- tls (B7) ---------------------------------------------------
+    //
+    // Same shape as `host_net_*` but every connect carries an opts
+    // JSON blob (rejectUnauthorized, servername, alpn, ca PEM) so the
+    // host can build the rustls ClientConfig without negotiating a
+    // separate import for each knob. Server `listen` carries cert+key
+    // PEM strings; the polyfill is responsible for reading them off
+    // disk before calling.
+    pub fn host_tls_connect(
+        host_ptr: *const u8,
+        host_len: u32,
+        port: i32,
+        opts_ptr: *const u8,
+        opts_len: u32,
+    ) -> i32;
+    pub fn host_tls_write(
+        conn_id: i32,
+        payload_ptr: *const u8,
+        payload_len: u32,
+    ) -> i32;
+    pub fn host_tls_end(conn_id: i32) -> i32;
+    pub fn host_tls_destroy(conn_id: i32) -> i32;
+    pub fn host_tls_pending(conn_id: i32) -> i32;
+    pub fn host_tls_listen(
+        host_ptr: *const u8,
+        host_len: u32,
+        port: i32,
+        cert_ptr: *const u8,
+        cert_len: u32,
+        key_ptr: *const u8,
+        key_len: u32,
+    ) -> i32;
+    pub fn host_tls_close_server(server_id: i32) -> i32;
 }

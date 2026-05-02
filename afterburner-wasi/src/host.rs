@@ -82,6 +82,11 @@ pub struct HostState {
     /// the `daemon` feature because the coordinator is tokio-backed.
     #[cfg(feature = "daemon")]
     pub daemon_net: Option<Arc<crate::daemon_net::DaemonNet>>,
+    /// Optional `tls` coordinator. Same lifecycle/posture as
+    /// `daemon_net`; gated behind `daemon` because it's also
+    /// tokio-backed (and pulls in `tokio-rustls`).
+    #[cfg(feature = "daemon")]
+    pub daemon_tls: Option<Arc<crate::daemon_tls::DaemonTls>>,
     /// Host-managed timers registered by `setTimeout`/`setInterval` in
     /// daemon mode via the `__host_timer_set` import. Empty for one-shot
     /// UDF / script paths.
@@ -150,6 +155,8 @@ impl HostState {
             daemon_workers: None,
             #[cfg(feature = "daemon")]
             daemon_net: None,
+            #[cfg(feature = "daemon")]
+            daemon_tls: None,
             timers: Vec::new(),
             next_timer_id: 1,
             transpile_hook: None,
