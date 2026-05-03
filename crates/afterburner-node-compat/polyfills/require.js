@@ -430,6 +430,23 @@
         req.__plenum_modules_installed = function() {
             return Object.keys(factories).concat(Object.keys(cache));
         };
+        // Node's `require.main` — descriptor for the script that
+        // launched the process. For `burn run foo.js` it points at
+        // foo.js; for `-e` and stdin modes it points at the
+        // synthetic [eval] entry. The fields match Node's
+        // Module-instance shape (id, filename, exports, paths,
+        // children) closely enough for the canonical idiom
+        // `require.main === module` to work in burn.
+        var argv = globalThis.__ab_argv;
+        var entry = (argv && typeof argv[1] === 'string') ? argv[1] : '[eval]';
+        req.main = {
+            id: entry,
+            filename: entry,
+            exports: {},
+            loaded: false,
+            paths: [entryDir()],
+            children: [],
+        };
         globalThis.require = req;
     }
 

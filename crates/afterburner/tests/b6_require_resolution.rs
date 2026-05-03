@@ -398,6 +398,84 @@ fn require_cache_is_keyed_by_absolute_path() {
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "true");
 }
 
+#[test]
+fn require_cache_eviction_forces_reload() {
+    // Node's canonical pattern for hot-reloadable modules is
+    // `delete require.cache[require.resolve(name)]`. Burn must
+    // honor that — re-requiring after eviction must execute the
+    // module body a second time, not return the stale cached value.
+    let dir = scratch("cache_evict");
+    // The module captures Math.random() at load time; if we
+    // observe two distinct values for two requires (with eviction
+    // between them) the cache evict path is wired correctly.
+    fs::write(
+        dir.join("rand.js"),
+        "module.exports = { v: Math.random() + ':' + Date.now() };",
+    )
+    .unwrap();
+    let out = run_burn_in(
+        &dir,
+        "const a = require('./rand');\n\
+         const abs = require.resolve('./rand');\n\
+         delete require.cache[abs];\n\
+         const b = require('./rand');\n\
+         console.log('SAME=' + (a === b));\n\
+         console.log('VAL_EQ=' + (a.v === b.v));",
+    );
+    let _ = fs::remove_dir_all(&dir);
+    assert_ok(&out, "require.cache eviction");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("SAME=false"), "stdout: {stdout}");
+    assert!(stdout.contains("VAL_EQ=false"), "stdout: {stdout}");
+}
+
+#[test]
+fn require_main_points_at_entry() {
+    // Node's `require.main` is the descriptor for the script that
+    // booted the process. In `-e` mode it's the synthetic [eval]
+    // entry; in `burn run foo.js` it's foo.js's absolute path.
+    let dir = scratch("require_main");
+    let out = run_burn_in(
+        &dir,
+        "console.log('TYPE=' + typeof require.main);\n\
+         console.log('FN=' + (require.main && require.main.filename));\n\
+         console.log('PATHS=' + Array.isArray(require.main && require.main.paths));",
+    );
+    let _ = fs::remove_dir_all(&dir);
+    assert_ok(&out, "require.main");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("TYPE=object"), "stdout: {stdout}");
+    assert!(stdout.contains("FN=[eval]"), "stdout: {stdout}");
+    assert!(stdout.contains("PATHS=true"), "stdout: {stdout}");
+}
+
+#[test]
+fn require_main_for_file_invocation() {
+    // Same require.main check, but boot via `burn run foo.js` so the
+    // entry filename must be the script's absolute path.
+    let dir = scratch("require_main_file");
+    let script = dir.join("entry.js");
+    fs::write(
+        &script,
+        "console.log('FN=' + require.main.filename);\n\
+         console.log('IS_MAIN_FORMAT=' + (typeof require.main.id === 'string'));",
+    )
+    .unwrap();
+    let out = run_burn_file(&script);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let _ = fs::remove_dir_all(&dir);
+    assert_ok(&out, "require.main file invocation");
+    let abs = std::fs::canonicalize(&script)
+        .unwrap_or(script.clone())
+        .display()
+        .to_string();
+    assert!(
+        stdout.contains(&format!("FN={}", abs)) || stdout.contains(&format!("FN={}", script.display())),
+        "stdout: {stdout}\nexpected filename: {abs}"
+    );
+    assert!(stdout.contains("IS_MAIN_FORMAT=true"));
+}
+
 // ---- error shapes ------------------------------------------------------
 
 #[test]
