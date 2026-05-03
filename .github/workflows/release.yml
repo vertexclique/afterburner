@@ -1,18 +1,20 @@
 name: Release
 
-# Fully automatic: `cargo release --execute <bump>` from master pushes
-# a `v*.*.*` tag, which fires this workflow. Manual rolls are still
-# supported via `workflow_dispatch` for replays / re-uploads.
+# Disabled: tag-push auto-trigger commented out. The release workflow
+# only runs when manually invoked from the GitHub UI's "Run workflow"
+# button (workflow_dispatch) with a `tag` input. Re-enable by
+# uncommenting the `push` block to restore the automatic
+# `cargo release --execute <bump>` flow.
 on:
-  push:
-    tags:
-      - 'v*.*.*'
   workflow_dispatch:
     inputs:
       tag:
         description: 'Tag to publish (e.g. v0.1.0). Must already exist if no `push` event.'
         required: true
         type: string
+  # push:
+  #   tags:
+  #     - 'v*.*.*'
 
 permissions:
   contents: write
