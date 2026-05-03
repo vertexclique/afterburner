@@ -55,7 +55,7 @@ sha1 = "0.10"
 thiserror = "2"
 hmac = "0.12"
 md-5 = "0.10"
-getrandom = "0.2"
+getrandom = "0.4"
 aes-gcm = "0.10"
 aes = "0.8"
 cbc = { version = "0.1", features = ["std"] }
