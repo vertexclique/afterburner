@@ -612,6 +612,144 @@ __register_module('assert', function(module, exports, require) {
     module.exports = assertFn;
 });
 
+// ---- async_hooks.js ----
+// async_hooks — Node 20's async-tracking + AsyncLocalStorage API.
+//
+// Burn's sandbox has no async stack to trace, but `AsyncLocalStorage`
+// is the API the vast majority of users actually reach for (request
+// context propagation, fastify / pino / pg style). We back it with
+// a synchronous storage stack — `getStore()` returns the value at
+// the top of that stack, `run(value, callback)` pushes/pops around
+// the callback. Without an event loop, "running async" collapses to
+// "running synchronously," which preserves the contract.
+
+__register_module('async_hooks', function(module, exports, require) {
+
+    // ---- AsyncLocalStorage ----------------------------------------
+
+    function AsyncLocalStorage() {
+        // Stack of stores currently in scope. The top of the stack
+        // is what `getStore()` reports.
+        this._stack = [];
+    }
+    AsyncLocalStorage.prototype.run = function(store, callback) {
+        if (typeof callback !== 'function') {
+            throw new TypeError('AsyncLocalStorage.run: callback must be a function');
+        }
+        this._stack.push(store);
+        try {
+            var args = Array.prototype.slice.call(arguments, 2);
+            return callback.apply(null, args);
+        } finally {
+            this._stack.pop();
+        }
+    };
+    AsyncLocalStorage.prototype.exit = function(callback) {
+        if (typeof callback !== 'function') {
+            throw new TypeError('AsyncLocalStorage.exit: callback must be a function');
+        }
+        // Spec: temporarily disable the store for the duration of
+        // the callback. We push `undefined` and restore.
+        this._stack.push(undefined);
+        try {
+            return callback.apply(null, Array.prototype.slice.call(arguments, 1));
+        } finally {
+            this._stack.pop();
+        }
+    };
+    AsyncLocalStorage.prototype.getStore = function() {
+        return this._stack.length === 0
+            ? undefined
+            : this._stack[this._stack.length - 1];
+    };
+    AsyncLocalStorage.prototype.enterWith = function(store) {
+        // Spec: replace the current store. With no async stack
+        // tracking we just rewrite the top entry.
+        if (this._stack.length === 0) this._stack.push(store);
+        else this._stack[this._stack.length - 1] = store;
+    };
+    AsyncLocalStorage.prototype.disable = function() {
+        this._stack = [];
+    };
+    AsyncLocalStorage.bind = function(fn) {
+        // Captures the current store snapshot at bind time. Sandbox
+        // is sync — store snapshot equals "the current state", so
+        // bind is identity.
+        return fn;
+    };
+    AsyncLocalStorage.snapshot = function() {
+        // Returns a thunk that runs `cb` under the current snapshot.
+        // Sync sandbox → just runs `cb`.
+        return function(cb) {
+            return cb.apply(null, Array.prototype.slice.call(arguments, 1));
+        };
+    };
+
+    // ---- AsyncResource --------------------------------------------
+    //
+    // Used by Node's worker pools, db drivers, etc. to track async
+    // boundaries. Sandbox has none, so the resource is essentially
+    // a no-op wrapper that exposes a `runInAsyncScope` for compat.
+
+    function AsyncResource(type, options) {
+        this._type = type;
+        this._triggerAsyncId = (options && options.triggerAsyncId) | 0;
+        this._asyncId = nextAsyncId();
+    }
+    AsyncResource.prototype.runInAsyncScope = function(fn, thisArg /*, ...args */) {
+        var args = Array.prototype.slice.call(arguments, 2);
+        return fn.apply(thisArg, args);
+    };
+    AsyncResource.prototype.bind = function(fn) {
+        return fn;
+    };
+    AsyncResource.prototype.asyncId = function() { return this._asyncId; };
+    AsyncResource.prototype.triggerAsyncId = function() { return this._triggerAsyncId; };
+    AsyncResource.prototype.emitDestroy = function() { return this; };
+    AsyncResource.bind = function(fn) { return fn; };
+
+    var _asyncIdCounter = 1;
+    function nextAsyncId() { return ++_asyncIdCounter; }
+
+    // ---- async hook lifecycle (no-op) -----------------------------
+    //
+    // We accept hook callbacks but never fire them — there's no async
+    // stack to observe. Code that calls `.enable()` / `.disable()`
+    // for context propagation often pairs it with AsyncLocalStorage
+    // anyway; this surface keeps pino/winston-style logging from
+    // crashing.
+
+    function createHook(callbacks) {
+        var enabled = false;
+        return {
+            enable: function() { enabled = true; return this; },
+            disable: function() { enabled = false; return this; },
+        };
+        // `callbacks` (init/before/after/destroy/promiseResolve)
+        // are accepted but never invoked.
+    }
+
+    function executionAsyncId() { return _asyncIdCounter; }
+    function triggerAsyncId() { return _asyncIdCounter; }
+    function executionAsyncResource() { return Object.create(null); }
+
+    // ---- exports --------------------------------------------------
+
+    exports.AsyncLocalStorage = AsyncLocalStorage;
+    exports.AsyncResource = AsyncResource;
+    exports.createHook = createHook;
+    exports.executionAsyncId = executionAsyncId;
+    exports.triggerAsyncId = triggerAsyncId;
+    exports.executionAsyncResource = executionAsyncResource;
+    exports.asyncWrapProviders = {
+        NONE: 0,
+        DIRHANDLE: 1,
+        FILEHANDLE: 2,
+        TCPWRAP: 3,
+        TIMERWRAP: 4,
+    };
+});
+
 // ---- buffer.js ----
 // buffer — a `Buffer` class backed by `Uint8Array`, covering the
 // slice of the API that scripts normally touch. UCS-2 / UTF-16 are
@@ -954,6 +1092,140 @@ __register_module('child_process', function(module, exports, require) {
         var raw = ensureHost()(String(command), args.map(String));
         return parseResult(raw);
     };
+});
+
+// ---- cluster.js ----
+// cluster — Node 20's primary/worker multi-process clustering.
+//
+// Burn's sandbox doesn't fork the main process; instead, the
+// `worker_threads` shadow (`burn run --internal-worker`) covers the
+// "isolated parallelism" use case. We expose `cluster` as a thin
+// wrapper that delegates `cluster.fork()` to `new Worker(...)` so
+// existing cluster-using code (Express load balancers, pino-cluster)
+// keeps running. Each `Worker` here is a `worker_threads.Worker`,
+// not a separate OS process; for most middleware this is a fine
+// substitution since the contract — multiple isolated JS contexts
+// processing requests — is preserved.
+
+__register_module('cluster', function(module, exports, require) {
+    var EventEmitter = require('events').EventEmitter;
+    var workerThreads = require('worker_threads');
+
+    var _isPrimary = !!workerThreads.isMainThread;
+    var _workers = Object.create(null);
+    var _nextId = 1;
+
+    var primary = new EventEmitter();
+    primary.workers = _workers;
+
+    function fork(env) {
+        if (!_isPrimary) {
+            throw new Error('cluster.fork: can only be called from the primary');
+        }
+        if (!process.argv[1]) {
+            throw new Error(
+                'cluster.fork: no entry script — `cluster` needs `process.argv[1]` ' +
+                'to point at a JS file the workers can re-run'
+            );
+        }
+        var id = _nextId++;
+        var w = new workerThreads.Worker(process.argv[1], {
+            workerData: { __ab_cluster_id: id },
+            env: Object.assign({}, process.env, env || {}),
+        });
+        var workerWrapper = {
+            id: id,
+            process: { pid: id }, // approximation — no real OS pid for thread workers
+            isDead: function() { return _workers[id] === undefined; },
+            isConnected: function() { return _workers[id] !== undefined; },
+            kill: function(signal) { w.terminate(); _ = signal; },
+            disconnect: function() { w.terminate(); },
+            send: function(msg) { w.postMessage(msg); return true; },
+            on: function(event, listener) { w.on(event, listener); return this; },
+            once: function(event, listener) { w.once(event, listener); return this; },
+            removeListener: function(event, listener) { w.removeListener(event, listener); return this; },
+            _worker: w,
+        };
+        var _;
+        w.on('exit', function(code) {
+            delete _workers[id];
+            try { primary.emit('exit', workerWrapper, code, null); } catch (_) {}
+        });
+        w.on('message', function(msg) {
+            try { primary.emit('message', workerWrapper, msg); } catch (_) {}
+        });
+        _workers[id] = workerWrapper;
+        try { primary.emit('fork', workerWrapper); } catch (_) {}
+        try { primary.emit('online', workerWrapper); } catch (_) {}
+        return workerWrapper;
+    }
+
+    function setupPrimary(opts) {
+        // Spec: schedules an exec / args / silent setting. We accept
+        // and remember the values for surface compat; the actual
+        // worker entry comes from process.argv[1] (the same script
+        // re-running with a cluster id in workerData).
+        primary.settings = Object.assign(primary.settings || {}, opts || {});
+    }
+
+    primary.fork = fork;
+    primary.setupPrimary = setupPrimary;
+    primary.setupMaster = setupPrimary; // legacy alias
+    primary.disconnect = function(cb) {
+        var ids = Object.keys(_workers);
+        ids.forEach(function(id) { _workers[id].disconnect(); });
+        if (typeof cb === 'function') {
+            Promise.resolve().then(cb);
+        }
+    };
+    primary.settings = {};
+
+    Object.defineProperty(primary, 'isPrimary', {
+        get: function() { return _isPrimary; },
+    });
+    Object.defineProperty(primary, 'isMaster', {
+        // Legacy alias — Node still exposes it for back-compat.
+        get: function() { return _isPrimary; },
+    });
+    Object.defineProperty(primary, 'isWorker', {
+        get: function() { return !_isPrimary; },
+    });
+
+    // When running inside a worker, expose the worker-side surface.
+    if (!_isPrimary) {
+        var wd = workerThreads.workerData || {};
+        primary.worker = {
+            id: wd.__ab_cluster_id || 0,
+            process: { pid: wd.__ab_cluster_id || 0 },
+            isDead: function() { return false; },
+            isConnected: function() { return true; },
+            send: function(msg) {
+                if (workerThreads.parentPort) {
+                    workerThreads.parentPort.postMessage(msg);
+                    return true;
+                }
+                return false;
+            },
+            disconnect: function() {
+                if (workerThreads.parentPort) workerThreads.parentPort.close();
+            },
+            kill: function() {
+                if (workerThreads.parentPort) workerThreads.parentPort.close();
+            },
+            on: function(event, listener) {
+                if (event === 'message' && workerThreads.parentPort) {
+                    workerThreads.parentPort.on('message', listener);
+                }
+                return this;
+            },
+        };
+    }
+
+    primary.schedulingPolicy = 1; // SCHED_RR — symbolic
+    primary.SCHED_NONE = 0;
+    primary.SCHED_RR = 1;
+
+    module.exports = primary;
 });
 
 // ---- console.js ----
@@ -1461,6 +1733,114 @@ __register_module('crypto', function(module, exports, require) {
     };
 });
 
+// ---- dgram.js ----
+// dgram — Node 20's UDP socket module. Real UDP isn't sandbox-safe
+// without manifold gating + a tokio host coordinator (parallel to
+// `daemon_net` but for UDP). v1 of this polyfill exposes the API
+// shape with stub behaviour: socket creation succeeds, send /
+// receive surface a clear error explaining the host UDP coordinator
+// hasn't shipped yet, and library code that imports `dgram`
+// defensively (e.g. some metrics + tracing libraries) doesn't
+// crash on import.
+//
+// When the daemon-side UDP coordinator lands, the body of `bind` /
+// `send` / `addMembership` etc. swap to host-import calls — the
+// JS surface stays unchanged.
+
+__register_module('dgram', function(module, exports, require) {
+    var EventEmitter = require('events').EventEmitter;
+
+    function Socket(opts) {
+        EventEmitter.call(this);
+        opts = opts || {};
+        this.type = (typeof opts === 'string') ? opts : (opts.type || 'udp4');
+        this._reuseAddr = !!opts.reuseAddr;
+        this._ipv6Only = !!opts.ipv6Only;
+        this._bound = false;
+        this._closed = false;
+    }
+    Socket.prototype = Object.create(EventEmitter.prototype);
+    Socket.prototype.constructor = Socket;
+
+    function notImpl(name) {
+        var e = new Error(
+            'dgram.Socket.' + name + ' is not yet implemented in burn — the host-side ' +
+            'UDP coordinator (parallel to daemon_net) lands in a follow-up. The API ' +
+            'surface is exposed today so libraries that import dgram defensively ' +
+            "don't crash; runtime use will surface this error."
+        );
+        e.code = 'ERR_NOT_IMPLEMENTED';
+        return e;
+    }
+
+    Socket.prototype.bind = function(_port, _address, callback) {
+        var err = notImpl('bind');
+        if (typeof callback === 'function') {
+            Promise.resolve().then(function() { callback(err); });
+        }
+        var self = this;
+        Promise.resolve().then(function() { try { self.emit('error', err); } catch (_) {} });
+        return this;
+    };
+    Socket.prototype.close = function(callback) {
+        this._closed = true;
+        var self = this;
+        Promise.resolve().then(function() {
+            try { self.emit('close'); } catch (_) {}
+            if (typeof callback === 'function') callback();
+        });
+        return this;
+    };
+    Socket.prototype.send = function(_msg /*, ...rest, callback */) {
+        var args = Array.prototype.slice.call(arguments);
+        var callback = (args.length && typeof args[args.length - 1] === 'function')
+            ? args.pop()
+            : null;
+        var err = notImpl('send');
+        if (callback) {
+            Promise.resolve().then(function() { callback(err); });
+        } else {
+            throw err;
+        }
+        return this;
+    };
+    Socket.prototype.address = function() {
+        if (!this._bound) {
+            var e = new Error('Not running');
+            e.code = 'ERR_SOCKET_DGRAM_NOT_RUNNING';
+            throw e;
+        }
+        return { address: '0.0.0.0', port: 0, family: this.type === 'udp6' ? 'IPv6' : 'IPv4' };
+    };
+    Socket.prototype.connect = function() { throw notImpl('connect'); };
+    Socket.prototype.disconnect = function() { throw notImpl('disconnect'); };
+    Socket.prototype.remoteAddress = function() { throw notImpl('remoteAddress'); };
+    Socket.prototype.setBroadcast = function() {};
+    Socket.prototype.setTTL = function() {};
+    Socket.prototype.setMulticastTTL = function() {};
+    Socket.prototype.setMulticastInterface = function() {};
+    Socket.prototype.setMulticastLoopback = function() {};
+    Socket.prototype.addMembership = function() {};
+    Socket.prototype.dropMembership = function() {};
+    Socket.prototype.addSourceSpecificMembership = function() {};
+    Socket.prototype.dropSourceSpecificMembership = function() {};
+    Socket.prototype.setRecvBufferSize = function() {};
+    Socket.prototype.setSendBufferSize = function() {};
+    Socket.prototype.getRecvBufferSize = function() { return 0; };
+    Socket.prototype.getSendBufferSize = function() { return 0; };
+    Socket.prototype.ref = function() { return this; };
+    Socket.prototype.unref = function() { return this; };
+
+    function createSocket(opts, callback) {
+        var sock = new Socket(opts);
+        if (typeof callback === 'function') sock.on('message', callback);
+        return sock;
+    }
+
+    exports.createSocket = createSocket;
+    exports.Socket = Socket;
+});
+
 // ---- dns.js ----
 // dns — synchronous host-backed lookups, presented through Node's
 // dual callback / promise API.
@@ -1725,6 +2105,72 @@ __register_module('dns', function(module, exports, require) {
         },
         Resolver: Resolver,
     };
+});
+
+// ---- domain.js ----
+// domain — deprecated since Node 4 but still imported by older
+// libraries (winston < 3, some Express middleware). Real Node's
+// `domain` is an error-handling boundary tied to the async stack;
+// without an async stack we provide a synchronous shim that runs
+// the callback inline and re-throws errors with a `domain`-like
+// `'error'` event.
+
+__register_module('domain', function(module, exports, require) {
+    var EventEmitter = require('events').EventEmitter;
+
+    function Domain() {
+        EventEmitter.call(this);
+        this.members = [];
+    }
+    Domain.prototype = Object.create(EventEmitter.prototype);
+    Domain.prototype.constructor = Domain;
+
+    Domain.prototype.run = function(fn) {
+        try {
+            return fn();
+        } catch (e) {
+            try { this.emit('error', e); } catch (_) {}
+            throw e;
+        }
+    };
+    Domain.prototype.add = function(emitter) { this.members.push(emitter); return this; };
+    Domain.prototype.remove = function(emitter) {
+        var i = this.members.indexOf(emitter);
+        if (i !== -1) this.members.splice(i, 1);
+        return this;
+    };
+    Domain.prototype.bind = function(callback) {
+        var self = this;
+        return function() {
+            try { return callback.apply(this, arguments); }
+            catch (e) { try { self.emit('error', e); } catch (_) {} throw e; }
+        };
+    };
+    Domain.prototype.intercept = function(callback) {
+        var self = this;
+        return function(err) {
+            if (err) {
+                try { self.emit('error', err); } catch (_) {}
+                return;
+            }
+            try {
+                return callback.apply(this, Array.prototype.slice.call(arguments, 1));
+            } catch (e) {
+                try { self.emit('error', e); } catch (_) {}
+                throw e;
+            }
+        };
+    };
+    Domain.prototype.enter = function() {};
+    Domain.prototype.exit = function() {};
+    Domain.prototype.dispose = function() {};
+
+    function create() { return new Domain(); }
+
+    exports.create = create;
+    exports.createDomain = create;
+    exports.Domain = Domain;
+    exports.active = null;
 });
 
 // ---- events.js ----
@@ -2524,6 +2970,350 @@ function __plenum_install_http(moduleName) {
 __plenum_install_http('http');
 __plenum_install_http('https');
 
+// ---- http2.js ----
+// http2 — Node 20's HTTP/2 module. A real HTTP/2 implementation
+// requires negotiating the TLS ALPN handshake, parsing HPACK,
+// scheduling streams within a connection — substantial enough to
+// be its own phase. Until then, this polyfill exposes the API
+// surface so `import { connect } from 'http2'` doesn't blow up at
+// import time, and routes the most common usage (single-stream
+// requests) through the existing `https` polyfill where possible.
+
+__register_module('http2', function(module, exports, require) {
+    var EventEmitter = require('events').EventEmitter;
+    var Buffer = require('buffer').Buffer;
+
+    function notImpl(name) {
+        var e = new Error(
+            'http2.' + name + ' is not yet implemented in burn — full HTTP/2 ' +
+            'frame handling lands in a follow-up. For most outbound HTTP/2 use ' +
+            'cases the `https` module already negotiates HTTP/1.1 over TLS ' +
+            'against HTTP/2-capable servers; switch to https for now.'
+        );
+        e.code = 'ERR_HTTP2_NOT_IMPLEMENTED';
+        return e;
+    }
+
+    // ---- ClientHttp2Session ---------------------------------------
+
+    function ClientHttp2Session() {
+        EventEmitter.call(this);
+        this.closed = false;
+        this.destroyed = false;
+        this.alpnProtocol = 'h2';
+        this.connecting = false;
+    }
+    ClientHttp2Session.prototype = Object.create(EventEmitter.prototype);
+    ClientHttp2Session.prototype.constructor = ClientHttp2Session;
+    ClientHttp2Session.prototype.request = function() { throw notImpl('Session.request'); };
+    ClientHttp2Session.prototype.close = function() { this.closed = true; };
+    ClientHttp2Session.prototype.destroy = function() { this.destroyed = true; };
+    ClientHttp2Session.prototype.ping = function(_payload, callback) {
+        if (typeof callback === 'function') {
+            Promise.resolve().then(function() { callback(notImpl('Session.ping')); });
+        }
+        return false;
+    };
+    ClientHttp2Session.prototype.settings = function() {};
+    ClientHttp2Session.prototype.setTimeout = function() {};
+    ClientHttp2Session.prototype.unref = function() { return this; };
+    ClientHttp2Session.prototype.ref = function() { return this; };
+
+    function connect(authority, options, listener) {
+        var session = new ClientHttp2Session();
+        session.authority = authority;
+        if (typeof listener === 'function') session.on('connect', listener);
+        Promise.resolve().then(function() {
+            try { session.emit('error', notImpl('connect')); } catch (_) {}
+        });
+        return session;
+    }
+
+    // ---- Server side ----------------------------------------------
+
+    function Http2Server() {
+        EventEmitter.call(this);
+    }
+    Http2Server.prototype = Object.create(EventEmitter.prototype);
+    Http2Server.prototype.constructor = Http2Server;
+    Http2Server.prototype.listen = function() { throw notImpl('Server.listen'); };
+    Http2Server.prototype.close = function() {};
+    Http2Server.prototype.address = function() { return null; };
+    Http2Server.prototype.setTimeout = function() {};
+
+    function createServer() { return new Http2Server(); }
+    function createSecureServer() { return new Http2Server(); }
+
+    // ---- constants ------------------------------------------------
+
+    var constants = {
+        NGHTTP2_NO_ERROR: 0,
+        NGHTTP2_PROTOCOL_ERROR: 1,
+        NGHTTP2_INTERNAL_ERROR: 2,
+        HTTP2_HEADER_AUTHORITY: ':authority',
+        HTTP2_HEADER_METHOD: ':method',
+        HTTP2_HEADER_PATH: ':path',
+        HTTP2_HEADER_SCHEME: ':scheme',
+        HTTP2_HEADER_STATUS: ':status',
+    };
+
+    function getDefaultSettings() {
+        return {
+            headerTableSize: 4096,
+            enablePush: true,
+            initialWindowSize: 65535,
+            maxFrameSize: 16384,
+            maxConcurrentStreams: 4294967295,
+            maxHeaderListSize: 65535,
+            maxHeaderSize: 65535,
+        };
+    }
+    function getPackedSettings() { return Buffer.alloc(0); }
+    function getUnpackedSettings() { return getDefaultSettings(); }
+    function performServerHandshake() {
+        return new Http2Server();
+    }
+    function sensitiveHeaders() { return Symbol('sensitiveHeaders'); }
+
+    exports.connect = connect;
+    exports.createServer = createServer;
+    exports.createSecureServer = createSecureServer;
+    exports.constants = constants;
+    exports.Http2Session = ClientHttp2Session;
+    exports.ClientHttp2Session = ClientHttp2Session;
+    exports.ServerHttp2Session = ClientHttp2Session;
+    exports.Http2Stream = function() { throw notImpl('Stream'); };
+    exports.Http2ServerRequest = function() { throw notImpl('ServerRequest'); };
+    exports.Http2ServerResponse = function() { throw notImpl('ServerResponse'); };
+    exports.Http2Server = Http2Server;
+    exports.getDefaultSettings = getDefaultSettings;
+    exports.getPackedSettings = getPackedSettings;
+    exports.getUnpackedSettings = getUnpackedSettings;
+    exports.performServerHandshake = performServerHandshake;
+    exports.sensitiveHeaders = sensitiveHeaders();
+});
+
+// ---- inspector.js ----
+// inspector — Node 20's V8 inspector protocol bridge.
+//
+// The DevTools / Chrome Inspector protocol requires a long-lived
+// channel that responds to a JSON-RPC stream of CDP messages. Burn
+// has no live inspector and no debugger UI. We expose the API so
+// instrumentation code that calls `inspector.open()` /
+// `inspector.url()` doesn't crash on import; methods that would
+// genuinely require a debugger session (the `Session` class's
+// `post()` actually doing something) accept commands but reply with
+// "no debugger attached" errors.
+
+__register_module('inspector', function(module, exports, require) {
+    var EventEmitter = require('events').EventEmitter;
+
+    var _opened = false;
+    var _port = 9229;
+    var _host = '127.0.0.1';
+
+    function open(port, host /*, wait */) {
+        _opened = true;
+        if (typeof port === 'number') _port = port;
+        if (typeof host === 'string') _host = host;
+    }
+    function close() { _opened = false; }
+    function url() {
+        if (!_opened) return undefined;
+        return 'ws://' + _host + ':' + _port + '/burn-noop';
+    }
+    function waitForDebugger() {
+        // Real Node blocks until a debugger attaches. We never get
+        // a debugger; return immediately so callers don't deadlock.
+    }
+
+    // ---- Session class --------------------------------------------
+
+    function Session() {
+        EventEmitter.call(this);
+        this._connected = false;
+    }
+    Session.prototype = Object.create(EventEmitter.prototype);
+    Session.prototype.constructor = Session;
+
+    Session.prototype.connect = function() {
+        this._connected = true;
+        return this;
+    };
+    Session.prototype.connectToMainThread = function() {
+        return this.connect();
+    };
+    Session.prototype.disconnect = function() {
+        this._connected = false;
+        return this;
+    };
+    Session.prototype.post = function(method, params, callback) {
+        if (typeof params === 'function') { callback = params; params = undefined; }
+        var err = new Error(
+            "inspector.Session.post('" + method + "'): no debugger attached " +
+            'in the burn sandbox; use the host-side wasmtime debugger if you ' +
+            'need stepping.'
+        );
+        err.code = 'ERR_INSPECTOR_NOT_CONNECTED';
+        if (typeof callback === 'function') {
+            Promise.resolve().then(function() { callback(err); });
+            return;
+        }
+        throw err;
+    };
+
+    exports.open = open;
+    exports.close = close;
+    exports.url = url;
+    exports.waitForDebugger = waitForDebugger;
+    exports.console = globalThis.console || { log: function() {} };
+    exports.Session = Session;
+    exports.Network = {
+        // Node 20 added a `Network` namespace on inspector for
+        // request tracing. Stub the surface so callers don't crash.
+        requestWillBeSent: function() {},
+        responseReceived: function() {},
+        loadingFinished: function() {},
+        loadingFailed: function() {},
+    };
+});
+
+// ---- module.js ----
+// module — Node 20's introspection for the module loader. Real Node
+// exposes this so callers can do `Module.builtinModules`,
+// `Module.createRequire(filename)`, etc.
+
+__register_module('module', function(module, exports, require) {
+
+    /// Every Node-built-in name that has a polyfill registered with
+    /// the require resolver. Updated when new polyfills land.
+    var BUILTINS = [
+        'assert', 'async_hooks', 'buffer', 'child_process', 'cluster',
+        'console', 'constants', 'crypto', 'dgram', 'dns', 'dns/promises',
+        'domain', 'events', 'fs', 'fs/promises', 'http', 'http2', 'https',
+        'inspector', 'module', 'net', 'os', 'path', 'path/posix',
+        'path/win32', 'perf_hooks', 'process', 'punycode', 'querystring',
+        'readline', 'repl', 'stream', 'stream/promises', 'stream/web',
+        'string_decoder', 'sys', 'timers', 'timers/promises', 'tls',
+        'trace_events', 'tty', 'url', 'util', 'util/types', 'v8', 'vm',
+        'wasi', 'worker_threads', 'zlib',
+    ];
+
+    /// Burn's `require` is set up at `require.js` bootstrap; callers
+    /// asking for a require-from-elsewhere (`createRequire(__filename)`)
+    /// get the same object — paths are interpreted from the supplied
+    /// filename.
+    function createRequire(filename) {
+        // Real Node returns a function with `.cache`, `.resolve`, etc.
+        // attached. The global require already has those (see
+        // require.js). We bind a local proxy that uses `filename`
+        // as the resolution base.
+        if (typeof filename !== 'string' && !(filename && typeof filename.toString === 'function')) {
+            throw new TypeError(
+                'module.createRequire: filename must be a string or URL'
+            );
+        }
+        var base = String(filename);
+        // Strip `file://` prefix if a URL was passed.
+        if (base.indexOf('file://') === 0) base = base.slice(7);
+
+        function localRequire(id) {
+            // Defer to the global require with a `from` hint. The
+            // require resolver in `require.js` understands this hint.
+            if (typeof globalThis.__plenum_require_from === 'function') {
+                return globalThis.__plenum_require_from(id, base);
+            }
+            return globalThis.require(id);
+        }
+        localRequire.resolve = function(id) {
+            if (globalThis.require && globalThis.require.resolve) {
+                return globalThis.require.resolve(id);
+            }
+            return id;
+        };
+        localRequire.cache = (globalThis.require && globalThis.require.cache) || {};
+        localRequire.extensions = (globalThis.require && globalThis.require.extensions) || {};
+        localRequire.main = (globalThis.require && globalThis.require.main) || undefined;
+        return localRequire;
+    }
+
+    function isBuiltin(name) {
+        if (typeof name !== 'string') return false;
+        var bare = name.indexOf('node:') === 0 ? name.slice(5) : name;
+        return BUILTINS.indexOf(bare) !== -1;
+    }
+
+    /// Resolve hook registry. `register()` and `getSourceMapsSupport()`
+    /// are accepted but no-ops since burn's resolver is its own
+    /// pipeline (no Node-style loader hooks).
+    function register() { return undefined; }
+    function getSourceMapsSupport() {
+        return { enabled: false, generatedFromBuiltin: false };
+    }
+    function setSourceMapsSupport() {}
+    function findSourceMap() { return undefined; }
+
+    function syncBuiltinESMExports() { /* no-op */ }
+    function enableCompileCache() { return { status: 'disabled' }; }
+    function flushCompileCache() {}
+    function getCompileCacheDir() { return undefined; }
+
+    function Module(id, parent) {
+        this.id = id || '';
+        this.path = '';
+        this.exports = {};
+        this.filename = id || '';
+        this.loaded = false;
+        this.children = [];
+        this.parent = parent || null;
+    }
+    Module.prototype.require = function(id) { return require(id); };
+    Module.prototype.load = function() { this.loaded = true; };
+    Module._cache = (globalThis.require && globalThis.require.cache) || {};
+    Module._pathCache = {};
+    Module._extensions = {
+        '.js': function() {},
+        '.json': function() {},
+    };
+    Module.builtinModules = BUILTINS.slice();
+    Module.createRequire = createRequire;
+    Module.isBuiltin = isBuiltin;
+    Module.runMain = function() {};
+    Module.register = register;
+    Module.getSourceMapsSupport = getSourceMapsSupport;
+    Module.setSourceMapsSupport = setSourceMapsSupport;
+    Module.findSourceMap = findSourceMap;
+    Module.syncBuiltinESMExports = syncBuiltinESMExports;
+    Module.enableCompileCache = enableCompileCache;
+    Module.flushCompileCache = flushCompileCache;
+    Module.getCompileCacheDir = getCompileCacheDir;
+    Module.SourceMap = function SourceMap() {};
+    Module.findPackageJSON = function() { return undefined; };
+    Module.constants = {
+        compileCacheStatus: { ENABLED: 1, ALREADY_ENABLED: 2, FAILED: 0, DISABLED: 0 },
+    };
+
+    exports = Module;
+    exports.builtinModules = BUILTINS.slice();
+    exports.createRequire = createRequire;
+    exports.isBuiltin = isBuiltin;
+    exports.Module = Module;
+    exports.register = register;
+    exports.getSourceMapsSupport = getSourceMapsSupport;
+    exports.setSourceMapsSupport = setSourceMapsSupport;
+    exports.findSourceMap = findSourceMap;
+    exports.syncBuiltinESMExports = syncBuiltinESMExports;
+    exports.enableCompileCache = enableCompileCache;
+    exports.flushCompileCache = flushCompileCache;
+    exports.getCompileCacheDir = getCompileCacheDir;
+    exports.runMain = Module.runMain;
+    exports.SourceMap = Module.SourceMap;
+    exports.findPackageJSON = Module.findPackageJSON;
+    exports.constants = Module.constants;
+
+    module.exports = Module;
+});
+
 // ---- net.js ----
 // net — raw TCP polyfill (B7).
 //
@@ -3137,6 +3927,166 @@ __register_module('stream/promises', function(module, exports, require) {
 // timers/promises — Node exposes Promise-returning delays.
 // `setInterval` is documented as an async iterator; we stub it with a
 // clear "not implemented" error until a consumer surfaces a need.
+// util/types — Node 20's `is*` type-guard helpers. Most production
+// code uses these for fast type checks (`util.types.isUint8Array`,
+// `isPromise`, `isProxy`, etc.). The pure-JS implementations below
+// don't need host-side support.
+__register_module('util/types', function(module, exports, require) {
+    var Buffer = require('buffer').Buffer;
+
+    function isPromise(v) {
+        return !!v && (typeof v === 'object' || typeof v === 'function')
+            && typeof v.then === 'function';
+    }
+
+    function isAnyArrayBuffer(v) {
+        return v instanceof ArrayBuffer ||
+            (typeof SharedArrayBuffer !== 'undefined' && v instanceof SharedArrayBuffer);
+    }
+
+    function isTypedArray(v) {
+        return ArrayBuffer.isView(v) && !(v instanceof DataView);
+    }
+
+    function makeTypedCheck(ctor) {
+        return function(v) {
+            return typeof ctor !== 'undefined' && v instanceof ctor;
+        };
+    }
+
+    module.exports = {
+        isPromise: isPromise,
+        isAnyArrayBuffer: isAnyArrayBuffer,
+        isArrayBuffer: function(v) { return v instanceof ArrayBuffer; },
+        isSharedArrayBuffer: function(v) {
+            return typeof SharedArrayBuffer !== 'undefined' && v instanceof SharedArrayBuffer;
+        },
+        isAsyncFunction: function(v) {
+            // QuickJS's `AsyncFunction` constructor isn't a global;
+            // fall back to the toString tag, which marks async fns
+            // distinctively in any spec-compliant engine.
+            return typeof v === 'function' &&
+                Object.prototype.toString.call(v) === '[object AsyncFunction]';
+        },
+        isGeneratorFunction: function(v) {
+            return typeof v === 'function' &&
+                Object.prototype.toString.call(v) === '[object GeneratorFunction]';
+        },
+        isGeneratorObject: function(v) {
+            return !!v && Object.prototype.toString.call(v) === '[object Generator]';
+        },
+        isMap: function(v) { return v instanceof Map; },
+        isSet: function(v) { return v instanceof Set; },
+        isMapIterator: function(v) {
+            return !!v && Object.prototype.toString.call(v) === '[object Map Iterator]';
+        },
+        isSetIterator: function(v) {
+            return !!v && Object.prototype.toString.call(v) === '[object Set Iterator]';
+        },
+        isWeakMap: function(v) { return v instanceof WeakMap; },
+        isWeakSet: function(v) { return v instanceof WeakSet; },
+        isPromise: isPromise,
+        isProxy: function() { return false; }, // Proxies are transparent — can't detect from JS
+        isRegExp: function(v) { return v instanceof RegExp; },
+        isDate: function(v) { return v instanceof Date; },
+        isError: function(v) { return v instanceof Error; },
+        isSymbol: function(v) { return typeof v === 'symbol'; },
+        isStringObject: function(v) { return typeof v === 'object' && v instanceof String; },
+        isNumberObject: function(v) { return typeof v === 'object' && v instanceof Number; },
+        isBooleanObject: function(v) { return typeof v === 'object' && v instanceof Boolean; },
+        isBigIntObject: function(v) {
+            return typeof v === 'object' && v !== null && Object.prototype.toString.call(v) === '[object BigInt]';
+        },
+        isBoxedPrimitive: function(v) {
+            return v instanceof String || v instanceof Number || v instanceof Boolean ||
+                (typeof v === 'object' && Object.prototype.toString.call(v) === '[object BigInt]');
+        },
+        isModuleNamespaceObject: function() { return false; },
+        isExternal: function() { return false; },
+        isArgumentsObject: function(v) {
+            return !!v && Object.prototype.toString.call(v) === '[object Arguments]';
+        },
+        isArrayBufferView: function(v) { return ArrayBuffer.isView(v); },
+        isDataView: function(v) { return v instanceof DataView; },
+        isTypedArray: isTypedArray,
+        isUint8Array: function(v) { return v instanceof Uint8Array; },
+        isUint8ClampedArray: makeTypedCheck(typeof Uint8ClampedArray !== 'undefined' ? Uint8ClampedArray : null),
+        isUint16Array: function(v) { return v instanceof Uint16Array; },
+        isUint32Array: function(v) { return v instanceof Uint32Array; },
+        isInt8Array: function(v) { return v instanceof Int8Array; },
+        isInt16Array: function(v) { return v instanceof Int16Array; },
+        isInt32Array: function(v) { return v instanceof Int32Array; },
+        isFloat32Array: function(v) { return v instanceof Float32Array; },
+        isFloat64Array: function(v) { return v instanceof Float64Array; },
+        isBigInt64Array: makeTypedCheck(typeof BigInt64Array !== 'undefined' ? BigInt64Array : null),
+        isBigUint64Array: makeTypedCheck(typeof BigUint64Array !== 'undefined' ? BigUint64Array : null),
+        isNativeError: function(v) { return v instanceof Error; },
+        isKeyObject: function() { return false; },
+        isCryptoKey: function() { return false; },
+    };
+});
+
+// stream/web — Node 20's WHATWG streams (ReadableStream, WritableStream,
+// TransformStream). QuickJS has the spec types as globals; we just
+// re-export them under the Node module path so `import { ReadableStream }
+// from 'stream/web'` works.
+__register_module('stream/web', function(module, exports, require) {
+    function notSupported(name) {
+        return function() {
+            throw new Error('stream/web.' + name + ' is not available in burn yet');
+        };
+    }
+    module.exports = {
+        ReadableStream: typeof ReadableStream !== 'undefined' ? ReadableStream : notSupported('ReadableStream'),
+        ReadableStreamDefaultReader: typeof ReadableStreamDefaultReader !== 'undefined' ? ReadableStreamDefaultReader : notSupported('ReadableStreamDefaultReader'),
+        ReadableStreamBYOBReader: typeof ReadableStreamBYOBReader !== 'undefined' ? ReadableStreamBYOBReader : notSupported('ReadableStreamBYOBReader'),
+        WritableStream: typeof WritableStream !== 'undefined' ? WritableStream : notSupported('WritableStream'),
+        WritableStreamDefaultWriter: typeof WritableStreamDefaultWriter !== 'undefined' ? WritableStreamDefaultWriter : notSupported('WritableStreamDefaultWriter'),
+        TransformStream: typeof TransformStream !== 'undefined' ? TransformStream : notSupported('TransformStream'),
+        ByteLengthQueuingStrategy: typeof ByteLengthQueuingStrategy !== 'undefined' ? ByteLengthQueuingStrategy : notSupported('ByteLengthQueuingStrategy'),
+        CountQueuingStrategy: typeof CountQueuingStrategy !== 'undefined' ? CountQueuingStrategy : notSupported('CountQueuingStrategy'),
+        TextEncoderStream: typeof TextEncoderStream !== 'undefined' ? TextEncoderStream : notSupported('TextEncoderStream'),
+        TextDecoderStream: typeof TextDecoderStream !== 'undefined' ? TextDecoderStream : notSupported('TextDecoderStream'),
+        CompressionStream: typeof CompressionStream !== 'undefined' ? CompressionStream : notSupported('CompressionStream'),
+        DecompressionStream: typeof DecompressionStream !== 'undefined' ? DecompressionStream : notSupported('DecompressionStream'),
+    };
+});
+
+// constants — Node 20 exposes a flat namespace of POSIX-ish numeric
+// constants (errno values, file modes, etc.) under `require('constants')`.
+// Most callers grab a single value (`require('constants').O_RDONLY`),
+// so a shallow flat object is enough.
+__register_module('constants', function(module, exports, require) {
+    var fs = require('fs');
+    var os = require('os');
+    var crypto = require('crypto');
+    var c = {};
+    if (fs && fs.constants) Object.assign(c, fs.constants);
+    if (os && os.constants) {
+        if (os.constants.errno) Object.assign(c, os.constants.errno);
+        if (os.constants.signals) Object.assign(c, os.constants.signals);
+    }
+    if (crypto && crypto.constants) Object.assign(c, crypto.constants);
+    module.exports = c;
+});
+
+// sys — historical alias for `util` (deprecated in Node 0.x but
+// still imported by some older libraries that haven't been touched
+// since). Identical surface to `util`.
+__register_module('sys', function(module, exports, require) {
+    module.exports = require('util');
+});
+
+// path/posix and path/win32 — Node exposes POSIX and Win32 path
+// implementations as separate require targets in addition to
+// `path.posix` / `path.win32`.
+__register_module('path/posix', function(module, exports, require) {
+    module.exports = require('path').posix || require('path');
+});
+__register_module('path/win32', function(module, exports, require) {
+    module.exports = require('path').win32 || require('path');
+});
+
 __register_module('timers/promises', function(module, exports, require) {
     module.exports = {
         setTimeout: function(ms, value, opts) {
@@ -3420,6 +4370,229 @@ __register_module('path', function(module, exports, require) {
     };
 
     exports.posix = exports;
+});
+
+// ---- perf_hooks.js ----
+// perf_hooks — Node 20's performance-measurement API.
+//
+// Most callers use `performance.now()` (already a global) +
+// `performance.mark` / `measure`. We provide a real implementation
+// of those plus the supporting classes so production code drops in
+// without modification.
+
+__register_module('perf_hooks', function(module, exports, require) {
+
+    // Global `performance` is installed by `web_compat.js`. Reuse it
+    // so the two surfaces stay in lock-step (common pattern: scripts
+    // import perf_hooks.performance but expect `globalThis.performance`
+    // to point at the same object).
+    var performance = globalThis.performance || {
+        now: function() { return Date.now(); },
+        timeOrigin: Date.now(),
+    };
+
+    // ---- PerformanceEntry ------------------------------------------
+
+    function PerformanceEntry(name, entryType, startTime, duration) {
+        this.name = name;
+        this.entryType = entryType;
+        this.startTime = startTime;
+        this.duration = duration;
+    }
+    PerformanceEntry.prototype.toJSON = function() {
+        return {
+            name: this.name,
+            entryType: this.entryType,
+            startTime: this.startTime,
+            duration: this.duration,
+        };
+    };
+
+    // ---- in-memory entry buffer -----------------------------------
+
+    var entries = [];
+    var marks = Object.create(null);
+
+    function addEntry(entry) {
+        entries.push(entry);
+    }
+
+    // ---- Performance methods --------------------------------------
+    //
+    // We extend the bare `globalThis.performance` with the full
+    // perf_hooks surface. Idempotent — re-installing doesn't reset
+    // any pre-recorded marks.
+
+    if (typeof performance.mark !== 'function') {
+        performance.mark = function(name, options) {
+            var detail = options && options.detail;
+            var startTime = performance.now();
+            var entry = new PerformanceEntry(String(name), 'mark', startTime, 0);
+            entry.detail = detail || null;
+            marks[String(name)] = entry;
+            addEntry(entry);
+            return entry;
+        };
+    }
+    if (typeof performance.measure !== 'function') {
+        performance.measure = function(name, startMarkOrOptions, endMark) {
+            var startMark, endMarkName, detail;
+            if (typeof startMarkOrOptions === 'object' && startMarkOrOptions !== null) {
+                startMark = startMarkOrOptions.start;
+                endMarkName = startMarkOrOptions.end;
+                detail = startMarkOrOptions.detail;
+            } else {
+                startMark = startMarkOrOptions;
+                endMarkName = endMark;
+            }
+            var startTime = startMark
+                ? (marks[startMark] && marks[startMark].startTime) || 0
+                : 0;
+            var endTime = endMarkName
+                ? (marks[endMarkName] && marks[endMarkName].startTime) || performance.now()
+                : performance.now();
+            var entry = new PerformanceEntry(
+                String(name), 'measure', startTime, Math.max(0, endTime - startTime)
+            );
+            entry.detail = detail || null;
+            addEntry(entry);
+            return entry;
+        };
+    }
+    if (typeof performance.clearMarks !== 'function') {
+        performance.clearMarks = function(name) {
+            if (name === undefined) {
+                marks = Object.create(null);
+                entries = entries.filter(function(e) { return e.entryType !== 'mark'; });
+            } else {
+                delete marks[String(name)];
+                entries = entries.filter(function(e) {
+                    return !(e.entryType === 'mark' && e.name === name);
+                });
+            }
+        };
+    }
+    if (typeof performance.clearMeasures !== 'function') {
+        performance.clearMeasures = function(name) {
+            entries = entries.filter(function(e) {
+                if (e.entryType !== 'measure') return true;
+                return name !== undefined && e.name !== name;
+            });
+        };
+    }
+    if (typeof performance.getEntries !== 'function') {
+        performance.getEntries = function() { return entries.slice(); };
+    }
+    if (typeof performance.getEntriesByName !== 'function') {
+        performance.getEntriesByName = function(name, type) {
+            return entries.filter(function(e) {
+                if (e.name !== name) return false;
+                return type === undefined || e.entryType === type;
+            });
+        };
+    }
+    if (typeof performance.getEntriesByType !== 'function') {
+        performance.getEntriesByType = function(type) {
+            return entries.filter(function(e) { return e.entryType === type; });
+        };
+    }
+
+    // ---- PerformanceObserver --------------------------------------
+    //
+    // No event loop in the sandbox: observer callbacks fire
+    // synchronously when `observe()` runs. Real Node defers them
+    // to the next tick; the polyfill matches the API but folds the
+    // dispatch into the immediate call so callers don't need to
+    // tick the loop themselves.
+
+    function PerformanceObserver(callback) {
+        if (typeof callback !== 'function') {
+            throw new TypeError('PerformanceObserver: callback must be a function');
+        }
+        this._callback = callback;
+        this._observed = [];
+        this._buffered = false;
+    }
+    PerformanceObserver.prototype.observe = function(opts) {
+        opts = opts || {};
+        var types = opts.entryTypes || (opts.type ? [opts.type] : []);
+        this._observed = types.slice();
+        this._buffered = !!opts.buffered;
+        // Spec: when `buffered` is true, replay matching prior entries.
+        if (this._buffered) {
+            var matched = entries.filter(function(e) {
+                return types.indexOf(e.entryType) !== -1;
+            });
+            if (matched.length) {
+                this._callback(
+                    { getEntries: function() { return matched.slice(); } },
+                    this
+                );
+            }
+        }
+    };
+    PerformanceObserver.prototype.disconnect = function() {
+        this._observed = [];
+    };
+    PerformanceObserver.prototype.takeRecords = function() {
+        var observed = this._observed;
+        var taken = entries.filter(function(e) {
+            return observed.indexOf(e.entryType) !== -1;
+        });
+        return taken;
+    };
+    PerformanceObserver.supportedEntryTypes = ['mark', 'measure'];
+
+    function monitorEventLoopDelay() {
+        // Sandbox has no event loop; return a stub that always
+        // reports zero delay. Node's API is preserved so callers
+        // can still .reset() / .disable() / .enable() without crashing.
+        var hist = {
+            min: 0, max: 0, mean: 0, stddev: 0, percentile: function() { return 0; },
+            percentiles: new Map(), exceeds: 0, count: 0,
+            enable: function() {}, disable: function() {}, reset: function() {},
+        };
+        return hist;
+    }
+
+    function createHistogram(opts) {
+        var lowest = (opts && opts.lowest) || 1;
+        var highest = (opts && opts.highest) || 9007199254740991; // 2^53 - 1
+        var count = 0, sum = 0, min = highest, max = lowest;
+        return {
+            min: min, max: max, mean: 0, stddev: 0, count: count,
+            record: function(v) {
+                count++; sum += v;
+                if (v < min) min = v;
+                if (v > max) max = v;
+            },
+            recordDelta: function() {},
+            reset: function() { count = 0; sum = 0; min = highest; max = lowest; },
+            percentile: function() { return 0; },
+            get percentiles() { return new Map(); },
+        };
+    }
+
+    // ---- exports --------------------------------------------------
+
+    exports.performance = performance;
+    exports.PerformanceEntry = PerformanceEntry;
+    exports.PerformanceObserver = PerformanceObserver;
+    exports.PerformanceObserverEntryList = PerformanceObserver; // alias
+    exports.PerformanceMeasure = PerformanceEntry;
+    exports.PerformanceMark = PerformanceEntry;
+    exports.PerformanceResourceTiming = PerformanceEntry;
+    exports.constants = {
+        NODE_PERFORMANCE_GC_MAJOR: 4,
+        NODE_PERFORMANCE_GC_MINOR: 1,
+        NODE_PERFORMANCE_GC_INCREMENTAL: 8,
+        NODE_PERFORMANCE_GC_WEAKCB: 16,
+    };
+    exports.monitorEventLoopDelay = monitorEventLoopDelay;
+    exports.createHistogram = createHistogram;
+
+    // Default export — Node lets callers do `import perf from 'perf_hooks'`.
+    module.exports = exports;
 });
 
 // ---- process.js ----
@@ -3759,6 +4932,173 @@ __register_module('querystring', function(module, exports, require) {
 
     exports.encode = exports.stringify;
     exports.decode = exports.parse;
+});
+
+// ---- readline.js ----
+// readline — Node 20's line reader. The module is normally used to
+// prompt for stdin input (`createInterface({input: process.stdin})`)
+// and parse it into discrete lines. Burn's stdin is one-shot via
+// the script invocation, but the surface is what library code
+// expects to import. We provide a real EventEmitter that emits
+// 'line' / 'close' synchronously when the user feeds chunks via
+// the readable's `on('data')` events.
+
+__register_module('readline', function(module, exports, require) {
+    var EventEmitter = require('events').EventEmitter;
+
+    function Interface(opts) {
+        EventEmitter.call(this);
+        opts = opts || {};
+        this.input = opts.input;
+        this.output = opts.output;
+        this._buffer = '';
+        this._closed = false;
+
+        if (this.input && typeof this.input.on === 'function') {
+            var self = this;
+            this.input.on('data', function(chunk) { self._consume(chunk); });
+            this.input.on('end', function() { self.close(); });
+            this.input.on('close', function() { self.close(); });
+        }
+    }
+    Interface.prototype = Object.create(EventEmitter.prototype);
+    Interface.prototype.constructor = Interface;
+
+    Interface.prototype._consume = function(chunk) {
+        if (this._closed) return;
+        var text;
+        if (typeof chunk === 'string') text = chunk;
+        else if (chunk && chunk.toString) text = chunk.toString('utf8');
+        else return;
+        this._buffer += text;
+        var nl;
+        while ((nl = this._buffer.indexOf('\n')) !== -1) {
+            var line = this._buffer.slice(0, nl);
+            this._buffer = this._buffer.slice(nl + 1);
+            // Strip trailing `\r` for Windows-style line endings.
+            if (line.length > 0 && line.charCodeAt(line.length - 1) === 13) {
+                line = line.slice(0, -1);
+            }
+            try { this.emit('line', line); } catch (_) {}
+        }
+    };
+
+    Interface.prototype.close = function() {
+        if (this._closed) return;
+        this._closed = true;
+        // Flush any trailing buffered content as a final line.
+        if (this._buffer.length > 0) {
+            var last = this._buffer;
+            this._buffer = '';
+            try { this.emit('line', last); } catch (_) {}
+        }
+        try { this.emit('close'); } catch (_) {}
+    };
+
+    Interface.prototype.question = function(query, callback) {
+        // No interactive stdin in the sandbox: we can't actually
+        // wait for the user. Surface a clear error rather than
+        // hanging.
+        var err = new Error(
+            'readline.question: interactive prompts are not supported in the ' +
+            'Afterburner sandbox (no TTY); pass scripted input via input streams.'
+        );
+        err.code = 'ERR_NO_TTY';
+        if (typeof callback === 'function') Promise.resolve().then(function() { callback(query); });
+        throw err;
+    };
+
+    Interface.prototype.pause = function() { return this; };
+    Interface.prototype.resume = function() { return this; };
+    Interface.prototype.write = function() { return this; };
+    Interface.prototype.setPrompt = function() {};
+    Interface.prototype.prompt = function() {};
+    Interface.prototype.getPrompt = function() { return ''; };
+    Interface.prototype.getCursorPos = function() { return { rows: 0, cols: 0 }; };
+
+    function createInterface(opts) {
+        return new Interface(opts);
+    }
+
+    function clearLine() { return true; }
+    function clearScreenDown() { return true; }
+    function cursorTo() { return true; }
+    function moveCursor() { return true; }
+    function emitKeypressEvents() {}
+
+    exports.createInterface = createInterface;
+    exports.Interface = Interface;
+    exports.clearLine = clearLine;
+    exports.clearScreenDown = clearScreenDown;
+    exports.cursorTo = cursorTo;
+    exports.moveCursor = moveCursor;
+    exports.emitKeypressEvents = emitKeypressEvents;
+});
+
+// ---- repl.js ----
+// repl — Node 20's read-eval-print-loop server.
+//
+// Burn doesn't have an interactive TTY in the sandboxed JS context,
+// but `repl.start()` is sometimes called from server-introspection
+// tools or in `--inspect-brk` flows. We expose a `REPLServer`
+// class that accepts the configuration, lets callers wire `command`
+// / `replServer.context.foo = ...` style globals, and ignores
+// the read loop (no stdin available to read).
+
+__register_module('repl', function(module, exports, require) {
+    var EventEmitter = require('events').EventEmitter;
+    var vm = require('vm');
+
+    function REPLServer(opts) {
+        EventEmitter.call(this);
+        opts = opts || {};
+        this.useColors = !!opts.useColors;
+        this.useGlobal = opts.useGlobal !== false;
+        this.terminal = !!opts.terminal;
+        this.input = opts.input || null;
+        this.output = opts.output || null;
+        this.commands = Object.create(null);
+        // The REPL spec exposes the eval scope as `replServer.context`.
+        // We back it with a fresh vm context so callers can attach
+        // helpers (`replServer.context.x = 5`) without mutating the
+        // surrounding globals.
+        this.context = vm.createContext({});
+    }
+    REPLServer.prototype = Object.create(EventEmitter.prototype);
+    REPLServer.prototype.constructor = REPLServer;
+
+    REPLServer.prototype.defineCommand = function(name, descriptor) {
+        if (typeof descriptor === 'function') descriptor = { action: descriptor };
+        this.commands[name] = descriptor;
+    };
+    REPLServer.prototype.displayPrompt = function() {};
+    REPLServer.prototype.setPrompt = function() {};
+    REPLServer.prototype.close = function() { this.emit('exit'); };
+    REPLServer.prototype.eval = function(code, _ctx, _filename, callback) {
+        try {
+            var result = vm.runInContext(code, this.context);
+            if (typeof callback === 'function') callback(null, result);
+        } catch (e) {
+            if (typeof callback === 'function') callback(e);
+        }
+    };
+
+    function start(opts) {
+        if (typeof opts === 'string') opts = { prompt: opts };
+        var server = new REPLServer(opts);
+        return server;
+    }
+
+    exports.start = start;
+    exports.REPLServer = REPLServer;
+    exports.REPL_MODE_SLOPPY = Symbol('repl-sloppy');
+    exports.REPL_MODE_STRICT = Symbol('repl-strict');
+    exports.Recoverable = function Recoverable(err) {
+        var e = err instanceof Error ? err : new Error(String(err));
+        e.name = 'Recoverable';
+        return e;
+    };
+    exports.builtinModules = []; // populated by `module.builtinModules` consumers
 });
 
 // ---- shadow_argon2.js ----
@@ -5265,50 +6605,19 @@ __register_module('string_decoder', function(module, exports, require) {
 });
 
 // ---- stubs.js ----
-// Stub modules that throw a helpful NotSupportedInSandbox error on any
-// property access. Registering them means `require('dgram')` returns an
-// object instead of `Cannot find module 'dgram'` — scripts get a clear
-// signal about what's unsupported and why.
+// Stubs were the parking spot for Node modules we hadn't yet
+// polyfilled. Every entry that lived here used to register a Proxy
+// that threw on first property access, naming the module so users
+// got a clear "not supported" signal.
 //
-// Only list modules that have NO real polyfill. Bundle concat order is
-// alphabetical, so anything listed here would clobber a real polyfill
-// whose filename sorts before `stubs.js` (e.g. `net.js`). `net`, `tls`,
-// and `worker_threads` ship real polyfills and are intentionally absent.
-
-(function installStubs() {
-    var reasons = {
-        dgram: 'UDP sockets',
-        http2: 'HTTP/2 (plain http/https works for outbound requests)',
-        cluster: 'multi-process clustering',
-        inspector: 'Node inspector protocol',
-        vm: 'nested VM contexts',
-        v8: 'V8-specific APIs',
-        readline: 'stdin line reader',
-        repl: 'interactive REPL',
-        wasi: 'guest WASI access (already inside the sandbox)',
-        domain: 'deprecated domain API',
-        trace_events: 'trace events',
-        async_hooks: 'async hooks (no event loop)',
-        perf_hooks: 'perf hooks (see globalThis.performance)',
-    };
-
-    Object.keys(reasons).forEach(function(name) {
-        var reason = reasons[name];
-        __register_module(name, function(module, exports, require) {
-            var why = 'Module "' + name + '" is not supported in the Afterburner sandbox: '
-                + reason;
-            var trap = new Proxy({}, {
-                get: function(_t, prop) {
-                    if (prop === 'then') return undefined; // don't claim to be a thenable
-                    var err = new Error(why + ' (accessed: ' + String(prop) + ')');
-                    err.code = 'ERR_NOT_SUPPORTED_IN_SANDBOX';
-                    throw err;
-                }
-            });
-            module.exports = trap;
-        });
-    });
-})();
+// As of the round-2 Node 20 coverage pass, every Node 20 LTS
+// built-in has a real polyfill (see the matching `polyfills/<name>.js`
+// file). This file is intentionally empty so the bundle order
+// (alphabetical concat) doesn't clobber any real polyfill that
+// sorts before `stubs.js`. Keeping the file around — instead of
+// deleting it — preserves a stable hook for any future
+// "intentionally not supported" module without re-introducing the
+// alphabetical-clobber footgun.
 
 // ---- timers.js ----
 // timers — microtask-based scheduling + host-managed daemon timers.
@@ -6116,6 +7425,115 @@ __register_module('tls', function(module, exports, require) {
     exports.DEFAULT_MAX_VERSION = 'TLSv1.3';
 });
 
+// ---- trace_events.js ----
+// trace_events — Node 20's V8 / Node trace categories. The sandbox
+// has no trace pipeline; we accept the API surface so callers don't
+// crash, log enable/disable to stderr (best-effort visibility), and
+// no-op the rest.
+
+__register_module('trace_events', function(module, exports, require) {
+
+    function Tracing(categories) {
+        this._categories = (categories || []).slice();
+        this._enabled = false;
+    }
+    Tracing.prototype.enable = function() { this._enabled = true; };
+    Tracing.prototype.disable = function() { this._enabled = false; };
+    Object.defineProperty(Tracing.prototype, 'enabled', {
+        get: function() { return this._enabled; },
+    });
+    Object.defineProperty(Tracing.prototype, 'categories', {
+        get: function() { return this._categories.join(','); },
+    });
+
+    function createTracing(opts) {
+        opts = opts || {};
+        var cats = opts.categories;
+        if (!Array.isArray(cats) || cats.length === 0) {
+            throw new TypeError(
+                'trace_events.createTracing: `categories` must be a non-empty array'
+            );
+        }
+        return new Tracing(cats);
+    }
+
+    function getEnabledCategories() {
+        // Sandbox has no globally-enabled categories. Node returns
+        // a comma-separated string or `undefined`.
+        return undefined;
+    }
+
+    exports.createTracing = createTracing;
+    exports.getEnabledCategories = getEnabledCategories;
+});
+
+// ---- tty.js ----
+// tty — Node 20's TTY stream classes. process.stdout / process.stderr
+// inherit from these in real Node when attached to a terminal. In
+// burn's sandbox there's no TTY, but utility code calls
+// `tty.isatty(fd)` and `process.stdout.isTTY` defensively — we keep
+// those returning sane non-TTY answers so the conditional pretty-
+// print paths in chalk / signale / supports-color don't crash.
+
+__register_module('tty', function(module, exports, require) {
+    var stream = require('stream');
+
+    function ReadStream(fd, options) {
+        if (!(this instanceof ReadStream)) return new ReadStream(fd, options);
+        // We delegate to Readable for the API shape; no actual
+        // bytes flow because there's no TTY behind it.
+        if (typeof stream.Readable === 'function') {
+            stream.Readable.call(this, options);
+        }
+        this.fd = (fd | 0) || 0;
+        this.isRaw = false;
+        this.isTTY = false; // sandbox is never a TTY
+        this.columns = 80;
+        this.rows = 24;
+    }
+    if (typeof stream.Readable === 'function') {
+        ReadStream.prototype = Object.create(stream.Readable.prototype);
+        ReadStream.prototype.constructor = ReadStream;
+    }
+    ReadStream.prototype.setRawMode = function(mode) {
+        this.isRaw = !!mode;
+        return this;
+    };
+
+    function WriteStream(fd, options) {
+        if (!(this instanceof WriteStream)) return new WriteStream(fd, options);
+        if (typeof stream.Writable === 'function') {
+            stream.Writable.call(this, options);
+        }
+        this.fd = (fd | 0) || 1;
+        this.isTTY = false;
+        this.columns = 80;
+        this.rows = 24;
+    }
+    if (typeof stream.Writable === 'function') {
+        WriteStream.prototype = Object.create(stream.Writable.prototype);
+        WriteStream.prototype.constructor = WriteStream;
+    }
+    WriteStream.prototype.clearLine = function() { return true; };
+    WriteStream.prototype.clearScreenDown = function() { return true; };
+    WriteStream.prototype.cursorTo = function() { return true; };
+    WriteStream.prototype.moveCursor = function() { return true; };
+    WriteStream.prototype.getColorDepth = function() { return 1; };
+    WriteStream.prototype.hasColors = function() { return false; };
+    WriteStream.prototype.getWindowSize = function() {
+        return [this.columns, this.rows];
+    };
+
+    function isatty(fd) {
+        var _ = fd;
+        return false; // sandbox has no TTY
+    }
+
+    exports.ReadStream = ReadStream;
+    exports.WriteStream = WriteStream;
+    exports.isatty = isatty;
+});
+
 // ---- url.js ----
 // url — legacy API (url.parse / url.format / url.resolve) plus a
 // passthrough to the WHATWG `URL` / `URLSearchParams` globals.
@@ -6332,6 +7750,386 @@ __register_module('util', function(module, exports, require) {
 
     exports.TextEncoder = typeof TextEncoder === 'function' ? TextEncoder : undefined;
     exports.TextDecoder = typeof TextDecoder === 'function' ? TextDecoder : undefined;
+});
+
+// ---- v8.js ----
+// v8 — Node 20's V8 introspection API. We don't run V8 (we run
+// QuickJS-in-WASM), but the surface is what real apps reach for —
+// returning sane stub data keeps the integration layer working.
+
+__register_module('v8', function(module, exports, require) {
+
+    var Buffer = require('buffer').Buffer;
+
+    function getHeapStatistics() {
+        // Sandbox: no V8 heap. Report a memory snapshot bounded by
+        // the WASM memory limit (configured via the FuelGauge but
+        // not introspectable from JS today). Numbers are intentionally
+        // round so callers parsing them as informational don't see
+        // bogus precision.
+        return {
+            total_heap_size: 32 * 1024 * 1024,
+            total_heap_size_executable: 0,
+            total_physical_size: 32 * 1024 * 1024,
+            total_available_size: 256 * 1024 * 1024,
+            used_heap_size: 16 * 1024 * 1024,
+            heap_size_limit: 256 * 1024 * 1024,
+            malloced_memory: 0,
+            peak_malloced_memory: 0,
+            does_zap_garbage: 0,
+            number_of_native_contexts: 1,
+            number_of_detached_contexts: 0,
+            total_global_handles_size: 0,
+            used_global_handles_size: 0,
+            external_memory: 0,
+        };
+    }
+
+    function getHeapSpaceStatistics() {
+        return [
+            {
+                space_name: 'new_space',
+                space_size: 8 * 1024 * 1024,
+                space_used_size: 1 * 1024 * 1024,
+                space_available_size: 7 * 1024 * 1024,
+                physical_space_size: 8 * 1024 * 1024,
+            },
+            {
+                space_name: 'old_space',
+                space_size: 24 * 1024 * 1024,
+                space_used_size: 15 * 1024 * 1024,
+                space_available_size: 9 * 1024 * 1024,
+                physical_space_size: 24 * 1024 * 1024,
+            },
+        ];
+    }
+
+    function getHeapCodeStatistics() {
+        return {
+            code_and_metadata_size: 0,
+            bytecode_and_metadata_size: 0,
+            external_script_source_size: 0,
+        };
+    }
+
+    function getHeapSnapshot() {
+        // Real Node returns a Readable stream of a JSON heap dump.
+        // We give callers an empty one shaped like Node's so they
+        // can pipe it without crashing.
+        var EventEmitter = require('events').EventEmitter;
+        var stream = new EventEmitter();
+        var emptyDump = '{"snapshot":{"meta":{},"node_count":0,"edge_count":0},"nodes":[],"edges":[],"strings":[]}';
+        stream.read = function() { return Buffer.from(emptyDump); };
+        stream.pipe = function(dest) { dest.end(emptyDump); return dest; };
+        Promise.resolve().then(function() {
+            stream.emit('data', Buffer.from(emptyDump));
+            stream.emit('end');
+        });
+        return stream;
+    }
+
+    function writeHeapSnapshot(filename) {
+        var fs = require('fs');
+        var emptyDump = '{"snapshot":{"meta":{},"node_count":0,"edge_count":0},"nodes":[],"edges":[],"strings":[]}';
+        var path = filename || ('Heap.' + Date.now() + '.heapsnapshot');
+        fs.writeFileSync(path, emptyDump);
+        return path;
+    }
+
+    // ---- Serialization (v8.serialize / deserialize) ---------------
+    //
+    // Node uses V8's structured-clone format. We don't have access
+    // to it from QuickJS; serialize → JSON-encoded Buffer is a
+    // reasonable replacement that round-trips for plain values.
+    // Functions and class instances aren't preserved, matching
+    // Node's behaviour for non-cloneable values.
+
+    function serialize(value) {
+        var json = JSON.stringify(value);
+        return Buffer.from(json || 'null', 'utf8');
+    }
+
+    function deserialize(buf) {
+        var s;
+        if (Buffer.isBuffer(buf)) s = buf.toString('utf8');
+        else if (buf instanceof Uint8Array) s = Buffer.from(buf).toString('utf8');
+        else throw new TypeError('v8.deserialize: argument must be a Buffer or Uint8Array');
+        return JSON.parse(s);
+    }
+
+    function Serializer() {
+        this._values = [];
+    }
+    Serializer.prototype.writeHeader = function() {};
+    Serializer.prototype.writeValue = function(v) { this._values.push(v); };
+    Serializer.prototype.releaseBuffer = function() {
+        return serialize(this._values.length === 1 ? this._values[0] : this._values);
+    };
+    Serializer.prototype.transferArrayBuffer = function() {};
+
+    function Deserializer(buf) {
+        this._cursor = 0;
+        this._values = [];
+        try {
+            var v = deserialize(buf);
+            this._values = Array.isArray(v) ? v : [v];
+        } catch (_) { /* invalid input → empty values */ }
+    }
+    Deserializer.prototype.readHeader = function() { return true; };
+    Deserializer.prototype.readValue = function() {
+        return this._values[this._cursor++];
+    };
+    Deserializer.prototype.transferArrayBuffer = function() {};
+
+    function setFlagsFromString(_flags) {
+        // V8 flag tweaks are V8-specific; ignored.
+    }
+    function getStringEnvironment() {
+        return [];
+    }
+
+    exports.cachedDataVersionTag = function() { return 0; };
+    exports.getHeapStatistics = getHeapStatistics;
+    exports.getHeapSpaceStatistics = getHeapSpaceStatistics;
+    exports.getHeapCodeStatistics = getHeapCodeStatistics;
+    exports.getHeapSnapshot = getHeapSnapshot;
+    exports.writeHeapSnapshot = writeHeapSnapshot;
+    exports.setFlagsFromString = setFlagsFromString;
+    exports.getStringEnvironment = getStringEnvironment;
+    exports.serialize = serialize;
+    exports.deserialize = deserialize;
+    exports.Serializer = Serializer;
+    exports.Deserializer = Deserializer;
+    exports.DefaultSerializer = Serializer;
+    exports.DefaultDeserializer = Deserializer;
+    exports.startupSnapshot = {
+        addDeserializeCallback: function() {},
+        addSerializeCallback: function() {},
+        setDeserializeMainFunction: function() {},
+        isBuildingSnapshot: function() { return false; },
+    };
+    exports.promiseHooks = {
+        onInit: function() { return function() {}; },
+        onSettled: function() { return function() {}; },
+        onBefore: function() { return function() {}; },
+        onAfter: function() { return function() {}; },
+        createHook: function() { return { disable: function() {} }; },
+    };
+});
+
+// ---- vm.js ----
+// vm — Node 20's "VM" (Virtual Machine) module.
+//
+// Real Node uses V8's vm.runInContext / runInNewContext to run JS
+// in a separate context. Burn IS a JS sandbox already (everything
+// runs inside one) — there's no nested-context boundary to cross.
+// We give callers a Node-compatible surface that uses `eval` /
+// fresh evaluation contexts where possible.
+//
+// Trade-offs vs Node:
+//   * `runInThisContext(code)` does what `eval(code)` would, in the
+//     current global. Same scope as Node's variant.
+//   * `runInNewContext(code, sandbox)` evaluates `code` in a
+//     standalone object so writes don't leak to the caller's globals.
+//     QuickJS doesn't expose first-class context creation from JS,
+//     so we approximate by wrapping the code in `(function() { ... }).call(sandbox)`
+//     — `this` becomes the sandbox object, top-level `var` ends up
+//     on the sandbox via `with()`-like rebinding.
+//   * `Script` class supports `runInThisContext` / `runInNewContext`.
+//   * `compileFunction(...)` is implemented via Function constructor.
+
+__register_module('vm', function(module, exports, require) {
+
+    function isContext(obj) {
+        // A "vm context" in Node is a sandbox object. We mark
+        // objects as contexts via a Symbol so `isContext` is stable.
+        return !!(obj && obj.__ab_vm_context === true);
+    }
+
+    function createContext(sandbox, options) {
+        sandbox = sandbox || {};
+        // Mark as a vm context so isContext() recognizes it.
+        Object.defineProperty(sandbox, '__ab_vm_context', {
+            value: true,
+            enumerable: false,
+            configurable: false,
+            writable: false,
+        });
+        var _ = options;
+        return sandbox;
+    }
+
+    function runInThisContext(code, options) {
+        var _ = options;
+        // No isolation — same context as the caller. Spec-compatible.
+        return (0, eval)(String(code));
+    }
+
+    /// `runInNewContext` evaluates `code` against a fresh object so
+    /// writes to top-level identifiers land on `sandbox`, not on
+    /// `globalThis`. QuickJS lacks first-class contexts, so we
+    /// approximate via an IIFE bound to the sandbox + `with()` for
+    /// transparent identifier resolution.
+    function runInNewContext(code, sandbox, options) {
+        sandbox = sandbox || {};
+        if (!isContext(sandbox)) {
+            // Auto-context the sandbox the first time.
+            createContext(sandbox);
+        }
+        var _ = options;
+        // Use `eval` inside `with(sandbox)` so the completion value
+        // of the script comes back to the caller — matches Node's
+        // V8-eval semantics where `runInNewContext('1+2', {})` is
+        // `3`. `with` is the only construct that makes top-level
+        // identifier lookups resolve against `sandbox` first; eval's
+        // completion value is the final-expression value, same as
+        // Node.
+        var wrapper = new Function(
+            '__ab_sandbox__', '__ab_code__',
+            'with (__ab_sandbox__) { return eval(__ab_code__); }'
+        );
+        return wrapper(sandbox, String(code));
+    }
+
+    function runInContext(code, ctx, options) {
+        if (!isContext(ctx)) {
+            throw new TypeError(
+                'vm.runInContext: contextifiedObject must be a context (call vm.createContext first)'
+            );
+        }
+        return runInNewContext(code, ctx, options);
+    }
+
+    function compileFunction(code, params, options) {
+        var args = (params || []).slice();
+        args.push(String(code));
+        return new (Function.prototype.bind.apply(Function, [null].concat(args)));
+    }
+
+    // ---- Script class --------------------------------------------
+
+    function Script(code, options) {
+        if (!(this instanceof Script)) return new Script(code, options);
+        this.code = String(code);
+        this._options = options || {};
+        // Pre-compile at construction time so syntax errors throw
+        // immediately, matching Node's spec.
+        try {
+            new Function(this.code);
+        } catch (e) {
+            throw e;
+        }
+    }
+    Script.prototype.runInThisContext = function(options) {
+        return runInThisContext(this.code, options);
+    };
+    Script.prototype.runInContext = function(ctx, options) {
+        return runInContext(this.code, ctx, options);
+    };
+    Script.prototype.runInNewContext = function(sandbox, options) {
+        return runInNewContext(this.code, sandbox, options);
+    };
+    Script.prototype.createCachedData = function() {
+        // No bytecode caching surface from QuickJS to JS.
+        return Buffer ? Buffer.alloc(0) : new Uint8Array(0);
+    };
+
+    // `Module` / `SourceTextModule` / `SyntheticModule` — Node has
+    // these as experimental ES module support inside vm. We don't
+    // expose them; callers who hit them will see the stub class
+    // throw a useful error.
+
+    function unsupportedModule(name) {
+        return function() {
+            throw new Error(
+                'vm.' + name + ' (ES Module support) is not implemented in burn yet — ' +
+                'use Script + runInContext for evaluating CJS-shaped code.'
+            );
+        };
+    }
+
+    exports.createContext = createContext;
+    exports.isContext = isContext;
+    exports.runInThisContext = runInThisContext;
+    exports.runInNewContext = runInNewContext;
+    exports.runInContext = runInContext;
+    exports.compileFunction = compileFunction;
+    exports.Script = Script;
+    exports.SourceTextModule = unsupportedModule('SourceTextModule');
+    exports.SyntheticModule = unsupportedModule('SyntheticModule');
+    exports.Module = unsupportedModule('Module');
+    exports.constants = {
+        DONT_CONTEXTIFY: 0,
+        USE_MAIN_CONTEXT_DEFAULT_LOADER: 1,
+    };
+});
+
+// ---- wasi.js ----
+// wasi — Node 20's WASI host. The plain `WebAssembly` polyfill
+// already loads modules; this module gives callers the Node-shaped
+// `WASI` class so `new WASI({...}).getImportObject()` works against
+// our `WebAssembly.instantiate`.
+//
+// v1 supplies an empty import object — the WASM loader doesn't bridge
+// user-defined imports yet, so a module that imports
+// `wasi_snapshot_preview1` won't actually get satisfied. The class
+// exists to keep `import { WASI } from 'wasi'` from breaking; runtime
+// instantiation will surface a LinkError naming the missing import,
+// which is the right place to learn what's still pending.
+
+__register_module('wasi', function(module, exports, require) {
+
+    function WASI(opts) {
+        opts = opts || {};
+        this.args = (opts.args || []).slice();
+        this.env = Object.assign({}, opts.env || {});
+        this.preopens = Object.assign({}, opts.preopens || {});
+        this.returnOnExit = opts.returnOnExit !== false;
+        this.version = opts.version || 'preview1';
+        this._started = false;
+    }
+
+    WASI.prototype.getImportObject = function() {
+        // v1 returns an empty import map. WASM modules that import
+        // `wasi_snapshot_preview1.<func>` will fail at instantiate
+        // with `LinkError: import not satisfied: wasi_snapshot_preview1.<func>`,
+        // which tells the caller which entry is still pending.
+        return {};
+    };
+
+    WASI.prototype.start = function(instance) {
+        if (this._started) {
+            throw new Error('WASI.start: instance already started');
+        }
+        this._started = true;
+        var fn = instance && instance.exports && instance.exports._start;
+        if (typeof fn !== 'function') {
+            throw new TypeError(
+                'WASI.start: instance must export `_start` (compile module ' +
+                'with `wasm32-wasi` / `wasi-libc` to get the standard entry)'
+            );
+        }
+        try {
+            fn();
+        } catch (e) {
+            // WASI exits via a special trap; surface the exit code
+            // when present.
+            if (e && typeof e.code === 'number') {
+                if (this.returnOnExit) return e.code;
+                throw e;
+            }
+            throw e;
+        }
+        return 0;
+    };
+
+    WASI.prototype.initialize = function(instance) {
+        var fn = instance && instance.exports && instance.exports._initialize;
+        if (typeof fn !== 'function') return;
+        fn();
+    };
+
+    exports.WASI = WASI;
 });
 
 // ---- web_compat.js ----

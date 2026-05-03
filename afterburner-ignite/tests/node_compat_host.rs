@@ -626,20 +626,32 @@ fn buffer_compare_indexof() {
 }
 
 #[test]
-fn stubs_give_clear_error() {
-    // `net`, `tls`, and `worker_threads` were removed from the stub
-    // list once their polyfills landed (B7 / B10). `dgram` (UDP) is
-    // still stubbed.
+fn every_node_builtin_loads() {
+    // Round-2 Node 20 coverage shipped real polyfills for every
+    // built-in. `require(<name>)` for any name listed in
+    // `Module.builtinModules` returns a non-null object — no
+    // module remains stubbed.
     let src = r#"
         module.exports = () => {
-            try { require('dgram').createSocket(); return 'unexpected'; }
-            catch (e) { return { msg: e.message, code: e.code }; }
+            const names = require('module').builtinModules;
+            const failed = [];
+            for (const name of names) {
+                try {
+                    const m = require(name);
+                    if (m === null) failed.push(name + ': null');
+                } catch (e) {
+                    failed.push(name + ': ' + (e && e.message || e));
+                }
+            }
+            return failed;
         };
     "#;
     let out = run(src, Manifold::sealed());
-    let msg = out["msg"].as_str().unwrap();
-    assert!(msg.contains("not supported"), "got {msg}");
-    assert_eq!(out["code"], json!("ERR_NOT_SUPPORTED_IN_SANDBOX"));
+    let failures = out.as_array().expect("array");
+    assert!(
+        failures.is_empty(),
+        "expected every builtin to load, but: {failures:?}"
+    );
 }
 
 #[test]

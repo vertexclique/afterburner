@@ -1,44 +1,13 @@
-// Stub modules that throw a helpful NotSupportedInSandbox error on any
-// property access. Registering them means `require('dgram')` returns an
-// object instead of `Cannot find module 'dgram'` — scripts get a clear
-// signal about what's unsupported and why.
+// Stubs were the parking spot for Node modules we hadn't yet
+// polyfilled. Every entry that lived here used to register a Proxy
+// that threw on first property access, naming the module so users
+// got a clear "not supported" signal.
 //
-// Only list modules that have NO real polyfill. Bundle concat order is
-// alphabetical, so anything listed here would clobber a real polyfill
-// whose filename sorts before `stubs.js` (e.g. `net.js`). `net`, `tls`,
-// and `worker_threads` ship real polyfills and are intentionally absent.
-
-(function installStubs() {
-    var reasons = {
-        dgram: 'UDP sockets',
-        http2: 'HTTP/2 (plain http/https works for outbound requests)',
-        cluster: 'multi-process clustering',
-        inspector: 'Node inspector protocol',
-        vm: 'nested VM contexts',
-        v8: 'V8-specific APIs',
-        readline: 'stdin line reader',
-        repl: 'interactive REPL',
-        wasi: 'guest WASI access (already inside the sandbox)',
-        domain: 'deprecated domain API',
-        trace_events: 'trace events',
-        async_hooks: 'async hooks (no event loop)',
-        perf_hooks: 'perf hooks (see globalThis.performance)',
-    };
-
-    Object.keys(reasons).forEach(function(name) {
-        var reason = reasons[name];
-        __register_module(name, function(module, exports, require) {
-            var why = 'Module "' + name + '" is not supported in the Afterburner sandbox: '
-                + reason;
-            var trap = new Proxy({}, {
-                get: function(_t, prop) {
-                    if (prop === 'then') return undefined; // don't claim to be a thenable
-                    var err = new Error(why + ' (accessed: ' + String(prop) + ')');
-                    err.code = 'ERR_NOT_SUPPORTED_IN_SANDBOX';
-                    throw err;
-                }
-            });
-            module.exports = trap;
-        });
-    });
-})();
+// As of the round-2 Node 20 coverage pass, every Node 20 LTS
+// built-in has a real polyfill (see the matching `polyfills/<name>.js`
+// file). This file is intentionally empty so the bundle order
+// (alphabetical concat) doesn't clobber any real polyfill that
+// sorts before `stubs.js`. Keeping the file around — instead of
+// deleting it — preserves a stable hook for any future
+// "intentionally not supported" module without re-introducing the
+// alphabetical-clobber footgun.

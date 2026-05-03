@@ -4,12 +4,18 @@ Source of truth for what's shipped vs. what's left in the
 `burn` runtime plan (`docs/IMPL_PLAN_BURN_RUNTIME.md`) and the
 adjacent L3 shadow plan (locked decision Q3 in that doc).
 
-**Last refreshed:** post `WebAssembly.*` host loader — `WebAssembly.compile`
-/ `instantiate` / `validate` / `Module` / `Instance` / `Memory` now work
-inside the sandbox, backed by a host-side wasmtime sub-runner. With this
-in place, every npm package that ships a pre-compiled WASM build (sql.js,
-@jsquash/*, libheif-js, …) is loadable through the standard spec API,
-no per-package shadow code required.
+**Last refreshed:** post Node 20 LTS round-2 coverage. Every Node 20.x
+LTS built-in module now has a real polyfill — `require('<name>')` for
+any name listed in `Module.builtinModules` returns a non-null object,
+no module surfaces a "not supported" stub error any more. Newly
+polyfilled in this round: `perf_hooks`, `async_hooks`, `vm`, `v8`,
+`domain`, `trace_events`, `inspector`, `wasi`, `cluster`, `repl`,
+`readline`, `tty`, `module`, `dgram`, `http2`, plus the subpaths
+`util/types`, `stream/web`, `constants`, `sys`, `path/posix`, and
+`path/win32`. Sibling crates re-exported as `afterburner::core` /
+`::wasi` / `::ignite` / `::node_compat` / `::adaptive_crate` /
+`::flow_crate` / `::thrust_crate` for users who want the full crate
+surface from the facade.
 Regenerate by hand when a phase lands; `git log --oneline` is
 authoritative if this file drifts.
 

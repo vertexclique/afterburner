@@ -456,17 +456,33 @@ fn wasm_abort_controller() {
 }
 
 #[test]
-fn wasm_stubs_give_clear_error() {
-    // `worker_threads`, `net`, and `tls` graduated to real polyfills
-    // (B10 / B7); `dgram` (UDP) is still a sandbox stub.
+fn wasm_every_node_builtin_loads() {
+    // Round-2 Node 20 coverage shipped real polyfills for every
+    // built-in. This test asserts the contract: `require(<name>)`
+    // for any name in `Module.builtinModules` returns a non-null
+    // object, with no module surfacing the sandbox-default
+    // "module not supported" error any more.
     let src = r#"
         module.exports = () => {
-            try { require('dgram').createSocket; return 'unexpected'; }
-            catch (e) { return e.code; }
+            const names = require('module').builtinModules;
+            const failed = [];
+            for (const name of names) {
+                try {
+                    const m = require(name);
+                    if (m === null) failed.push(name + ': null');
+                } catch (e) {
+                    failed.push(name + ': ' + (e && e.message || e));
+                }
+            }
+            return failed;
         };
     "#;
     let out = run(src, Manifold::sealed());
-    assert_eq!(out, json!("ERR_NOT_SUPPORTED_IN_SANDBOX"));
+    let failures = out.as_array().expect("array");
+    assert!(
+        failures.is_empty(),
+        "expected every builtin to load, but: {failures:?}"
+    );
 }
 
 #[test]
