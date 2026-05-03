@@ -60,7 +60,7 @@ aes-gcm = "0.10"
 aes = "0.8"
 cbc = { version = "0.1", features = ["std"] }
 pbkdf2 = "0.12"
-scrypt = "0.11"
+scrypt = "0.12"
 rsa = { version = "0.9", features = ["sha2"] }
 p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 spki = { version = "0.7", features = ["pem"] }
