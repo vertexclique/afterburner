@@ -3,7 +3,7 @@ MIT License
 Copyright (c) 2024-2026 Theo Bulut
 
 ADDITIONAL RESTRICTION: This license does NOT grant any rights to the
-entities listed in the file `EXCLUDED_ENTITIES` shipped alongside this
+entities listed in the file `EXCLUSIONS` shipped alongside this
 license. Any use of this software (in whole or in part, source or
 binary, with or without modification) by an excluded entity, or by
 any of its parents, subsidiaries, successors, assigns, or employees

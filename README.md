@@ -386,7 +386,7 @@ What happens:
 3. Tags the commit `vX.Y.Z` and pushes commit + tag to `origin`.
 4. The tag push fires `.github/workflows/release.yml`:
    - Builds `burn` for `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc` with `--features release-cli` against the `cli-release` Cargo profile.
-   - Bundles the binary + `README.md` + `LICENSE-*` + `EXCLUDED_ENTITIES` + `docs/`.
+   - Bundles the binary + `README.md` + `LICENSE-*` + `EXCLUSIONS` + `docs/`.
    - SHA-256 sidecar per archive.
    - Creates / updates the GitHub Release named after the tag and uploads every artifact.
 
@@ -399,12 +399,12 @@ CI itself (`.github/workflows/ci.yml`) runs on every push / PR: `fmt`, `clippy` 
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your
-option, with one carve-out: the entities listed in [`EXCLUDED_ENTITIES`](EXCLUDED_ENTITIES)
+option, with one carve-out: the entities listed in [`EXCLUSIONS`](EXCLUSIONS)
 are **not** granted any rights under either license. The list is part of the
 license terms — copies and derivatives must include it unmodified.
 
 ---
 
 <p align="center">
-  <sub>MIT OR Apache-2.0 (with EXCLUDED_ENTITIES)</sub>
+  <sub>MIT OR Apache-2.0 (with EXCLUSIONS)</sub>
 </p>
