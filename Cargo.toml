@@ -36,11 +36,6 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
 authors = ["Theo Bulut <vertexclique@gmail.com>"]
-# Dual-licensed MIT/Apache-2.0 with one additional restriction:
-# the entities listed in EXCLUSIONS (top of repo) are NOT
-# granted any rights. The actual restriction is enforced by the
-# preambles at the top of LICENSE-MIT / LICENSE-APACHE — the SPDX
-# expression below is the closest standard-vocabulary approximation.
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]

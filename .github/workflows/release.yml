@@ -119,8 +119,8 @@ jobs:
           fi
           cp README.md "${stage}/README.md"
           cp -r docs "${stage}/docs" || true
-          # License files + the use-restriction list referenced by them.
-          for f in LICENSE LICENSE-MIT LICENSE-APACHE EXCLUSIONS; do
+          # License files.
+          for f in LICENSE LICENSE-MIT LICENSE-APACHE; do
             [[ -f "$f" ]] && cp "$f" "${stage}/"
           done
           echo "stem=${stem}" >> "$GITHUB_OUTPUT"
