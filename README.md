@@ -53,6 +53,24 @@ let ab = Afterburner::builder()
 
 ## `burn` — the command-line runtime
 
+### Install (prebuilt binaries)
+
+```bash
+# One-line installer (Linux / macOS / Windows-via-bash). Fetches the
+# latest GitHub Release, verifies the SHA-256 sidecar, drops `burn`
+# into ~/.local/bin (override with BURN_INSTALL=...).
+curl -fsSL https://raw.githubusercontent.com/vertexclique/afterburner/master/install.sh | bash
+
+# Pin a specific version
+BURN_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/vertexclique/afterburner/master/install.sh | bash
+```
+
+Or grab a tarball directly from the [Releases page](https://github.com/vertexclique/afterburner/releases) — archives are named `burn-<version>-<target>.tar.gz` (or `.zip` for Windows) and ship with a `.sha256` next to them.
+
+Built with `--features release-cli` (every backend + every L3 shadow + TypeScript loader), so it's a single self-contained binary — no runtime libsqlite3 / libssl / libclang required. Plugin `.wasm` is `include_bytes!`-baked into the binary at build time.
+
+### Install (build from source)
+
 ```bash
 cargo install afterburner --features bin   # installs the `burn` binary
 burn ./script.js                           # run a file
@@ -210,11 +228,13 @@ cargo build -p afterburner --release --features \
 | Command | What it does |
 |:--------|:-------------|
 | `cargo build` | Builds the six host crates (skips the plugin). |
-| `cargo test --workspace --exclude afterburner-plugin` | Runs the full 450+ test suite (set `--features bin,ts,shadow-bcrypt,shadow-argon2,shadow-jsonwebtoken,shadow-sqlite3,shadow-sharp` to include the L3 shadow tests). |
+| `cargo test --workspace --exclude afterburner-plugin` | Runs the full 450+ test suite (set `--features bin,ts,all-shadows` to include the L3 shadow tests). |
 | `cargo clippy --workspace --exclude afterburner-plugin --all-targets` | Linter check. |
 | `cargo test -p afterburner-ignite --release perf_smoke` | Native throughput smoke. |
 | `cargo test -p afterburner-wasi --release perf_smoke` | WASM throughput smoke. |
 | `afterburner-plugin/build.sh` | Rebuild + Wizer-preinit the plugin. |
+| `cargo build --profile cli-release -p afterburner --bin burn --features release-cli` | Build the shippable `burn` binary locally. |
+| `cargo release --execute patch` | Bump workspace version, commit, tag `vX.Y.Z`, push — fires off the GitHub Actions release workflow that builds + uploads multi-platform binaries. See `release.toml`. |
 
 ---
 
@@ -351,6 +371,40 @@ const n = state.increment('hits');
 
 ---
 
+## Releasing
+
+Hands-off, single command from a clean master:
+
+```bash
+cargo release --execute patch    # or minor / major
+```
+
+What happens:
+
+1. cargo-release bumps the workspace version (every member crate inherits via `version.workspace = true`).
+2. Commits the bump (`chore: release X.Y.Z`).
+3. Tags the commit `vX.Y.Z` and pushes commit + tag to `origin`.
+4. The tag push fires `.github/workflows/release.yml`:
+   - Builds `burn` for `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc` with `--features release-cli` against the `cli-release` Cargo profile.
+   - Bundles the binary + `README.md` + `LICENSE-*` + `EXCLUDED_ENTITIES` + `docs/`.
+   - SHA-256 sidecar per archive.
+   - Creates / updates the GitHub Release named after the tag and uploads every artifact.
+
+Manual rolls are still supported — bump `version` in `[workspace.package]` by hand, push a `v*.*.*` tag, or run the workflow via the GitHub UI's "Run workflow" button (`workflow_dispatch` accepts the tag as input).
+
+CI itself (`.github/workflows/ci.yml`) runs on every push / PR: `fmt`, `clippy` (default + `release-cli`), workspace tests on Ubuntu + macOS, doc build, and a plugin-`.wasm` rebuild check that compares the bundled-polyfill SHA against the committed sidecar so polyfill drift can't sneak in.
+
+---
+
+## License
+
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your
+option, with one carve-out: the entities listed in [`EXCLUDED_ENTITIES`](EXCLUDED_ENTITIES)
+are **not** granted any rights under either license. The list is part of the
+license terms — copies and derivatives must include it unmodified.
+
+---
+
 <p align="center">
-  <sub>MIT OR Apache-2.0</sub>
+  <sub>MIT OR Apache-2.0 (with EXCLUDED_ENTITIES)</sub>
 </p>

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Sandboxed JavaScript runtime for Rust. WASM (Wasmtime) + native (QuickJS) backends, multi-threaded scheduler, capability-gated host I/O — one ergonomic entry point."
+description = "Afterburner - JS ~> WASM Sandboxed Execution VM"
 
 [lib]
 path = "src/lib.rs"
@@ -35,7 +35,9 @@ base64 = { workspace = true }
 # B8 — TypeScript strip-types via oxc. Gated behind `ts` because the
 # oxc graph adds ~3 MiB of binary size and non-TS users never pay it.
 oxc = { version = "=0.127.0", default-features = false, features = [
-    "transformer", "codegen", "semantic",
+    "transformer",
+    "codegen",
+    "semantic",
 ], optional = true }
 thiserror = { workspace = true, optional = true }
 
@@ -56,7 +58,12 @@ rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 rcgen = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "io-util", "net", "macros"] }
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "io-util",
+    "net",
+    "macros",
+] }
 # B7 sharp test fixtures — generate small PNGs / RGBA images at
 # test time so we don't ship binary fixture files.
 image = { workspace = true }
@@ -100,3 +107,26 @@ shadow-argon2 = ["afterburner-wasi?/shadow-argon2"]
 shadow-jsonwebtoken = ["afterburner-wasi?/shadow-jsonwebtoken"]
 shadow-sqlite3 = ["afterburner-wasi?/shadow-sqlite3"]
 shadow-sharp = ["afterburner-wasi?/shadow-sharp"]
+# Convenience: enable every L3 shadow at once.
+all-shadows = [
+    "shadow-bcrypt",
+    "shadow-argon2",
+    "shadow-jsonwebtoken",
+    "shadow-sqlite3",
+    "shadow-sharp",
+]
+# Convenience: full-fat release build of the `burn` CLI — every
+# runtime backend, every L3 shadow, host HTTP daemon, TypeScript
+# loader. This is what `--features release-cli` should pass to
+# release artifacts.
+release-cli = [
+    "bin",
+    "wasm",
+    "native",
+    "adaptive",
+    "thrust",
+    "flow",
+    "host-http",
+    "ts",
+    "all-shadows",
+]

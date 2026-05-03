@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Afterburner native engine — rquickjs FFI path for trusted JS code"
+description = "Afterburner native engine — rquickjs FFI"
 
 [dependencies]
 afterburner-core.workspace = true

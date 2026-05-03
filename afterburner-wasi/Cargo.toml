@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Afterburner WASM sandbox engine — Wasmtime + QuickJS-in-WASM for untrusted JS code"
+description = "Afterburner WASM engine — Wasmtime + QuickJS sandbox"
 
 [features]
 default = []

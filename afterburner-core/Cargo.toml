@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Afterburner core — Combustor trait, types, and cache registry for the JS to WASM execution engine"
+description = "Afterburner core — engine traits, types, cache registry"
 
 [features]
 default = []

@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  # Keep network-flaky DNS tests bounded.
+  RUST_TEST_THREADS: 4
+
+jobs:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-wasip1
+      - name: Install libclang (rquickjs-sys bindgen)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy (workspace, default features)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: clippy (workspace, all features)
+        run: cargo clippy --workspace --all-targets --features release-cli -p afterburner -- -D warnings
+
+  test:
+    name: cargo test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - name: Install libclang (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+      - name: Install libclang (macOS)
+        if: runner.os == 'macOS'
+        run: brew install llvm
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (default features)
+        run: cargo test --workspace --no-fail-fast -- --test-threads=4
+      - name: cargo test (all-shadows + ts)
+        run: cargo test -p afterburner --features "all-shadows ts" --no-fail-fast -- --test-threads=4
+
+  doc:
+    name: cargo doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install libclang
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo doc (no deps)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --document-private-items
+
+  plugin-rebuild:
+    name: plugin .wasm reproducible build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - name: Install libclang
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+      - name: Install Binaryen (wasm-opt)
+        run: |
+          curl -sSL https://github.com/WebAssembly/binaryen/releases/download/version_119/binaryen-version_119-x86_64-linux.tar.gz \
+            | tar xz -C /tmp
+          echo "/tmp/binaryen-version_119/bin" >> "$GITHUB_PATH"
+      - name: Install javy
+        run: |
+          curl -sSL https://github.com/bytecodealliance/javy/releases/download/v8.1.1/javy-x86_64-linux-v8.1.1.gz \
+            | gunzip > /tmp/javy
+          chmod +x /tmp/javy
+          sudo mv /tmp/javy /usr/local/bin/javy
+      - uses: Swatinem/rust-cache@v2
+      - name: Rebuild plugin and verify checksum matches
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Stash the current artifact + sha
+          cp quickjs-provider/afterburner_plugin.wasm /tmp/expected.wasm
+          cp quickjs-provider/afterburner_plugin.wasm.bundle-sha256 /tmp/expected.sha
+          bash afterburner-plugin/build.sh
+          # The wizer pre-init step is non-deterministic on metadata
+          # (timestamps embedded in custom sections). We compare the
+          # *bundle* (polyfills/plenum) sha which build.sh writes to
+          # the .bundle-sha256 sidecar — that's content-addressed.
+          diff -u /tmp/expected.sha quickjs-provider/afterburner_plugin.wasm.bundle-sha256

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Afterburner flow engine — load/execute/unload JS modules with chained input"
+description = "Afterburner flow engine — chained module pipelines"
 
 [dependencies]
 afterburner-core.workspace = true

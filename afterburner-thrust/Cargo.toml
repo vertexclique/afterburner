@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Multi-threaded thrust engine for afterburner: per-worker Chase-Lev deques, steal-when-idle scheduling, token-bucket admission, and a BEAM-style I/O pool."
+description = "Afterburner thrust scheduler — work-stealing thread pool"
 
 [lib]
 path = "src/lib.rs"

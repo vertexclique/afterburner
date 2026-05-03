@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Afterburner Node.js compatibility layer — polyfill bundle (plenum.js) and host-function implementations"
+description = "Afterburner Node.js compat — polyfills + host shims"
 
 [dependencies]
 afterburner-core.workspace = true

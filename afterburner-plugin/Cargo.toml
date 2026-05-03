@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Afterburner custom Javy plugin — declares afterburner:host imports and wires __host_* JS globals"
+description = "Afterburner Javy plugin — host imports + JS globals"
 
 [lib]
 crate-type = ["cdylib"]
