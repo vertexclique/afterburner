@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Build the custom Javy plugin, run Wizer pre-initialization on it, and
-# copy the result into `quickjs-provider/`. Run from the plugin dir. The
-# output is committed to the repo — downstream builds never need this
+# copy the result into `crates/afterburner-wasi/plugin/`. Run from the
+# plugin dir. The output is committed to the repo and lives inside the
+# wasi crate so `cargo publish` ships the plugin .wasm with no
+# external-path dependencies — downstream builds never need this
 # script or the `javy` CLI.
 
 set -euo pipefail
@@ -12,8 +14,8 @@ cd "$(dirname "$0")"
 #    lands where subsequent scripts expect it.
 cargo build --target wasm32-wasip1 --release
 
-# Workspace target is one level up.
-raw=../target/wasm32-wasip1/release/afterburner_plugin.wasm
+# Workspace target is two levels up: <repo>/crates/afterburner-plugin → <repo>/target.
+raw=../../target/wasm32-wasip1/release/afterburner_plugin.wasm
 if [[ ! -f "$raw" ]]; then
     echo "expected $raw not produced" >&2
     exit 1
@@ -81,7 +83,7 @@ fi
 
 "$javy" init-plugin "$lowered" -o "$tmp"
 
-dest=../quickjs-provider/afterburner_plugin.wasm
+dest=../afterburner-wasi/plugin/afterburner_plugin.wasm
 cp "$tmp" "$dest"
 
 # Record the SHA-256 of the plenum bundle the plugin was built against

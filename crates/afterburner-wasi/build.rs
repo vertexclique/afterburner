@@ -1,18 +1,24 @@
 //! Build-time gate: make sure the committed plugin binary matches the
 //! current polyfill bundle. Without this check, editing a polyfill and
-//! forgetting to rerun `afterburner-plugin/build.sh` silently ships a
+//! forgetting to rerun `crates/afterburner-plugin/build.sh` silently ships a
 //! stale plugin that behaves differently from what the source says.
 
 use std::fs;
 use std::path::PathBuf;
 
 fn main() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    // CARGO_MANIFEST_DIR = <repo>/crates/afterburner-wasi.
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // Walk up two parents to reach the repo root for the sibling-crate
+    // bundle path. The plugin sidecar lives INSIDE this crate so it
+    // ships unmodified through `cargo publish`.
+    let root = manifest
         .parent()
+        .and_then(|p| p.parent())
         .expect("workspace root")
         .to_path_buf();
-    let bundle_path = root.join("afterburner-node-compat/generated/plenum_bundle.js");
-    let sidecar_path = root.join("quickjs-provider/afterburner_plugin.wasm.bundle-sha256");
+    let bundle_path = root.join("crates/afterburner-node-compat/generated/plenum_bundle.js");
+    let sidecar_path = manifest.join("plugin/afterburner_plugin.wasm.bundle-sha256");
 
     println!("cargo:rerun-if-changed={}", bundle_path.display());
     println!("cargo:rerun-if-changed={}", sidecar_path.display());
@@ -46,7 +52,7 @@ fn main() {
              To fix:\n\
              \n\
                  AFTERBURNER_REBUILD_PLENUM=1 cargo build -p afterburner-node-compat\n\
-                 bash afterburner-plugin/build.sh\n\
+                 bash crates/afterburner-plugin/build.sh\n\
              \n\
              (plugin builds require `rustup target add wasm32-wasip1` and a `javy` CLI\n\
              at build time only; neither is needed at runtime.)\n\n"

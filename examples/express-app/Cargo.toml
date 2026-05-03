@@ -10,7 +10,7 @@ publish = false
 # Afterburner runs the JS handlers. `thrust` gives us multi-worker
 # dispatch so concurrent HTTP requests don't serialize through one
 # combustor.
-afterburner = { path = "../../afterburner", features = ["thrust"] }
+afterburner = { path = "../../crates/afterburner", features = ["thrust"] }
 
 # Transport layer. axum + tokio host the real HTTP server; each
 # incoming request becomes a JSON envelope handed to the JS app via

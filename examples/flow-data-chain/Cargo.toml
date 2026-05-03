@@ -7,6 +7,6 @@ publish = false
 [workspace]
 
 [dependencies]
-afterburner = { path = "../../afterburner", features = ["flow"] }
+afterburner = { path = "../../crates/afterburner", features = ["flow"] }
 anyhow = "1"
 serde_json = "1"

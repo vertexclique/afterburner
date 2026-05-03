@@ -40,7 +40,7 @@ targets `wasm32-wasip1` (it can't even compile on the host triple —
 `javy-plugin-api` assumes a WASI environment). It carries no unit
 tests of its own; its behavior is exercised end-to-end by the host
 crates' tests that load the committed `.wasm`. Rebuild it via
-`afterburner-plugin/build.sh` when polyfills or extern decls change.
+`crates/afterburner-plugin/build.sh` when polyfills or extern decls change.
 
 ---
 

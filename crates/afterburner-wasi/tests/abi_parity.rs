@@ -1,8 +1,8 @@
 //! ABI drift gate. Host imports are declared in three places:
 //!
-//! 1. `afterburner-plugin/src/host_api.rs` — `extern "C" { fn host_foo(...) }`.
-//! 2. `afterburner-wasi/src/host_imports.rs` — `linker.func_wrap(NS, "host_foo", ...)`.
-//! 3. `wit/afterburner-host.wit` — the shape contract (docs).
+//! 1. `crates/afterburner-plugin/src/host_api.rs` — `extern "C" { fn host_foo(...) }`.
+//! 2. `crates/afterburner-wasi/src/host_imports.rs` — `linker.func_wrap(NS, "host_foo", ...)`.
+//! 3. `docs/wit/afterburner-host.wit` — the shape contract (docs).
 //!
 //! The `extern` declaration and the `func_wrap` registration MUST name
 //! the same imports — a missing entry on either side manifests as a
@@ -15,8 +15,10 @@ use std::fs;
 use std::path::PathBuf;
 
 fn workspace_root() -> PathBuf {
+    // CARGO_MANIFEST_DIR = <repo>/crates/afterburner-wasi → walk up to <repo>.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
+        .and_then(|p| p.parent())
         .unwrap()
         .to_path_buf()
 }
@@ -24,8 +26,9 @@ fn workspace_root() -> PathBuf {
 /// Extract `host_xxx` names from string literals inside `func_wrap`
 /// registrations in host_imports.rs.
 fn wasi_imports() -> BTreeSet<String> {
-    let src = fs::read_to_string(workspace_root().join("afterburner-wasi/src/host_imports.rs"))
-        .expect("read host_imports.rs");
+    let src =
+        fs::read_to_string(workspace_root().join("crates/afterburner-wasi/src/host_imports.rs"))
+            .expect("read host_imports.rs");
     let mut out = BTreeSet::new();
     for line in src.lines() {
         let line = line.trim();
@@ -50,8 +53,9 @@ fn wasi_imports() -> BTreeSet<String> {
 /// Lives in `afterburner-plugin/src/host_api.rs` since the lib.rs
 /// split (B0 / §4.7).
 fn plugin_imports() -> BTreeSet<String> {
-    let src = fs::read_to_string(workspace_root().join("afterburner-plugin/src/host_api.rs"))
-        .expect("read plugin/src/host_api.rs");
+    let src =
+        fs::read_to_string(workspace_root().join("crates/afterburner-plugin/src/host_api.rs"))
+            .expect("read plugin/src/host_api.rs");
     let mut out = BTreeSet::new();
     let mut in_extern = false;
     for line in src.lines() {
@@ -109,7 +113,7 @@ fn plugin_and_wasi_host_imports_match() {
         "ABI drift between afterburner-plugin and afterburner-wasi:\n\
          - only in plugin (extern but no linker wiring): {only_plugin:?}\n\
          - only in wasi   (linker wiring but no extern): {only_wasi:?}\n\
-         Every host import must be declared in BOTH afterburner-plugin/src/lib.rs \
-         and afterburner-wasi/src/host_imports.rs. Update wit/afterburner-host.wit too."
+         Every host import must be declared in BOTH crates/afterburner-plugin/src/lib.rs \
+         and crates/afterburner-wasi/src/host_imports.rs. Update docs/wit/afterburner-host.wit too."
     );
 }

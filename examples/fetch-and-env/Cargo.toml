@@ -10,7 +10,7 @@ publish = false
 # `host-http` enables the outbound HTTP host import path in the wasi
 # backend — the example narrowly grants it via `NetAccess::OutboundFull`
 # with a one-host allow-list.
-afterburner = { path = "../../afterburner", features = ["host-http"] }
+afterburner = { path = "../../crates/afterburner", features = ["host-http"] }
 anyhow = "1"
 serde_json = "1"
 # Lock-free map for the demo host's emit_row sink — matches the

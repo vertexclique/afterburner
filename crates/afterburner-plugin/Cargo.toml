@@ -6,6 +6,10 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 description = "Afterburner Javy plugin — host imports + JS globals"
+# wasm32-wasip1-only build artifact. The compiled .wasm ships baked
+# into afterburner-wasi via include_bytes!; this crate is build-time
+# only and never goes to crates.io.
+publish = false
 
 [lib]
 crate-type = ["cdylib"]

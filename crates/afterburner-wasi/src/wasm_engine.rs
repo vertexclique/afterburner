@@ -44,7 +44,7 @@ use wasmtime_wasi::preview1::add_to_linker_sync;
 
 /// The custom plugin binary (Wizer-preinitialized), committed to the
 /// repo and baked into the host crate at compile time.
-const PLUGIN_BYTES: &[u8] = include_bytes!("../../quickjs-provider/afterburner_plugin.wasm");
+const PLUGIN_BYTES: &[u8] = include_bytes!("../plugin/afterburner_plugin.wasm");
 
 /// Epoch ticker period. Minimum timeout granularity = one tick.
 const TICK_PERIOD_MS: u64 = 10;

@@ -108,7 +108,7 @@ jobs:
           # Stash the current artifact + sha
           cp quickjs-provider/afterburner_plugin.wasm /tmp/expected.wasm
           cp quickjs-provider/afterburner_plugin.wasm.bundle-sha256 /tmp/expected.sha
-          bash afterburner-plugin/build.sh
+          bash crates/afterburner-plugin/build.sh
           # The wizer pre-init step is non-deterministic on metadata
           # (timestamps embedded in custom sections). We compare the
           # *bundle* (polyfills/plenum) sha which build.sh writes to

@@ -119,7 +119,7 @@ Afterburner** (`examples/express-app`).
 
 Nothing external is needed at runtime. The Javy plugin is committed as a
 Wizer-preinitialized `.wasm` at
-`quickjs-provider/afterburner_plugin.wasm` and pulled in via
+`crates/afterburner-wasi/plugin/afterburner_plugin.wasm` and pulled in via
 `include_bytes!`. Consumers just depend on the afterburner crates.
 
 ### Build (default workspace)
@@ -134,7 +134,7 @@ Wizer-preinitialized `.wasm` at
 ### Build (plugin regeneration — required for polyfill / extern changes)
 
 Needed when changing plugin Rust code, plugin extern decls, JS bridges,
-or any file under `afterburner-node-compat/polyfills/`. The committed
+or any file under `crates/afterburner-node-compat/polyfills/`. The committed
 `.wasm` is otherwise authoritative.
 
 | Tool | Version | How to get it |
@@ -160,7 +160,7 @@ AFTERBURNER_REBUILD_PLENUM=1 cargo build -p afterburner-node-compat
 #         to MVP-compatible ops so javy's validator accepts the module
 #      c) javy init-plugin freezes the QuickJS runtime + plenum bundle
 #         into the wasm so first-run startup is sub-millisecond
-bash afterburner-plugin/build.sh   # writes ../quickjs-provider/afterburner_plugin.wasm
+bash crates/afterburner-plugin/build.sh   # writes ../afterburner-wasi/plugin/afterburner_plugin.wasm
 ```
 
 ### Development environment summary
@@ -180,7 +180,7 @@ For local development end-to-end, install in this order:
    xcode-select --install
    ```
 3. **Plugin regeneration toolchain** (only if you'll touch
-   `afterburner-plugin/` or `afterburner-node-compat/polyfills/`):
+   `crates/afterburner-plugin/` or `crates/afterburner-node-compat/polyfills/`):
    ```bash
    # javy CLI 8.1.1
    curl -L https://github.com/bytecodealliance/javy/releases/download/v8.1.1/javy-x86_64-linux-v8.1.1.gz \
@@ -232,7 +232,7 @@ cargo build -p afterburner --release --features \
 | `cargo clippy --workspace --exclude afterburner-plugin --all-targets` | Linter check. |
 | `cargo test -p afterburner-ignite --release perf_smoke` | Native throughput smoke. |
 | `cargo test -p afterburner-wasi --release perf_smoke` | WASM throughput smoke. |
-| `afterburner-plugin/build.sh` | Rebuild + Wizer-preinit the plugin. |
+| `crates/afterburner-plugin/build.sh` | Rebuild + Wizer-preinit the plugin. |
 | `cargo build --profile cli-release -p afterburner --bin burn --features release-cli` | Build the shippable `burn` binary locally. |
 | `cargo release --execute patch` | Bump workspace version, commit, tag `vX.Y.Z`, push — fires off the GitHub Actions release workflow that builds + uploads multi-platform binaries. See `release.toml`. |
 
@@ -292,7 +292,7 @@ for the full sandbox-model section.
 ## FAQ
 
 <details>
-<summary><b>Why is <code>quickjs-provider/afterburner_plugin.wasm</code> in the repo?</b></summary>
+<summary><b>Why is <code>crates/afterburner-wasi/plugin/afterburner_plugin.wasm</code> in the repo?</b></summary>
 
 That is the committed Wizer-preinitialized Javy plugin, pulled in at
 compile time via `include_bytes!`. Storing it in the repo keeps
@@ -318,8 +318,8 @@ import-path chore (we already live through the `p2::pipe` move).
 <details>
 <summary><b>What about WASI Preview 2 / components?</b></summary>
 
-The authoritative interface is specified in `wit/afterburner-host.wit`
-and `wit/README.md`. The runtime still uses the core-module path for
+The authoritative interface is specified in `docs/wit/afterburner-host.wit`
+and `docs/wit/README.md`. The runtime still uses the core-module path for
 pragmatic reasons — `javy init-plugin` requires Wizer preinit, and Wizer
 outputs a flattened core module even when given a component input, so
 the component-model host-side linker does not meaningfully simplify
