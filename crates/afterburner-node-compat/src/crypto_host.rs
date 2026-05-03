@@ -10,7 +10,8 @@ use afterburner_core::{AfterburnerError, Manifold, Result};
 use hmac::{Hmac, Mac};
 use md5::Md5;
 use pbkdf2::pbkdf2_hmac;
-use sha2::{Digest, Sha256, Sha384, Sha512};
+use sha1::Sha1;
+use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};
 
 type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
@@ -23,6 +24,8 @@ type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 /// back — cloning is how we avoid interior-mutability + sync primitives.
 #[derive(Clone)]
 pub enum DigestState {
+    Sha1(Sha1),
+    Sha224(Sha224),
     Sha256(Sha256),
     Sha384(Sha384),
     Sha512(Sha512),
@@ -33,9 +36,14 @@ impl DigestState {
     /// Build a fresh digest state for `algorithm`. Accepts:
     /// - sign algorithm codes: `RS256` (sha-256), `ES256` (sha-256),
     ///   `RS384` (sha-384), `RS512` (sha-512).
-    /// - hash names (lowercase): `sha256`, `sha384`, `sha512`, `md5`.
+    /// - hash names (lowercase): `sha1`, `sha224`, `sha256`, `sha384`,
+    ///   `sha512`, `md5`. SHA-1 is included for parity with Node's
+    ///   getHashes() — callers requesting cryptographic strength
+    ///   should pick a SHA-2 variant.
     pub fn new(algorithm: &str) -> Result<Self> {
         match algorithm {
+            "sha1" => Ok(DigestState::Sha1(Sha1::new())),
+            "sha224" => Ok(DigestState::Sha224(Sha224::new())),
             "RS256" | "ES256" | "sha256" => Ok(DigestState::Sha256(Sha256::new())),
             "RS384" | "sha384" => Ok(DigestState::Sha384(Sha384::new())),
             "RS512" | "sha512" => Ok(DigestState::Sha512(Sha512::new())),
@@ -48,6 +56,8 @@ impl DigestState {
 
     pub fn update(&mut self, data: &[u8]) {
         match self {
+            DigestState::Sha1(h) => h.update(data),
+            DigestState::Sha224(h) => h.update(data),
             DigestState::Sha256(h) => h.update(data),
             DigestState::Sha384(h) => h.update(data),
             DigestState::Sha512(h) => h.update(data),
@@ -58,6 +68,8 @@ impl DigestState {
     /// Consume the state and return the raw digest bytes.
     pub fn finalize_bytes(self) -> Vec<u8> {
         match self {
+            DigestState::Sha1(h) => h.finalize().to_vec(),
+            DigestState::Sha224(h) => h.finalize().to_vec(),
             DigestState::Sha256(h) => h.finalize().to_vec(),
             DigestState::Sha384(h) => h.finalize().to_vec(),
             DigestState::Sha512(h) => h.finalize().to_vec(),
@@ -71,26 +83,33 @@ impl DigestState {
 /// at construction time — HMAC doesn't accept a key change mid-stream.
 #[derive(Clone)]
 pub enum HmacState {
+    Sha1(Hmac<Sha1>),
+    Sha224(Hmac<Sha224>),
     Sha256(Hmac<Sha256>),
     Sha384(Hmac<Sha384>),
     Sha512(Hmac<Sha512>),
+    Md5(Hmac<Md5>),
 }
 
 impl HmacState {
     pub fn new(algorithm: &str, key: &[u8]) -> Result<Self> {
+        // Helper macro keeps the per-algorithm arms small and the
+        // error-conversion uniform. Every `Hmac<H>` impls
+        // `Mac::new_from_slice` so this generalizes cleanly.
+        macro_rules! make {
+            ($variant:ident, $hash:ty) => {
+                <Hmac<$hash> as Mac>::new_from_slice(key)
+                    .map(HmacState::$variant)
+                    .map_err(|e| AfterburnerError::Host(format!("hmac key: {e}")))
+            };
+        }
         match algorithm {
-            "sha256" => Ok(HmacState::Sha256(
-                <Hmac<Sha256> as Mac>::new_from_slice(key)
-                    .map_err(|e| AfterburnerError::Host(format!("hmac key: {e}")))?,
-            )),
-            "sha384" => Ok(HmacState::Sha384(
-                <Hmac<Sha384> as Mac>::new_from_slice(key)
-                    .map_err(|e| AfterburnerError::Host(format!("hmac key: {e}")))?,
-            )),
-            "sha512" => Ok(HmacState::Sha512(
-                <Hmac<Sha512> as Mac>::new_from_slice(key)
-                    .map_err(|e| AfterburnerError::Host(format!("hmac key: {e}")))?,
-            )),
+            "sha1" => make!(Sha1, Sha1),
+            "sha224" => make!(Sha224, Sha224),
+            "sha256" => make!(Sha256, Sha256),
+            "sha384" => make!(Sha384, Sha384),
+            "sha512" => make!(Sha512, Sha512),
+            "md5" => make!(Md5, Md5),
             other => Err(AfterburnerError::Host(format!(
                 "hmac: unsupported algorithm '{other}'"
             ))),
@@ -99,17 +118,23 @@ impl HmacState {
 
     pub fn update(&mut self, data: &[u8]) {
         match self {
+            HmacState::Sha1(m) => m.update(data),
+            HmacState::Sha224(m) => m.update(data),
             HmacState::Sha256(m) => m.update(data),
             HmacState::Sha384(m) => m.update(data),
             HmacState::Sha512(m) => m.update(data),
+            HmacState::Md5(m) => m.update(data),
         }
     }
 
     pub fn finalize_bytes(self) -> Vec<u8> {
         match self {
+            HmacState::Sha1(m) => m.finalize().into_bytes().to_vec(),
+            HmacState::Sha224(m) => m.finalize().into_bytes().to_vec(),
             HmacState::Sha256(m) => m.finalize().into_bytes().to_vec(),
             HmacState::Sha384(m) => m.finalize().into_bytes().to_vec(),
             HmacState::Sha512(m) => m.finalize().into_bytes().to_vec(),
+            HmacState::Md5(m) => m.finalize().into_bytes().to_vec(),
         }
     }
 }
@@ -239,15 +264,13 @@ pub fn hash(algorithm: &str, data: &[u8], m: &Manifold) -> Result<Vec<u8>> {
             "crypto.createHash({algorithm})"
         )));
     }
-    match algorithm.to_ascii_lowercase().as_str() {
-        "sha256" => Ok(Sha256::digest(data).to_vec()),
-        "sha384" => Ok(Sha384::digest(data).to_vec()),
-        "sha512" => Ok(Sha512::digest(data).to_vec()),
-        "md5" => Ok(Md5::digest(data).to_vec()),
-        other => Err(AfterburnerError::Host(format!(
-            "crypto: unsupported hash '{other}'"
-        ))),
-    }
+    // Delegate to the streaming state type so one-shot and streaming
+    // share a single algorithm whitelist + per-algo crate. This keeps
+    // sha1/sha224/sha256/sha384/sha512/md5 coverage in lockstep.
+    let mut s = DigestState::new(&algorithm.to_ascii_lowercase())
+        .map_err(|e| AfterburnerError::Host(format!("crypto.hash: {e}")))?;
+    s.update(data);
+    Ok(s.finalize_bytes())
 }
 
 /// HMAC with the named algorithm.
@@ -257,29 +280,10 @@ pub fn hmac(algorithm: &str, key: &[u8], data: &[u8], m: &Manifold) -> Result<Ve
             "crypto.createHmac({algorithm})"
         )));
     }
-    match algorithm.to_ascii_lowercase().as_str() {
-        "sha256" => {
-            let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key)
-                .map_err(|e| AfterburnerError::Host(format!("hmac key: {e}")))?;
-            mac.update(data);
-            Ok(mac.finalize().into_bytes().to_vec())
-        }
-        "sha384" => {
-            let mut mac = <Hmac<Sha384> as Mac>::new_from_slice(key)
-                .map_err(|e| AfterburnerError::Host(format!("hmac key: {e}")))?;
-            mac.update(data);
-            Ok(mac.finalize().into_bytes().to_vec())
-        }
-        "sha512" => {
-            let mut mac = <Hmac<Sha512> as Mac>::new_from_slice(key)
-                .map_err(|e| AfterburnerError::Host(format!("hmac key: {e}")))?;
-            mac.update(data);
-            Ok(mac.finalize().into_bytes().to_vec())
-        }
-        other => Err(AfterburnerError::Host(format!(
-            "crypto: unsupported hmac '{other}'"
-        ))),
-    }
+    let mut s = HmacState::new(&algorithm.to_ascii_lowercase(), key)
+        .map_err(|e| AfterburnerError::Host(format!("crypto.hmac: {e}")))?;
+    s.update(data);
+    Ok(s.finalize_bytes())
 }
 
 /// Fill a buffer with cryptographically strong random bytes.

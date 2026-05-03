@@ -304,7 +304,7 @@ fn streaming_hash_matches_one_shot() {
                 for (let i = 0; i < 100; i++) parts.push('chunk-' + i + '-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx');
                 const joined = parts.join('');
 
-                const algos = ['sha256', 'sha384', 'sha512', 'md5'];
+                const algos = ['sha1', 'sha224', 'sha256', 'sha384', 'sha512', 'md5'];
                 const out = {};
                 for (const algo of algos) {
                     const streamed = (function () {
@@ -322,10 +322,12 @@ fn streaming_hash_matches_one_shot() {
     let mut m = Manifold::sealed();
     m.crypto = true;
     let out = run(src, m);
+    assert_eq!(out["sha1"],   json!({ "equal": true, "digestLen": 40 }));
+    assert_eq!(out["sha224"], json!({ "equal": true, "digestLen": 56 }));
     assert_eq!(out["sha256"], json!({ "equal": true, "digestLen": 64 }));
     assert_eq!(out["sha384"], json!({ "equal": true, "digestLen": 96 }));
     assert_eq!(out["sha512"], json!({ "equal": true, "digestLen": 128 }));
-    assert_eq!(out["md5"], json!({ "equal": true, "digestLen": 32 }));
+    assert_eq!(out["md5"],    json!({ "equal": true, "digestLen": 32 }));
 }
 
 #[test]
@@ -338,7 +340,7 @@ fn streaming_hmac_matches_one_shot() {
                 for (let i = 0; i < 100; i++) parts.push('row-' + i + '-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx');
                 const joined = parts.join('');
                 const key = 'super-secret-key';
-                const algos = ['sha256', 'sha384', 'sha512'];
+                const algos = ['sha1', 'sha224', 'sha256', 'sha384', 'sha512', 'md5'];
                 const out = {};
                 for (const algo of algos) {
                     const streamed = (function () {
@@ -356,9 +358,12 @@ fn streaming_hmac_matches_one_shot() {
     let mut m = Manifold::sealed();
     m.crypto = true;
     let out = run(src, m);
+    assert_eq!(out["sha1"],   json!({ "equal": true }));
+    assert_eq!(out["sha224"], json!({ "equal": true }));
     assert_eq!(out["sha256"], json!({ "equal": true }));
     assert_eq!(out["sha384"], json!({ "equal": true }));
     assert_eq!(out["sha512"], json!({ "equal": true }));
+    assert_eq!(out["md5"],    json!({ "equal": true }));
 }
 
 #[test]

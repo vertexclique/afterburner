@@ -91,7 +91,7 @@ the polish backlog below. Items are ordered by user-visible value.
 | 2 | `child_process` for WASM (host proxy) | B7 | L | ❌ | Native-only today; WASM can't `fork(2)`, needs an out-of-sandbox proxy layer. |
 | 3 | WIT-driven host-import codegen | IMPL_PLAN B + H | M | ❌ | Each import lives in 4 places today (wit/, host_imports.rs, plugin host_api.rs, native_install.rs); ~25+ imports. Codegen kills `docs/REVIEW.md` Smell #16. |
 | 4 | `require` Resolver cache TTLs surfaced to JS | polish | S | ❌ | Internal cache works; just not user-visible. |
-| 5 | Streaming `crypto.createHash` / `createHmac` polyfill rewrite | IMPL_PLAN A | S | ⚠️ | Host side `hash_handles.rs` shipped. Need polyfill rewrite of `crypto.js::Hash`/`Hmac` to call streaming host path with buffering fallback + 1MB-chunked-vs-one-shot regression on both backends. |
+| 5 | Streaming `crypto.createHash` / `createHmac` polyfill rewrite | IMPL_PLAN A | S | ✅ | Polyfill calls streaming host (`__host_crypto_hash_open/update/digest` + `hmac_open`) with one-shot fallback when the plugin lacks them. `DigestState`/`HmacState` cover sha1/sha224/sha256/sha384/sha512/md5 — streaming + one-shot share the same enum so both stay in lockstep. Chunked-100×-vs-one-shot regression on both ignite + wasi backends. |
 | 6 | `dgram` (UDP) host-side coordinator | round-2 polyfills | L | ⚠️ | Surface ships; `.bind`/`.send` throw. |
 | 7 | `http2` host-side coordinator | round-2 polyfills | L | ⚠️ | Module + classes load; `.connect`/`.createServer` throw. |
 | 8 | Consolidated integration tests (Phase I top-up) | IMPL_PLAN I | S | ⚠️ | b0–b10 + b7_* + round-2 + shadow-* + wasm-loader cover most ground; Phase I lists a few extras (`tests/data_flow.rs` for `udf_batch` array shape, more `tests/event_loop.rs` cases). |
