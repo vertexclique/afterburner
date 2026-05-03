@@ -3,7 +3,7 @@
 **Primary citation:** Reis, Moshchuk, and Oskov, "Site Isolation: Process Separation for Web Sites
 within the Browser", USENIX Security Symposium, 2019.
 Paper PDF: https://www.usenix.org/system/files/sec19-reis.pdf
-**Downloaded to:** `/home/vclq/projects/afterburner/docs/papers/chrome-site-isolation-usenix-2019.pdf`
+**Local copy:** `docs/papers/chrome-site-isolation-usenix-2019.pdf`
 
 Companion references:
 - Chromium design doc — https://www.chromium.org/developers/design-documents/site-isolation/

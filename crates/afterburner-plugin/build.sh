@@ -26,8 +26,8 @@ fi
 #    host never shells out to `javy`.
 javy=${JAVY:-javy}
 if ! command -v "$javy" >/dev/null; then
-    if [[ -x /home/vclq/.local/bin/javy ]]; then
-        javy=/home/vclq/.local/bin/javy
+    if [[ -x "$HOME/.local/bin/javy" ]]; then
+        javy="$HOME/.local/bin/javy"
     else
         echo "javy CLI not found. Set JAVY=... or install from https://github.com/bytecodealliance/javy" >&2
         exit 1
@@ -51,8 +51,8 @@ trap 'rm -f "$tmp" "$lowered"' EXIT
 #     is the right bisection signal.
 wasm_opt=${WASM_OPT:-wasm-opt}
 if ! command -v "$wasm_opt" >/dev/null; then
-    if [[ -x /home/vclq/.local/bin/wasm-opt ]]; then
-        wasm_opt=/home/vclq/.local/bin/wasm-opt
+    if [[ -x "$HOME/.local/bin/wasm-opt" ]]; then
+        wasm_opt="$HOME/.local/bin/wasm-opt"
     fi
 fi
 
