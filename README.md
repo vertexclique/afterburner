@@ -7,8 +7,8 @@
 </p>
 
 <p align="center">
-  <a href="https://crates.io/crates/afterburner-core"><img src="https://img.shields.io/crates/v/afterburner-core?style=flat-square&color=e6832e" alt="crates.io"/></a>
-  <a href="https://docs.rs/afterburner-core"><img src="https://img.shields.io/docsrs/afterburner-core?style=flat-square&color=2a9d8f" alt="docs.rs"/></a>
+  <a href="https://crates.io/crates/afterburner"><img src="https://img.shields.io/crates/v/afterburner?style=flat-square&color=e6832e" alt="crates.io"/></a>
+  <a href="https://docs.rs/afterburner"><img src="https://img.shields.io/docsrs/afterburner?style=flat-square&color=2a9d8f" alt="docs.rs"/></a>
   <img src="https://img.shields.io/badge/rust-1.90%2B_(2024_ed)-blue?style=flat-square&logo=rust&logoColor=white" alt="MSRV"/>
   <img src="https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square" alt="License"/>
 </p>
@@ -102,7 +102,7 @@ Afterburner** (`examples/express-app`).
 | Crate | Purpose |
 |:------|:--------|
 | **`afterburner`**              | Facade: `Afterburner` + builder, `burn` binary, one ergonomic entry point |
-| **`afterburner-core`**         | `Combustor` trait, `Manifold`, `FuelGauge`, `BurnCache`, level-gated logging |
+| **`afterburner`**         | `Combustor` trait, `Manifold`, `FuelGauge`, `BurnCache`, level-gated logging |
 | **`afterburner-ignite`**       | Native QuickJS via `rquickjs`, thread-local runtimes |
 | **`afterburner-wasi`**         | Wasmtime + Javy plugin sandbox with host-function imports, pooling allocator + InstancePre, bytecode cache |
 | **`afterburner-node-compat`**  | `plenum.js` polyfill bundle + Rust-backed host impls (incl. bounded HTTP + DNS with per-call timeouts) |
