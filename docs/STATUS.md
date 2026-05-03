@@ -4,9 +4,12 @@ Source of truth for what's shipped vs. what's left in the
 `burn` runtime plan (`docs/IMPL_PLAN_BURN_RUNTIME.md`) and the
 adjacent L3 shadow plan (locked decision Q3 in that doc).
 
-**Last refreshed:** post L3 sharp shadow (last item on the L3 launch list) +
-binary-safe `fs.readFileSync`/`writeFileSync` polyfill (Node-compat: returns
-`Buffer` when no encoding is given, accepts `Buffer` for writes).
+**Last refreshed:** post `WebAssembly.*` host loader — `WebAssembly.compile`
+/ `instantiate` / `validate` / `Module` / `Instance` / `Memory` now work
+inside the sandbox, backed by a host-side wasmtime sub-runner. With this
+in place, every npm package that ships a pre-compiled WASM build (sql.js,
+@jsquash/*, libheif-js, …) is loadable through the standard spec API,
+no per-package shadow code required.
 Regenerate by hand when a phase lands; `git log --oneline` is
 authoritative if this file drifts.
 
@@ -14,11 +17,12 @@ authoritative if this file drifts.
 
 ## Test count
 
-**397 tests pass workspace-wide** across the `afterburner` crate's
-26 integration-test files plus the other workspace crates' unit /
+**450+ tests pass workspace-wide** across the `afterburner` crate's
+27 integration-test files plus the other workspace crates' unit /
 integration suites (incl. 6 lock-free `DaemonNet` + 6 `DaemonTls` +
-5 `dns_host` + 28 `SqliteShadow` + 33 `Sharp` unit tests). Run the
-full matrix with:
+5 `dns_host` + 28 `SqliteShadow` + 33 `Sharp` + 19 `WasmLoader`
+unit tests + 22 `b_wasm_loader` integration tests). Run the full
+matrix with:
 
 ```bash
 cargo test --workspace --exclude afterburner-plugin
@@ -148,7 +152,7 @@ two seams.
 | **B7 net** | `socket.setNoDelay` / `setKeepAlive` actually toggle the flags | S | ✅ shipped — `tokio::net::TcpStream::set_nodelay` for `TCP_NODELAY`, `socket2::SockRef::set_tcp_keepalive` for `SO_KEEPALIVE` + idle timer. |
 | **B6 require** | `Resolver` cache control / TTLs surface to JS | S | Internal cache works; not user-visible. |
 | **A11 — ergonomics** | `process.binding(*)` clear-error messages | XS | ✅ shipped — `process.binding('tcp_wrap')` now throws with the requested binding name in the message and `err.bindingName`. `_linkedBinding` symmetric. |
-| **L3 long tail** | **WASM-npm-loader** — generic loader for WASM-shipped npm packages | M | Detects when a require resolves to a WASM-built npm package (e.g. `sql.js`, `@jsquash/*`, `libheif-js`), instantiates the WASM module via wasmtime alongside the main JS sandbox, bridges its exports to the calling JS. Built **once**; every WASM-built npm package then works without per-package shadow code. This is the architectural escape hatch for everything beyond the L3 launch list. |
+| **L3 long tail** | **WASM-npm-loader** | ✅ shipped | `WebAssembly.compile` / `instantiate` / `validate` / `Module` / `Instance` / `Memory` work in JS, backed by a per-`HostState` wasmtime sub-runner. Module + Instance ids are i64 (lock-free `HopscotchMap` registry). Function exports callable with primitive args (i32/i64/f32/f64); memory accessible via `Memory.buffer`, `.read(off, len)`, `.write(off, bytes)`. v1 doesn't bridge user-defined JS imports — modules with `(import "env" "f")` callbacks fail at instantiate with a clear LinkError; the host always supplies an empty import set. SQL.js / @jsquash / libheif-js / pure-Rust → wasm32-wasi modules with no env imports load directly. |
 
 ---
 

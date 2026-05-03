@@ -664,4 +664,46 @@ unsafe extern "C" {
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
+
+    // ---- WebAssembly loader (Node 20 globalThis.WebAssembly) ---------
+    //
+    // Module + Instance ids are i64 so the JS side can hold any
+    // integer up to 2^53 without precision loss.
+    pub fn host_wasm_compile(bytes_b64_ptr: *const u8, bytes_b64_len: u32) -> i64;
+    pub fn host_wasm_drop_module(module_id: i64) -> i32;
+    pub fn host_wasm_module_exports(
+        module_id: i64,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_wasm_module_imports(
+        module_id: i64,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_wasm_instantiate(module_id: i64) -> i64;
+    pub fn host_wasm_drop_instance(instance_id: i64) -> i32;
+    pub fn host_wasm_call_export(
+        instance_id: i64,
+        name_ptr: *const u8,
+        name_len: u32,
+        args_json_ptr: *const u8,
+        args_json_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_wasm_memory_read(
+        instance_id: i64,
+        offset: i32,
+        len: i32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_wasm_memory_write(
+        instance_id: i64,
+        offset: i32,
+        b64_ptr: *const u8,
+        b64_len: u32,
+    ) -> i32;
+    pub fn host_wasm_memory_size(instance_id: i64) -> i64;
 }

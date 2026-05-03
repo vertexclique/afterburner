@@ -61,6 +61,9 @@ tokio = { workspace = true, features = ["rt-multi-thread", "io-util", "net", "ma
 # test time so we don't ship binary fixture files.
 image = { workspace = true }
 base64 = { workspace = true }
+# WebAssembly loader tests — compile WAT to bytes at test time
+# instead of hand-encoding binary modules.
+wat = "1"
 
 [features]
 default = ["wasm", "native", "thrust"]

@@ -9,6 +9,7 @@ pub mod daemon_net;
 pub mod daemon_tls;
 pub mod daemon_runtime;
 pub mod daemon_workers;
+pub mod wasm_loader;
 pub mod host;
 pub mod host_imports;
 pub mod intake;

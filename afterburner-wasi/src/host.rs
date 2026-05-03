@@ -96,6 +96,11 @@ pub struct HostState {
     /// error without coordinator-presence checks.
     #[cfg(feature = "shadow-sqlite3")]
     pub sqlite3_shadow: Arc<afterburner_node_compat::shadows::sqlite3::SqliteShadow>,
+    /// Sub-runner for `WebAssembly.compile` / `instantiate`. Always
+    /// present — wasmtime is already a workspace-wide dep, so the
+    /// loader is cheap to construct and the API is part of the
+    /// Node 20.x LTS surface (`globalThis.WebAssembly`).
+    pub wasm_loader: Arc<crate::wasm_loader::WasmLoader>,
     /// Host-managed timers registered by `setTimeout`/`setInterval` in
     /// daemon mode via the `__host_timer_set` import. Empty for one-shot
     /// UDF / script paths.
@@ -170,6 +175,7 @@ impl HostState {
             sqlite3_shadow: Arc::new(
                 afterburner_node_compat::shadows::sqlite3::SqliteShadow::new(),
             ),
+            wasm_loader: Arc::new(crate::wasm_loader::WasmLoader::new()),
             timers: Vec::new(),
             next_timer_id: 1,
             transpile_hook: None,

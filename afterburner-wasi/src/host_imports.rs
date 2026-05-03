@@ -61,6 +61,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_tls(linker)?;
     wrap_shadow_sqlite3(linker)?;
     wrap_shadow_sharp(linker)?;
+    wrap_wasm_loader(linker)?;
     Ok(())
 }
 
@@ -3720,6 +3721,315 @@ fn wrap_shadow_sharp(linker: &mut Linker<HostState>) -> Result<(), AfterburnerEr
                     caller.data_mut().last_error =
                         "shadow-sharp feature not enabled".into();
                     E_OTHER
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    Ok(())
+}
+
+// ---- WebAssembly loader (Node 20 `globalThis.WebAssembly`) ---------------
+//
+// Nine host imports back the polyfill:
+//
+//   __host_wasm_compile(bytes_b64)             -> module_id (i64) | -1
+//   __host_wasm_module_exports(module_id)      -> JSON | __HOST_ERR__:
+//   __host_wasm_module_imports(module_id)      -> JSON | __HOST_ERR__:
+//   __host_wasm_instantiate(module_id)         -> instance_id (i64) | -1
+//   __host_wasm_call_export(id, name, args)    -> JSON result | __HOST_ERR__:
+//   __host_wasm_memory_read(id, off, len)      -> bytes_b64 | __HOST_ERR__:
+//   __host_wasm_memory_write(id, off, b64)     -> 0 | -1
+//   __host_wasm_memory_size(id)                -> i64 size | -1
+//   __host_wasm_drop_module(id)                -> 0
+//   __host_wasm_drop_instance(id)              -> 0
+
+fn wrap_wasm_loader(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    use base64::Engine as _;
+    use crate::wasm_loader::WasmValue;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_compile",
+            |mut caller: Caller<'_, HostState>,
+             ptr: i32,
+             len: i32|
+             -> i64 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return -1;
+                };
+                let Some(b64) = read_str(&memory, &caller, ptr, len) else {
+                    return -1;
+                };
+                let bytes = match base64::engine::general_purpose::STANDARD.decode(&b64) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        record(&mut caller, &format!("wasm.compile base64: {e}"));
+                        return -1;
+                    }
+                };
+                let loader = caller.data().wasm_loader.clone();
+                match loader.compile(&bytes) {
+                    Ok(id) => id as i64,
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_drop_module",
+            |caller: Caller<'_, HostState>, id: i64| -> i32 {
+                caller.data().wasm_loader.drop_module(id as u64);
+                0
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_module_exports",
+            |mut caller: Caller<'_, HostState>,
+             id: i64,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let loader = caller.data().wasm_loader.clone();
+                match loader.module_exports(id as u64) {
+                    Ok(list) => {
+                        let v: Vec<serde_json::Value> = list
+                            .into_iter()
+                            .map(|e| {
+                                serde_json::json!({
+                                    "name": e.name,
+                                    "kind": e.kind,
+                                    "param_count": e.param_count,
+                                    "result_count": e.result_count,
+                                })
+                            })
+                            .collect();
+                        let s = serde_json::to_string(&v).unwrap_or_else(|_| "[]".into());
+                        write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes())
+                    }
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        E_OTHER
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_module_imports",
+            |mut caller: Caller<'_, HostState>,
+             id: i64,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let loader = caller.data().wasm_loader.clone();
+                match loader.module_imports(id as u64) {
+                    Ok(list) => {
+                        let v: Vec<serde_json::Value> = list
+                            .into_iter()
+                            .map(|e| {
+                                serde_json::json!({
+                                    "module": e.module,
+                                    "name": e.name,
+                                    "kind": e.kind,
+                                })
+                            })
+                            .collect();
+                        let s = serde_json::to_string(&v).unwrap_or_else(|_| "[]".into());
+                        write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes())
+                    }
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        E_OTHER
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_instantiate",
+            |mut caller: Caller<'_, HostState>, module_id: i64| -> i64 {
+                let loader = caller.data().wasm_loader.clone();
+                match loader.instantiate(module_id as u64) {
+                    Ok(id) => id as i64,
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_drop_instance",
+            |caller: Caller<'_, HostState>, id: i64| -> i32 {
+                caller.data().wasm_loader.drop_instance(id as u64);
+                0
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_call_export",
+            |mut caller: Caller<'_, HostState>,
+             instance_id: i64,
+             name_ptr: i32,
+             name_len: i32,
+             args_ptr: i32,
+             args_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(name) = read_str(&memory, &caller, name_ptr, name_len) else {
+                    return E_OTHER;
+                };
+                let Some(args_json) = read_str(&memory, &caller, args_ptr, args_len) else {
+                    return E_OTHER;
+                };
+                let args: Vec<WasmValue> = match serde_json::from_str::<serde_json::Value>(&args_json) {
+                    Ok(serde_json::Value::Array(arr)) => {
+                        let parsed: std::result::Result<Vec<WasmValue>, _> = arr
+                            .iter()
+                            .map(WasmValue::from_json)
+                            .collect();
+                        match parsed {
+                            Ok(v) => v,
+                            Err(e) => {
+                                caller.data_mut().last_error = e.to_string();
+                                return E_OTHER;
+                            }
+                        }
+                    }
+                    _ => {
+                        record(&mut caller, "wasm.call: args must be a JSON array");
+                        return E_OTHER;
+                    }
+                };
+                let loader = caller.data().wasm_loader.clone();
+                match loader.call_export(instance_id as u64, &name, args) {
+                    Ok(results) => {
+                        let v: Vec<serde_json::Value> =
+                            results.iter().map(WasmValue::to_json).collect();
+                        let s = serde_json::to_string(&v).unwrap_or_else(|_| "[]".into());
+                        write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes())
+                    }
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        E_OTHER
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_memory_read",
+            |mut caller: Caller<'_, HostState>,
+             instance_id: i64,
+             offset: i32,
+             len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let loader = caller.data().wasm_loader.clone();
+                match loader.memory_read(instance_id as u64, offset as u32, len as u32) {
+                    Ok(bytes) => {
+                        let b64 =
+                            base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        write_out(&mut caller, &memory, out_ptr, out_cap, b64.as_bytes())
+                    }
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        E_OTHER
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_memory_write",
+            |mut caller: Caller<'_, HostState>,
+             instance_id: i64,
+             offset: i32,
+             b64_ptr: i32,
+             b64_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(b64) = read_str(&memory, &caller, b64_ptr, b64_len) else {
+                    return E_OTHER;
+                };
+                let bytes = match base64::engine::general_purpose::STANDARD.decode(&b64) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        record(&mut caller, &format!("wasm.memory.write base64: {e}"));
+                        return E_OTHER;
+                    }
+                };
+                let loader = caller.data().wasm_loader.clone();
+                match loader.memory_write(instance_id as u64, offset as u32, &bytes) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        E_OTHER
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_memory_size",
+            |mut caller: Caller<'_, HostState>, instance_id: i64| -> i64 {
+                let loader = caller.data().wasm_loader.clone();
+                match loader.memory_size(instance_id as u64) {
+                    Ok(n) => n as i64,
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        -1
+                    }
                 }
             },
         )

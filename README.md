@@ -144,7 +144,7 @@ cd afterburner-plugin
 | Command | What it does |
 |:--------|:-------------|
 | `cargo build` | Builds the six host crates (skips the plugin). |
-| `cargo test --workspace --exclude afterburner-plugin` | Runs the full 397-test suite (set `--features bin,ts,shadow-bcrypt,shadow-argon2,shadow-jsonwebtoken,shadow-sqlite3,shadow-sharp` to include the L3 shadow tests). |
+| `cargo test --workspace --exclude afterburner-plugin` | Runs the full 450+ test suite (set `--features bin,ts,shadow-bcrypt,shadow-argon2,shadow-jsonwebtoken,shadow-sqlite3,shadow-sharp` to include the L3 shadow tests). |
 | `cargo clippy --workspace --exclude afterburner-plugin --all-targets` | Linter check. |
 | `cargo test -p afterburner-ignite --release perf_smoke` | Native throughput smoke. |
 | `cargo test -p afterburner-wasi --release perf_smoke` | WASM throughput smoke. |

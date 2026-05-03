@@ -76,9 +76,10 @@
             var which = typeof name === 'string' ? name : String(name);
             var err = new Error(
                 "process.binding('" + which + "') is not supported in the " +
-                "Afterburner sandbox: native bindings (libuv internals, " +
-                ".node addons) cannot run in WASM. See " +
-                "docs/STATUS.md → 'Why we cannot run .node addons inside the sandbox'."
+                "Afterburner sandbox: native bindings (libuv internals and " +
+                ".node addons) require executing native machine code, which " +
+                "the WASM sandbox cannot do by design (different ISA from " +
+                "the bytecode the runtime executes)."
             );
             err.code = 'ERR_NOT_SUPPORTED_IN_SANDBOX';
             err.bindingName = which;

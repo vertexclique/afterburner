@@ -70,6 +70,9 @@ afterburner-ignite.workspace = true
 rsa.workspace = true
 p256.workspace = true
 rand = "0.8"
+# Compile WAT (WebAssembly text format) to bytes inside tests so we
+# don't have to hand-encode binary fixtures.
+wat = "1"
 # B7 tls — generate self-signed certs in unit tests for the
 # server-config builder.
 rcgen = { workspace = true }

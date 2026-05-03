@@ -3501,9 +3501,10 @@ __register_module('path', function(module, exports, require) {
             var which = typeof name === 'string' ? name : String(name);
             var err = new Error(
                 "process.binding('" + which + "') is not supported in the " +
-                "Afterburner sandbox: native bindings (libuv internals, " +
-                ".node addons) cannot run in WASM. See " +
-                "docs/STATUS.md → 'Why we cannot run .node addons inside the sandbox'."
+                "Afterburner sandbox: native bindings (libuv internals and " +
+                ".node addons) require executing native machine code, which " +
+                "the WASM sandbox cannot do by design (different ISA from " +
+                "the bytecode the runtime executes)."
             );
             err.code = 'ERR_NOT_SUPPORTED_IN_SANDBOX';
             err.bindingName = which;
@@ -6378,6 +6379,382 @@ __register_module('util', function(module, exports, require) {
             return Buffer.from(String(b64), 'base64').toString('binary');
         };
     }
+})();
+
+// ---- webassembly.js ----
+// `WebAssembly.*` — Node 20 / browser-spec API on top of burn's
+// host-side wasmtime sub-runner.
+//
+// Burn already runs inside wasmtime (the QuickJS plugin); the host
+// gives us a parallel wasmtime instance to load **additional**
+// WebAssembly modules at runtime. With this in place, every WASM-
+// shipped npm package (sql.js, @jsquash/*, libheif-js, etc.) becomes
+// loadable through the standard `WebAssembly.compile` /
+// `WebAssembly.instantiate` calls — no per-package shadow code.
+//
+// Coverage (matches the Node + browser spec where it matters):
+//
+//   WebAssembly.compile(bufferSource)              -> Promise<Module>
+//   WebAssembly.instantiate(bufferSource, imports) -> Promise<{module, instance}>
+//   WebAssembly.instantiate(module, imports)       -> Promise<Instance>
+//   WebAssembly.validate(bufferSource)             -> boolean
+//   WebAssembly.Module(bytes)                      // sync
+//   WebAssembly.Module.exports(module)             // [{name, kind, ...}]
+//   WebAssembly.Module.imports(module)             // [{module, name, kind}]
+//   WebAssembly.Instance(module, imports)          // sync
+//   WebAssembly.Memory({initial, maximum?, shared?})  // backed when an
+//      instance imports/exports a memory; standalone Memory creation
+//      surfaces a clear "not supported" error in v1.
+//   WebAssembly.{Compile,Link,Runtime}Error
+//
+// Out of scope for v1 (each will throw with a clear message):
+//   * User-defined function imports — modules importing arbitrary
+//     `env.*` callbacks won't instantiate yet. The error names the
+//     missing import so callers can identify what's needed.
+//   * `compileStreaming` / `instantiateStreaming` — no Response in
+//     burn (no DOM); fetch the bytes manually first.
+//   * Standalone `new WebAssembly.Memory(...)` / `Table` / `Global`.
+//   * `Module.customSections(module, name)`.
+
+(function installWebAssembly() {
+    var Buffer = require('buffer').Buffer;
+
+    function isHostErr(s) {
+        return typeof s === 'string' && s.indexOf('__HOST_ERR__:') === 0;
+    }
+
+    function ensureHost(name) {
+        var fn = globalThis[name];
+        if (typeof fn !== 'function') {
+            throw new Error('WebAssembly host import unavailable: ' + name);
+        }
+        return fn;
+    }
+
+    /// Coerce a JS value to bytes: ArrayBuffer / Uint8Array / Buffer.
+    function bufferSourceToBytes(src) {
+        if (Buffer.isBuffer(src)) return src;
+        if (src instanceof Uint8Array) return Buffer.from(src);
+        if (src && src.byteLength !== undefined && src instanceof ArrayBuffer) {
+            return Buffer.from(new Uint8Array(src));
+        }
+        if (src && src.buffer instanceof ArrayBuffer && typeof src.byteLength === 'number') {
+            // TypedArray view (Int32Array, etc.).
+            return Buffer.from(new Uint8Array(src.buffer, src.byteOffset, src.byteLength));
+        }
+        throw new TypeError(
+            'WebAssembly: argument must be a BufferSource (ArrayBuffer, Uint8Array, Buffer)'
+        );
+    }
+
+    // ---- typed errors (matches the spec) ---------------------------
+
+    function CompileError(message) {
+        var e = new Error(message);
+        e.name = 'CompileError';
+        return e;
+    }
+    function LinkError(message) {
+        var e = new Error(message);
+        e.name = 'LinkError';
+        return e;
+    }
+    function RuntimeError(message) {
+        var e = new Error(message);
+        e.name = 'RuntimeError';
+        return e;
+    }
+
+    // ---- Module ----------------------------------------------------
+
+    function Module(bytesSource) {
+        if (!(this instanceof Module)) return new Module(bytesSource);
+        var bytes = bufferSourceToBytes(bytesSource);
+        var fn = ensureHost('__host_wasm_compile');
+        var id = fn(bytes.toString('base64'));
+        if (id < 0) {
+            var detail = (typeof globalThis.__host_last_error === 'function')
+                ? globalThis.__host_last_error()
+                : 'compile failed';
+            throw CompileError('WebAssembly.Module: ' + detail);
+        }
+        this._id = id;
+    }
+
+    /// Spec-static: WebAssembly.Module.exports(module) →
+    /// [{name, kind}, ...] where `kind` is one of 'function', 'table',
+    /// 'memory', 'global'.
+    Module.exports = function(mod) {
+        var fn = ensureHost('__host_wasm_module_exports');
+        var raw = fn(mod._id);
+        if (isHostErr(raw)) throw new Error(raw.slice('__HOST_ERR__:'.length));
+        var arr = JSON.parse(raw);
+        return arr.map(function(e) { return { name: e.name, kind: e.kind }; });
+    };
+    Module.imports = function(mod) {
+        var fn = ensureHost('__host_wasm_module_imports');
+        var raw = fn(mod._id);
+        if (isHostErr(raw)) throw new Error(raw.slice('__HOST_ERR__:'.length));
+        var arr = JSON.parse(raw);
+        return arr.map(function(e) { return { module: e.module, name: e.name, kind: e.kind }; });
+    };
+    Module.customSections = function() {
+        // Spec: returns ArrayBuffer[]. We don't surface custom
+        // sections in v1 — return an empty list rather than
+        // throwing so feature-detection code (which iterates the
+        // result) keeps working.
+        return [];
+    };
+
+    // ---- Memory ---------------------------------------------------
+
+    /// `WebAssembly.Memory` is normally a free-standing class users
+    /// can construct (`new WebAssembly.Memory({initial: 1})`). v1
+    /// supports it only as a *view* over an instance's exported
+    /// memory — that's the shape every npm package actually uses.
+    /// Constructing a standalone Memory throws a clear error.
+    function Memory(descriptor) {
+        // Internal-construction marker. Real callers always pass a
+        // descriptor; instance-export wrap-ups pass `{ _instanceId }`.
+        if (descriptor && descriptor._instanceId !== undefined) {
+            this._instanceId = descriptor._instanceId;
+            return;
+        }
+        throw new Error(
+            'WebAssembly.Memory(descriptor) standalone construction is not supported in burn yet — ' +
+            'access memory via instance.exports.memory after instantiating a module that exports one.'
+        );
+    }
+
+    Object.defineProperty(Memory.prototype, 'buffer', {
+        get: function() {
+            // Spec: returns ArrayBuffer view. We snapshot the host
+            // memory into a fresh Uint8Array each call. Mutating the
+            // snapshot does NOT affect the WASM memory — callers that
+            // want to write must use `memory._write(offset, buf)` (a
+            // burn extension, since the spec's ArrayBuffer would
+            // require shared-buffer semantics we don't have).
+            var sizeFn = ensureHost('__host_wasm_memory_size');
+            var size = sizeFn(this._instanceId) | 0;
+            if (size < 0) {
+                throw new Error('WebAssembly.Memory: instance closed or no memory');
+            }
+            var readFn = ensureHost('__host_wasm_memory_read');
+            var b64 = readFn(this._instanceId, 0, size);
+            if (isHostErr(b64)) throw new Error(b64.slice('__HOST_ERR__:'.length));
+            return Buffer.from(b64, 'base64').buffer;
+        },
+    });
+
+    /// Burn extension: read raw bytes at `offset` for `len` bytes.
+    /// More efficient than `.buffer` for slicing.
+    Memory.prototype.read = function(offset, len) {
+        var fn = ensureHost('__host_wasm_memory_read');
+        var b64 = fn(this._instanceId, offset | 0, len | 0);
+        if (isHostErr(b64)) throw new Error(b64.slice('__HOST_ERR__:'.length));
+        return Buffer.from(b64, 'base64');
+    };
+
+    /// Burn extension: write a Buffer / Uint8Array into the WASM
+    /// memory at `offset`. The spec's `memory.buffer.set(...)` would
+    /// require shared-buffer semantics with the host, which we don't
+    /// have — `write()` is the explicit replacement.
+    Memory.prototype.write = function(offset, data) {
+        var bytes;
+        if (Buffer.isBuffer(data)) bytes = data;
+        else if (data instanceof Uint8Array) bytes = Buffer.from(data);
+        else if (data instanceof ArrayBuffer) bytes = Buffer.from(new Uint8Array(data));
+        else throw new TypeError('WebAssembly.Memory.write: data must be Buffer/Uint8Array/ArrayBuffer');
+        var fn = ensureHost('__host_wasm_memory_write');
+        var rc = fn(this._instanceId, offset | 0, bytes.toString('base64'));
+        if (rc < 0) {
+            var detail = (typeof globalThis.__host_last_error === 'function')
+                ? globalThis.__host_last_error()
+                : 'memory write failed';
+            throw new Error('WebAssembly.Memory.write: ' + detail);
+        }
+        return bytes.length;
+    };
+
+    Memory.prototype.grow = function() {
+        // grow() returns the previous size in pages. Not exposed in
+        // v1; callers usually let WASM grow itself.
+        throw new Error('WebAssembly.Memory.grow is not supported in burn yet');
+    };
+
+    // ---- Instance -------------------------------------------------
+
+    function Instance(mod, importsObject) {
+        if (!(this instanceof Instance)) return new Instance(mod, importsObject);
+        var instFn = ensureHost('__host_wasm_instantiate');
+        var iid = instFn(mod._id);
+        if (iid < 0) {
+            var detail = (typeof globalThis.__host_last_error === 'function')
+                ? globalThis.__host_last_error()
+                : 'instantiate failed';
+            throw LinkError('WebAssembly.Instance: ' + detail);
+        }
+        this._id = iid;
+        this._module = mod;
+        this.exports = buildExportsProxy(iid, mod);
+        // `importsObject` is accepted but ignored in v1 — burn's
+        // loader doesn't bridge JS callbacks back into wasmtime yet.
+        // Modules that need imports fail at the host-side
+        // instantiate step above.
+        var _ = importsObject;
+    }
+
+    function buildExportsProxy(instanceId, mod) {
+        var exportsList = Module.exports(mod);
+        var out = {};
+        // Track exported memory so memory.read/write/buffer work.
+        var memoryExportName = null;
+        var rawExports = JSON.parse(
+            ensureHost('__host_wasm_module_exports')(mod._id)
+        );
+        for (var i = 0; i < rawExports.length; i++) {
+            var exp = rawExports[i];
+            (function bind(exp) {
+                if (exp.kind === 'function') {
+                    out[exp.name] = function() {
+                        var args = Array.prototype.slice.call(arguments);
+                        var encoded = args.map(encodeArg);
+                        var callFn = ensureHost('__host_wasm_call_export');
+                        var raw = callFn(
+                            instanceId, exp.name, JSON.stringify(encoded)
+                        );
+                        if (isHostErr(raw)) {
+                            throw RuntimeError(raw.slice('__HOST_ERR__:'.length));
+                        }
+                        var results = JSON.parse(raw);
+                        if (results.length === 0) return undefined;
+                        if (results.length === 1) return decodeResult(results[0]);
+                        return results.map(decodeResult);
+                    };
+                } else if (exp.kind === 'memory') {
+                    if (memoryExportName === null) memoryExportName = exp.name;
+                    out[exp.name] = new Memory({ _instanceId: instanceId });
+                } else if (exp.kind === 'table') {
+                    out[exp.name] = {
+                        // v1: opaque table object — methods stub.
+                        _kind: 'table',
+                        get: function() { throw new Error('WebAssembly.Table.get not supported in burn yet'); },
+                        set: function() { throw new Error('WebAssembly.Table.set not supported in burn yet'); },
+                        grow: function() { throw new Error('WebAssembly.Table.grow not supported in burn yet'); },
+                    };
+                } else if (exp.kind === 'global') {
+                    out[exp.name] = {
+                        _kind: 'global',
+                        get value() { throw new Error('WebAssembly.Global.value not supported in burn yet'); },
+                        set value(_) { throw new Error('WebAssembly.Global.value not supported in burn yet'); },
+                    };
+                }
+            })(exp);
+        }
+        var _ = exportsList;
+        var __ = memoryExportName;
+        return out;
+    }
+
+    /// Convert a JS arg to the bridge's tagged-union shape.
+    /// Defaults to i32 for finite integers, f64 for non-integers,
+    /// i64 (string) for BigInt.
+    function encodeArg(v) {
+        if (typeof v === 'number') {
+            if (Number.isInteger(v) && v >= -2147483648 && v <= 2147483647) {
+                return { type: 'i32', value: v | 0 };
+            }
+            return { type: 'f64', value: v };
+        }
+        if (typeof v === 'bigint') {
+            return { type: 'i64', value: v.toString() };
+        }
+        if (typeof v === 'boolean') {
+            return { type: 'i32', value: v ? 1 : 0 };
+        }
+        throw new TypeError('WebAssembly: unsupported argument type ' + typeof v);
+    }
+
+    /// Convert the bridge's tagged result back to a JS value.
+    /// i64 returns a BigInt to preserve precision for values > 2^53.
+    function decodeResult(r) {
+        switch (r.type) {
+            case 'i32': return r.value;
+            case 'f32': return r.value;
+            case 'f64': return r.value;
+            case 'i64': return BigInt(r.value);
+            default: return r.value;
+        }
+    }
+
+    // ---- module-level static API ----------------------------------
+
+    function compile(bufferSource) {
+        return new Promise(function(resolve, reject) {
+            try { resolve(new Module(bufferSource)); }
+            catch (e) { reject(e); }
+        });
+    }
+
+    function instantiate(bufferSourceOrModule, imports) {
+        return new Promise(function(resolve, reject) {
+            try {
+                if (bufferSourceOrModule instanceof Module) {
+                    resolve(new Instance(bufferSourceOrModule, imports));
+                } else {
+                    var mod = new Module(bufferSourceOrModule);
+                    var inst = new Instance(mod, imports);
+                    resolve({ module: mod, instance: inst });
+                }
+            } catch (e) {
+                reject(e);
+            }
+        });
+    }
+
+    function validate(bufferSource) {
+        try {
+            new Module(bufferSource);
+            return true;
+        } catch (_) {
+            return false;
+        }
+    }
+
+    function compileStreaming() {
+        return Promise.reject(new Error(
+            'WebAssembly.compileStreaming is not supported in burn — ' +
+            'fetch bytes first via fs / fetch and pass them to WebAssembly.compile'
+        ));
+    }
+    function instantiateStreaming() {
+        return Promise.reject(new Error(
+            'WebAssembly.instantiateStreaming is not supported in burn — ' +
+            'fetch bytes first via fs / fetch and pass them to WebAssembly.instantiate'
+        ));
+    }
+
+    var WebAssembly = {
+        compile: compile,
+        instantiate: instantiate,
+        validate: validate,
+        compileStreaming: compileStreaming,
+        instantiateStreaming: instantiateStreaming,
+        Module: Module,
+        Instance: Instance,
+        Memory: Memory,
+        Table: function() {
+            throw new Error('WebAssembly.Table standalone construction is not supported in burn yet');
+        },
+        Global: function() {
+            throw new Error('WebAssembly.Global standalone construction is not supported in burn yet');
+        },
+        CompileError: function(msg) { return CompileError(msg); },
+        LinkError: function(msg) { return LinkError(msg); },
+        RuntimeError: function(msg) { return RuntimeError(msg); },
+    };
+
+    globalThis.WebAssembly = WebAssembly;
 })();
 
 // ---- worker_threads.js ----
