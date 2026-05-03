@@ -15,7 +15,7 @@
 
 ---
 
-Afterburner lets you load, execute, and unload JavaScript from Rust with hard resource limits and fine-grained permission controls. Node.js built-ins — `fs`, `crypto`, `http`, `zlib`, `child_process`, and more — are available but locked behind capability gates you configure per-script.
+Afterburner lets you load, execute, and unload JavaScript from Rust with hard resource limits and fine-grained permission controls. Node.js built-ins (`fs`, `crypto`, `http`, `zlib`, `child_process`, and more) are available but locked behind capability gates you configure per-script.
 
 ## Library usage
 
@@ -51,7 +51,7 @@ let ab = Afterburner::builder()
     .build()?;
 ```
 
-## `burn` — the command-line runtime
+## `burn`: the command-line runtime
 
 ### Install (prebuilt binaries)
 
@@ -65,9 +65,9 @@ curl -fsSL https://raw.githubusercontent.com/vertexclique/afterburner/master/ins
 BURN_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/vertexclique/afterburner/master/install.sh | bash
 ```
 
-Or grab a tarball directly from the [Releases page](https://github.com/vertexclique/afterburner/releases) — archives are named `burn-<version>-<target>.tar.gz` (or `.zip` for Windows) and ship with a `.sha256` next to them.
+Or grab a tarball directly from the [Releases page](https://github.com/vertexclique/afterburner/releases). Archives are named `burn-<version>-<target>.tar.gz` (or `.zip` for Windows) and ship with a `.sha256` next to them.
 
-Built with `--features release-cli` (every backend + every L3 shadow + TypeScript loader), so it's a single self-contained binary — no runtime libsqlite3 / libssl / libclang required. Plugin `.wasm` is `include_bytes!`-baked into the binary at build time.
+Built with `--features release-cli` (every backend, every L3 shadow, TypeScript loader), so it's a single self-contained binary. No runtime libsqlite3, libssl, or libclang required. Plugin `.wasm` is `include_bytes!`-baked into the binary at build time.
 
 ### Install (build from source)
 
@@ -102,7 +102,7 @@ Afterburner** (`examples/express-app`).
 | Crate | Purpose |
 |:------|:--------|
 | **`afterburner`**              | Facade: `Afterburner` + builder, `burn` binary, one ergonomic entry point |
-| **`afterburner`**         | `Combustor` trait, `Manifold`, `FuelGauge`, `BurnCache`, level-gated logging |
+| **`afterburner-core`**         | `Combustor` trait, `Manifold`, `FuelGauge`, `BurnCache`, level-gated logging |
 | **`afterburner-ignite`**       | Native QuickJS via `rquickjs`, thread-local runtimes |
 | **`afterburner-wasi`**         | Wasmtime + Javy plugin sandbox with host-function imports, pooling allocator + InstancePre, bytecode cache |
 | **`afterburner-node-compat`**  | `plenum.js` polyfill bundle + Rust-backed host impls (incl. bounded HTTP + DNS with per-call timeouts) |
