@@ -10,7 +10,7 @@
   <a href="https://crates.io/crates/afterburner-core"><img src="https://img.shields.io/crates/v/afterburner-core?style=flat-square&color=e6832e" alt="crates.io"/></a>
   <a href="https://docs.rs/afterburner-core"><img src="https://img.shields.io/docsrs/afterburner-core?style=flat-square&color=2a9d8f" alt="docs.rs"/></a>
   <img src="https://img.shields.io/badge/rust-1.90%2B_(2024_ed)-blue?style=flat-square&logo=rust&logoColor=white" alt="MSRV"/>
-  <img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-green?style=flat-square" alt="License"/>
+  <img src="https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square" alt="License"/>
 </p>
 
 ---
@@ -398,10 +398,10 @@ CI itself (`.github/workflows/ci.yml`) runs on every push / PR: `fmt`, `clippy` 
 
 ## License
 
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.
+Licensed under the [Apache License, Version 2.0](LICENSE).
 
 ---
 
 <p align="center">
-  <sub>MIT OR Apache-2.0</sub>
+  <sub>Apache-2.0</sub>
 </p>

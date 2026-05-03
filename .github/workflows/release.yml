@@ -119,10 +119,8 @@ jobs:
           fi
           cp README.md "${stage}/README.md"
           cp -r docs "${stage}/docs" || true
-          # License files.
-          for f in LICENSE LICENSE-MIT LICENSE-APACHE; do
-            [[ -f "$f" ]] && cp "$f" "${stage}/"
-          done
+          # License file.
+          [[ -f LICENSE ]] && cp LICENSE "${stage}/"
           echo "stem=${stem}" >> "$GITHUB_OUTPUT"
           echo "stage=${stage}" >> "$GITHUB_OUTPUT"
 

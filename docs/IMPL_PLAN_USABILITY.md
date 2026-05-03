@@ -165,7 +165,7 @@ exclude  = ["examples"]      # belt-and-suspenders; each example is also its own
 name    = "afterburner"
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 description = "Sandboxed JavaScript runtime: WASM (Wasmtime) + native (QuickJS) backends, with a threaded scheduler."
 
 [lib]
