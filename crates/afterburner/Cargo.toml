@@ -34,7 +34,7 @@ tokio = { workspace = true, optional = true }
 base64 = { workspace = true }
 # B8 — TypeScript strip-types via oxc. Gated behind `ts` because the
 # oxc graph adds ~3 MiB of binary size and non-TS users never pay it.
-oxc = { version = "=0.127.0", default-features = false, features = [
+oxc = { version = "=0.128.0", default-features = false, features = [
     "transformer",
     "codegen",
     "semantic",
