@@ -196,7 +196,9 @@ fn wrap_tls(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
              _c_p: i32,
              _c_l: i32,
              _k_p: i32,
-             _k_l: i32|
+             _k_l: i32,
+             _s_p: i32,
+             _s_l: i32|
              -> i32 { E_NO_DAEMON },
         )
         .map_err(link_err)?;
@@ -3265,7 +3267,9 @@ fn wrap_tls(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
              cert_ptr: i32,
              cert_len: i32,
              key_ptr: i32,
-             key_len: i32|
+             key_len: i32,
+             sni_ptr: i32,
+             sni_len: i32|
              -> i32 {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return terr::E_OTHER;
@@ -3286,13 +3290,21 @@ fn wrap_tls(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     record(&mut caller, "tls_listen: invalid key PEM");
                     return terr::E_BAD_CERT;
                 };
+                let sni_map_json = read_str(&memory, &caller, sni_ptr, sni_len)
+                    .unwrap_or_default();
                 let Some(tls) = caller.data().daemon_tls.clone() else {
                     record(&mut caller, "tls.createServer requires daemon mode");
                     return terr::E_NO_DAEMON;
                 };
                 let mut last_error = String::new();
-                let result =
-                    tls.listen(&host, port as u16, &cert_pem, &key_pem, &mut last_error);
+                let result = tls.listen(
+                    &host,
+                    port as u16,
+                    &cert_pem,
+                    &key_pem,
+                    &sni_map_json,
+                    &mut last_error,
+                );
                 if !last_error.is_empty() {
                     caller.data_mut().last_error = last_error;
                 }

@@ -7017,11 +7017,13 @@ __register_module('timers', function(module, exports, require) {
 //
 // Deferred (will throw a clear error if used):
 //   - PSK / client certificate auth
-//   - SNI multi-cert routing on the server side
 //   - tls.checkServerIdentity hook (rustls handles standard hostname
 //     verification automatically when rejectUnauthorized is true)
 //   - DTLS / OpenSSL-specific knobs (secureProtocol, ciphers list,
 //     ECDH curve picks)
+//
+// SNI multi-cert routing is supported via tls.createSecureContext
+// + Server#addContext / { serverContexts: { '*.example.com': ctx } }.
 
 (function bootstrapTlsGlobals() {
     if (!globalThis.__ab_tls_handlers) globalThis.__ab_tls_handlers = {};
@@ -7406,6 +7408,25 @@ __register_module('tls', function(module, exports, require) {
 
     // ----- Server ----------------------------------------------------
 
+    function _pemFromOpt(v) {
+        if (typeof v === 'string') return v;
+        if (Buffer.isBuffer(v)) return v.toString('utf8');
+        if (Array.isArray(v) && v.length && (typeof v[0] === 'string' || Buffer.isBuffer(v[0]))) {
+            return _pemFromOpt(v[0]);
+        }
+        return '';
+    }
+
+    function createSecureContext(opts) {
+        opts = opts || {};
+        var cert = _pemFromOpt(opts.cert);
+        var key = _pemFromOpt(opts.key);
+        if (!cert || !key) {
+            throw new Error('tls.createSecureContext: `cert` and `key` (PEM) are required');
+        }
+        return { context: { __isSecureContext: true, cert: cert, key: key } };
+    }
+
     function Server(opts, secureConnectionListener) {
         if (!(this instanceof Server)) return new Server(opts, secureConnectionListener);
         EventEmitter.call(this);
@@ -7414,12 +7435,25 @@ __register_module('tls', function(module, exports, require) {
             opts = {};
         }
         opts = opts || {};
-        this._cert = typeof opts.cert === 'string' ? opts.cert :
-                     Buffer.isBuffer(opts.cert) ? opts.cert.toString('utf8') : '';
-        this._key = typeof opts.key === 'string' ? opts.key :
-                    Buffer.isBuffer(opts.key) ? opts.key.toString('utf8') : '';
+        this._cert = _pemFromOpt(opts.cert);
+        this._key = _pemFromOpt(opts.key);
         if (!this._cert || !this._key) {
             throw new Error('tls.createServer: `cert` and `key` (PEM) are required');
+        }
+        this._sniContexts = Object.create(null);
+        if (opts.serverContexts && typeof opts.serverContexts === 'object') {
+            for (var sn in opts.serverContexts) {
+                if (Object.prototype.hasOwnProperty.call(opts.serverContexts, sn)) {
+                    var sc = opts.serverContexts[sn];
+                    var c, k;
+                    if (sc && sc.context && sc.context.__isSecureContext) {
+                        c = sc.context.cert; k = sc.context.key;
+                    } else if (sc && typeof sc === 'object') {
+                        c = _pemFromOpt(sc.cert); k = _pemFromOpt(sc.key);
+                    }
+                    if (c && k) this._sniContexts[String(sn)] = { cert: c, key: k };
+                }
+            }
         }
         this._serverId = 0;
         this._listening = false;
@@ -7431,6 +7465,23 @@ __register_module('tls', function(module, exports, require) {
     }
     Server.prototype = Object.create(EventEmitter.prototype);
     Server.prototype.constructor = Server;
+
+    Server.prototype.addContext = function(servername, context) {
+        if (typeof servername !== 'string' || !servername) {
+            throw new TypeError('tls.Server#addContext: servername must be a non-empty string');
+        }
+        var c, k;
+        if (context && context.context && context.context.__isSecureContext) {
+            c = context.context.cert; k = context.context.key;
+        } else if (context && typeof context === 'object') {
+            c = _pemFromOpt(context.cert); k = _pemFromOpt(context.key);
+        }
+        if (!c || !k) {
+            throw new Error('tls.Server#addContext: context must include cert and key');
+        }
+        this._sniContexts[servername] = { cert: c, key: k };
+        return this;
+    };
 
     Server.prototype.listen = function() {
         var args = Array.prototype.slice.call(arguments);
@@ -7451,7 +7502,20 @@ __register_module('tls', function(module, exports, require) {
         if (port < 0 || port > 65535) {
             throw new RangeError('tls.listen: port out of range: ' + opts.port);
         }
-        var rc = globalThis.__host_tls_listen(String(host), port, this._cert, this._key);
+        var sniArr = [];
+        for (var sn in this._sniContexts) {
+            if (Object.prototype.hasOwnProperty.call(this._sniContexts, sn)) {
+                sniArr.push({
+                    servername: sn,
+                    cert: this._sniContexts[sn].cert,
+                    key: this._sniContexts[sn].key,
+                });
+            }
+        }
+        var sniJson = sniArr.length ? JSON.stringify(sniArr) : '';
+        var rc = globalThis.__host_tls_listen(
+            String(host), port, this._cert, this._key, sniJson
+        );
         if (rc < 0) {
             var err = makeError(rc, 'tls.listen');
             var self = this;
@@ -7577,6 +7641,8 @@ __register_module('tls', function(module, exports, require) {
     exports.Server = Server;
     exports.connect = connect;
     exports.createServer = createServer;
+    exports.createSecureContext = createSecureContext;
+    exports.SecureContext = function SecureContext() {};
     // Re-export net's IP helpers so callers can do `tls.isIP`.
     exports.isIP = net.isIP;
     exports.isIPv4 = net.isIPv4;

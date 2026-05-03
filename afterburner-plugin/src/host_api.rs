@@ -623,6 +623,8 @@ unsafe extern "C" {
         cert_len: u32,
         key_ptr: *const u8,
         key_len: u32,
+        sni_map_json_ptr: *const u8,
+        sni_map_json_len: u32,
     ) -> i32;
     pub fn host_tls_close_server(server_id: i32) -> i32;
 

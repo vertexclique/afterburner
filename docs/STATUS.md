@@ -153,7 +153,7 @@ two seams.
 |:--|:--|:-:|:--|
 | **B7 tls** | `socket.getPeerCertificate()` returns the real chain | S | ✅ shipped — DER bytes + colon-hex SHA-256 fingerprint. `getPeerCertChain()` for the full chain. |
 | **B7 tls** | `socket.getCipher()` returns the real negotiated suite | S | ✅ shipped — IANA-normalized name (rustls' `TLS13_*` mapped to `TLS_*`). |
-| **B7 tls** | Server-side SNI multi-cert routing (cert callback) | M | `tls.createServer` takes one `cert`/`key` pair; SNI dispatch needs a `ServerName → ServerConfig` map (rustls `ResolvesServerCert`). |
+| **B7 tls** | Server-side SNI multi-cert routing (cert callback) | M | ✅ shipped — `tls.createSecureContext({cert, key})`, `Server.addContext(servername, ctx)`, and the `serverContexts` ctor option. Host installs a `rustls::server::ResolvesServerCert` impl (`SniResolver`) that matches ClientHello `server_name` exactly first, then via single-label wildcards (`*.example.com`), and falls through to the default cert. |
 | **B7 dns** | `Resolver.setServers([...])` actually plumbs through to hickory | M | Larger than initially sized — needs a server-list parameter plumbed through 7 dns functions × {host coord, host import, plugin bridge, polyfill}. Still pending. |
 | **B7 net** | `socket.setNoDelay` / `setKeepAlive` actually toggle the flags | S | ✅ shipped — `tokio::net::TcpStream::set_nodelay` for `TCP_NODELAY`, `socket2::SockRef::set_tcp_keepalive` for `SO_KEEPALIVE` + idle timer. |
 | **B6 require** | `Resolver` cache control / TTLs surface to JS | S | Internal cache works; not user-visible. |

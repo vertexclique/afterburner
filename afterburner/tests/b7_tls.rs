@@ -591,6 +591,233 @@ fn get_peer_cert_chain_returns_full_chain() {
     assert!(stdout.contains("CHAIN_OK len=1"), "stdout:\n{stdout}");
 }
 
+/// Generate a self-signed cert pinned to a single SAN. Returns
+/// `(cert_pem, key_pem, cert_der)` so the test thread can build a
+/// rustls client root store containing exactly that cert.
+fn make_named_certs(san: &str) -> (String, String, CertificateDer<'static>) {
+    let cert = generate_simple_self_signed(vec![san.into()]).expect("rcgen");
+    let cert_pem = cert.cert.pem();
+    let key_pem = cert.key_pair.serialize_pem();
+    let cert_der = cert.cert.der().clone();
+    (cert_pem, key_pem, cert_der)
+}
+
+/// rustls verifier that captures whatever cert chain the server
+/// presents and accepts everything. We use it inside the SNI tests
+/// to observe which leaf cert is sent for an arbitrary `server_name`,
+/// even when that name doesn't match the cert's SAN.
+#[derive(Debug)]
+struct CapturingNoVerify;
+
+impl rustls::client::danger::ServerCertVerifier for CapturingNoVerify {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::ED25519,
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+        ]
+    }
+}
+
+/// Drive a rustls handshake to `port` over TCP and return the leaf
+/// certificate the server actually presented. Used to verify SNI
+/// routing — caller asserts on the cert bytes. Bypasses hostname
+/// verification so we can probe arbitrary SNIs (including ones the
+/// fallback default cert won't validate against).
+fn fetch_presented_cert(port: u16, server_name: &str) -> Vec<u8> {
+    let cfg = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(CapturingNoVerify))
+        .with_no_client_auth();
+    let sni = rustls::pki_types::ServerName::try_from(server_name.to_string()).expect("sni");
+    let mut conn = rustls::ClientConnection::new(Arc::new(cfg), sni).expect("client conn");
+    let mut tcp = std::net::TcpStream::connect(("127.0.0.1", port)).expect("tcp connect");
+    tcp.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    tcp.set_write_timeout(Some(Duration::from_secs(5))).ok();
+    while conn.is_handshaking() {
+        conn.complete_io(&mut tcp)
+            .unwrap_or_else(|e| panic!("tls handshake to {server_name}: {e}"));
+    }
+    let peer = conn.peer_certificates().expect("peer cert chain");
+    assert!(!peer.is_empty(), "empty cert chain for {server_name}");
+    peer[0].as_ref().to_vec()
+}
+
+#[test]
+#[serial]
+fn sni_routes_distinct_cert_per_servername() {
+    // Burn hosts two SNI contexts ('alpha.local' + 'beta.local') over
+    // a default cert. Verify each ClientHello with the matching
+    // server_name receives its dedicated leaf cert.
+    let (def_cert, def_key, def_der) = make_named_certs("default.local");
+    let (alpha_cert, alpha_key, alpha_der) = make_named_certs("alpha.local");
+    let (beta_cert, beta_key, beta_der) = make_named_certs("beta.local");
+
+    let parent = format!(
+        r#"
+            const tls = require('tls');
+            const server = tls.createServer({{
+                cert: {def_cert},
+                key: {def_key},
+                serverContexts: {{
+                    'alpha.local': {{ cert: {alpha_cert}, key: {alpha_key} }},
+                    'beta.local':  tls.createSecureContext({{ cert: {beta_cert}, key: {beta_key} }}),
+                }},
+            }}, (sock) => {{
+                sock.on('data', (chunk) => sock.write(chunk));
+                sock.on('end', () => sock.end());
+            }});
+            server.listen(0, '127.0.0.1', () => {{
+                console.log('PORT=' + server.address().port);
+            }});
+        "#,
+        def_cert = serde_json::to_string(&def_cert).unwrap(),
+        def_key = serde_json::to_string(&def_key).unwrap(),
+        alpha_cert = serde_json::to_string(&alpha_cert).unwrap(),
+        alpha_key = serde_json::to_string(&alpha_key).unwrap(),
+        beta_cert = serde_json::to_string(&beta_cert).unwrap(),
+        beta_key = serde_json::to_string(&beta_key).unwrap(),
+    );
+
+    let mut child = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .args(["-A", "-e", &parent])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn burn server");
+
+    let (port_tx, port_rx) = mpsc::channel::<u16>();
+    let stdout = child.stdout.take().expect("piped stdout");
+    thread::spawn(move || {
+        use std::io::BufRead;
+        let r = std::io::BufReader::new(stdout);
+        for line in r.lines() {
+            let Ok(line) = line else { return };
+            if let Some(rest) = line.strip_prefix("PORT=") {
+                let p: u16 = rest.parse().expect("port parse");
+                let _ = port_tx.send(p);
+                return;
+            }
+        }
+    });
+    let port = port_rx
+        .recv_timeout(Duration::from_secs(15))
+        .expect("burn announced port");
+
+    let presented_alpha = fetch_presented_cert(port, "alpha.local");
+    assert_eq!(
+        presented_alpha,
+        alpha_der.as_ref().to_vec(),
+        "alpha.local SNI should yield alpha cert"
+    );
+    let presented_beta = fetch_presented_cert(port, "beta.local");
+    assert_eq!(
+        presented_beta,
+        beta_der.as_ref().to_vec(),
+        "beta.local SNI should yield beta cert"
+    );
+    let presented_other = fetch_presented_cert(port, "unknown.local");
+    assert_eq!(
+        presented_other,
+        def_der.as_ref().to_vec(),
+        "unknown SNI should fall through to default cert"
+    );
+
+    child.kill().ok();
+    child.wait().ok();
+}
+
+#[test]
+#[serial]
+fn sni_add_context_works_post_construction() {
+    // Same as sni_routes_distinct_cert_per_servername but the SNI
+    // context is added *after* the Server is constructed, via
+    // `Server.addContext`. Exercises the addContext code path.
+    let (def_cert, def_key, def_der) = make_named_certs("default.local");
+    let (extra_cert, extra_key, extra_der) = make_named_certs("extra.local");
+
+    let parent = format!(
+        r#"
+            const tls = require('tls');
+            const server = tls.createServer({{ cert: {def_cert}, key: {def_key} }}, (sock) => {{
+                sock.on('data', (chunk) => sock.write(chunk));
+            }});
+            server.addContext('extra.local', tls.createSecureContext({{
+                cert: {extra_cert}, key: {extra_key}
+            }}));
+            server.listen(0, '127.0.0.1', () => {{
+                console.log('PORT=' + server.address().port);
+            }});
+        "#,
+        def_cert = serde_json::to_string(&def_cert).unwrap(),
+        def_key = serde_json::to_string(&def_key).unwrap(),
+        extra_cert = serde_json::to_string(&extra_cert).unwrap(),
+        extra_key = serde_json::to_string(&extra_key).unwrap(),
+    );
+
+    let mut child = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .args(["-A", "-e", &parent])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn burn server");
+
+    let (port_tx, port_rx) = mpsc::channel::<u16>();
+    let stdout = child.stdout.take().expect("piped stdout");
+    thread::spawn(move || {
+        use std::io::BufRead;
+        let r = std::io::BufReader::new(stdout);
+        for line in r.lines() {
+            let Ok(line) = line else { return };
+            if let Some(rest) = line.strip_prefix("PORT=") {
+                let p: u16 = rest.parse().expect("port parse");
+                let _ = port_tx.send(p);
+                return;
+            }
+        }
+    });
+    let port = port_rx
+        .recv_timeout(Duration::from_secs(15))
+        .expect("burn announced port");
+
+    let _ = def_der; // silence unused; the default cert isn't asserted on here.
+    let presented = fetch_presented_cert(port, "extra.local");
+    assert_eq!(presented, extra_der.as_ref().to_vec());
+
+    child.kill().ok();
+    child.wait().ok();
+}
+
 #[test]
 fn ip_helpers() {
     // tls.isIP* re-exports net's helpers — quick smoke test.

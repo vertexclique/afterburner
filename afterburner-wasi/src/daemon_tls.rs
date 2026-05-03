@@ -329,16 +329,18 @@ impl DaemonTls {
         port: u16,
         cert_pem: &str,
         key_pem: &str,
+        sni_map_json: &str,
         last_error: &mut String,
     ) -> i32 {
         if host.is_empty() {
             *last_error = "tls.listen: empty host".into();
             return errors::E_BAD_HOST;
         }
-        let server_config = match build_server_config(cert_pem, key_pem, last_error) {
-            Some(c) => c,
-            None => return errors::E_BAD_CERT,
-        };
+        let server_config =
+            match build_server_config(cert_pem, key_pem, sni_map_json, last_error) {
+                Some(c) => c,
+                None => return errors::E_BAD_CERT,
+            };
         let server_id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
         let bind = format!("{host}:{port}");
         let evt_tx = self.events_tx.clone();
@@ -529,44 +531,174 @@ fn build_client_config(opts: &ConnectOptions, last_error: &mut String) -> Option
 fn build_server_config(
     cert_pem: &str,
     key_pem: &str,
+    sni_map_json: &str,
     last_error: &mut String,
 ) -> Option<Arc<ServerConfig>> {
-    let mut cert_cursor = std::io::Cursor::new(cert_pem.as_bytes());
-    let cert_chain: Vec<CertificateDer<'static>> = match rustls_pemfile::certs(&mut cert_cursor)
-        .collect::<Result<Vec<_>, _>>()
-    {
-        Ok(c) => c,
+    let default_certified = match parse_certified_key(cert_pem, key_pem) {
+        Ok(k) => k,
         Err(e) => {
-            *last_error = format!("tls.listen: cert PEM parse: {e}");
+            *last_error = format!("tls.listen: default cert/key: {e}");
             return None;
         }
     };
+
+    // Parse the SNI map: a JSON object mapping `servername` →
+    // `{cert, key}`. Empty / missing means "no SNI routing — every
+    // ClientHello gets the default cert."
+    let sni_map = if sni_map_json.is_empty() {
+        Vec::new()
+    } else {
+        let parsed: serde_json::Value = match serde_json::from_str(sni_map_json) {
+            Ok(v) => v,
+            Err(e) => {
+                *last_error = format!("tls.listen: SNI map JSON parse: {e}");
+                return None;
+            }
+        };
+        let entries = match parsed {
+            serde_json::Value::Array(arr) => arr,
+            _ => {
+                *last_error = "tls.listen: SNI map must be a JSON array of {servername,cert,key}".into();
+                return None;
+            }
+        };
+        let mut out = Vec::with_capacity(entries.len());
+        for ent in entries {
+            let server_name = ent
+                .get("servername")
+                .and_then(|x| x.as_str())
+                .ok_or("");
+            let cert = ent.get("cert").and_then(|x| x.as_str()).unwrap_or("");
+            let key = ent.get("key").and_then(|x| x.as_str()).unwrap_or("");
+            if server_name.is_err() || cert.is_empty() || key.is_empty() {
+                *last_error =
+                    "tls.listen: each SNI entry needs servername+cert+key".into();
+                return None;
+            }
+            let server_name = server_name.unwrap().to_lowercase();
+            let certified = match parse_certified_key(cert, key) {
+                Ok(k) => k,
+                Err(e) => {
+                    *last_error = format!("tls.listen: SNI {server_name}: {e}");
+                    return None;
+                }
+            };
+            out.push((server_name, Arc::new(certified)));
+        }
+        out
+    };
+
+    if sni_map.is_empty() {
+        // Single-cert path — keep the simpler with_single_cert builder
+        // so error messages stay clean for the most common shape.
+        return ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                default_certified.cert.clone(),
+                default_certified.key.clone_key(),
+            )
+            .map(Arc::new)
+            .map_err(|e| {
+                *last_error = format!("tls.listen: cert/key mismatch: {e}");
+            })
+            .ok();
+    }
+
+    // SNI path — install a `ResolvesServerCert` impl that maps the
+    // ClientHello's `server_name` to the right certified key.
+    let resolver = SniResolver {
+        default: Arc::new(default_certified),
+        by_name: sni_map.into_iter().collect(),
+    };
+    let cfg = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(resolver));
+    Some(Arc::new(cfg))
+}
+
+/// Cert + key parsed out of two PEM blobs and packaged for rustls'
+/// `CertifiedKey`. Stored in the SNI map so the resolver can hand
+/// the right one to each ClientHello.
+struct CertifiedPair {
+    cert: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+}
+
+fn parse_certified_key(cert_pem: &str, key_pem: &str) -> std::result::Result<CertifiedPair, String> {
+    let mut cert_cursor = std::io::Cursor::new(cert_pem.as_bytes());
+    let cert_chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_cursor)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| format!("cert PEM parse: {e}"))?;
     if cert_chain.is_empty() {
-        *last_error = "tls.listen: cert PEM contains no certificates".into();
-        return None;
+        return Err("cert PEM contains no certificates".into());
     }
     let mut key_cursor = std::io::Cursor::new(key_pem.as_bytes());
-    let key: PrivateKeyDer<'static> = match rustls_pemfile::private_key(&mut key_cursor) {
-        Ok(Some(k)) => k,
-        Ok(None) => {
-            *last_error = "tls.listen: key PEM contains no private key".into();
-            return None;
-        }
-        Err(e) => {
-            *last_error = format!("tls.listen: key PEM parse: {e}");
-            return None;
-        }
-    };
-    match ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(cert_chain, key)
-    {
-        Ok(c) => Some(Arc::new(c)),
-        Err(e) => {
-            *last_error = format!("tls.listen: cert/key mismatch: {e}");
-            None
-        }
+    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_cursor)
+        .map_err(|e| format!("key PEM parse: {e}"))?
+        .ok_or_else(|| "key PEM contains no private key".to_string())?;
+    Ok(CertifiedPair {
+        cert: cert_chain,
+        key,
+    })
+}
+
+/// rustls `ResolvesServerCert` impl — the SNI router.
+struct SniResolver {
+    default: Arc<CertifiedPair>,
+    by_name: std::collections::HashMap<String, Arc<CertifiedPair>>,
+}
+
+impl std::fmt::Debug for SniResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SniResolver")
+            .field("default", &"<cert+key>")
+            .field("by_name", &self.by_name.keys().collect::<Vec<_>>())
+            .finish()
     }
+}
+
+impl rustls::server::ResolvesServerCert for SniResolver {
+    fn resolve(
+        &self,
+        client_hello: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        let pair = match client_hello.server_name() {
+            Some(name) => {
+                let name_lc = name.to_ascii_lowercase();
+                if let Some(p) = self.by_name.get(&name_lc) {
+                    p.clone()
+                } else if let Some(p) = wildcard_match(&self.by_name, &name_lc) {
+                    p
+                } else {
+                    self.default.clone()
+                }
+            }
+            None => self.default.clone(),
+        };
+        // Build the runtime CertifiedKey. rustls 0.23 needs a
+        // `SigningKey` derived from the private key bytes; the helper
+        // chooses the algorithm matching the key.
+        let signing_key = rustls::crypto::ring::sign::any_supported_type(&pair.key).ok()?;
+        Some(Arc::new(rustls::sign::CertifiedKey::new(
+            pair.cert.clone(),
+            signing_key,
+        )))
+    }
+}
+
+/// Match `requested` against keys with a leading `*.` wildcard.
+/// `*.example.com` matches `api.example.com` but not `example.com`
+/// itself or `nested.api.example.com` (single label only —
+/// `tls.createServer` callers wanting deep wildcards register them
+/// explicitly).
+fn wildcard_match(
+    map: &std::collections::HashMap<String, Arc<CertifiedPair>>,
+    requested: &str,
+) -> Option<Arc<CertifiedPair>> {
+    let dot = requested.find('.')?;
+    let suffix = &requested[dot + 1..];
+    let wild_key = format!("*.{suffix}");
+    map.get(&wild_key).cloned()
 }
 
 /// Permissive verifier used when the polyfill passes
@@ -1029,7 +1161,69 @@ mod tests {
         let cert_pem = cert.cert.pem();
         let key_pem = cert.key_pair.serialize_pem();
         let mut err = String::new();
-        let cfg = build_server_config(&cert_pem, &key_pem, &mut err);
+        let cfg = build_server_config(&cert_pem, &key_pem, "", &mut err);
         assert!(cfg.is_some(), "err: {err}");
+    }
+
+    #[test]
+    fn build_server_config_with_sni_map() {
+        // Generate three certs: a default + two SNI-keyed.
+        let default = rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("default");
+        let alpha = rcgen::generate_simple_self_signed(vec!["alpha.example".into()]).expect("alpha");
+        let beta = rcgen::generate_simple_self_signed(vec!["beta.example".into()]).expect("beta");
+        let sni_json = serde_json::json!([
+            {
+                "servername": "alpha.example",
+                "cert": alpha.cert.pem(),
+                "key": alpha.key_pair.serialize_pem(),
+            },
+            {
+                "servername": "beta.example",
+                "cert": beta.cert.pem(),
+                "key": beta.key_pair.serialize_pem(),
+            },
+        ])
+        .to_string();
+        let mut err = String::new();
+        let cfg = build_server_config(
+            &default.cert.pem(),
+            &default.key_pair.serialize_pem(),
+            &sni_json,
+            &mut err,
+        );
+        assert!(cfg.is_some(), "err: {err}");
+    }
+
+    #[test]
+    fn build_server_config_rejects_malformed_sni() {
+        let default = rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("cert");
+        let mut err = String::new();
+        let cfg = build_server_config(
+            &default.cert.pem(),
+            &default.key_pair.serialize_pem(),
+            r#"[{"servername": "x", "cert": ""}]"#,
+            &mut err,
+        );
+        assert!(cfg.is_none(), "should reject missing key");
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn wildcard_match_resolves_first_label() {
+        use std::sync::Arc;
+        let cert = rcgen::generate_simple_self_signed(vec!["*.example.com".into()]).expect("cert");
+        let pair = parse_certified_key(
+            &cert.cert.pem(),
+            &cert.key_pair.serialize_pem(),
+        )
+        .expect("pair");
+        let mut map = std::collections::HashMap::new();
+        map.insert("*.example.com".to_string(), Arc::new(pair));
+        // Single-label wildcard match.
+        assert!(wildcard_match(&map, "api.example.com").is_some());
+        // No match for the bare apex (single-label rule).
+        assert!(wildcard_match(&map, "example.com").is_none());
+        // Different domain — no match.
+        assert!(wildcard_match(&map, "api.other.com").is_none());
     }
 }

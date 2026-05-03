@@ -642,22 +642,32 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     );
     let _ = globals.set(
         "__host_tls_listen",
-        Func::from(|host: String, port: f64, cert_pem: String, key_pem: String| -> f64 {
-            let hb = host.as_bytes();
-            let cb = cert_pem.as_bytes();
-            let kb = key_pem.as_bytes();
-            unsafe {
-                host_tls_listen(
-                    hb.as_ptr(),
-                    hb.len() as u32,
-                    port as i32,
-                    cb.as_ptr(),
-                    cb.len() as u32,
-                    kb.as_ptr(),
-                    kb.len() as u32,
-                ) as f64
-            }
-        }),
+        Func::from(
+            |host: String,
+             port: f64,
+             cert_pem: String,
+             key_pem: String,
+             sni_map_json: String|
+             -> f64 {
+                let hb = host.as_bytes();
+                let cb = cert_pem.as_bytes();
+                let kb = key_pem.as_bytes();
+                let sb = sni_map_json.as_bytes();
+                unsafe {
+                    host_tls_listen(
+                        hb.as_ptr(),
+                        hb.len() as u32,
+                        port as i32,
+                        cb.as_ptr(),
+                        cb.len() as u32,
+                        kb.as_ptr(),
+                        kb.len() as u32,
+                        sb.as_ptr(),
+                        sb.len() as u32,
+                    ) as f64
+                }
+            },
+        ),
     );
     let _ = globals.set(
         "__host_tls_close_server",
