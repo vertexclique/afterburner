@@ -52,6 +52,32 @@ unsafe extern "C" {
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
+    pub fn host_fs_realpath_sync(
+        path_ptr: *const u8,
+        path_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_fs_cp(
+        src_ptr: *const u8,
+        src_len: u32,
+        dst_ptr: *const u8,
+        dst_len: u32,
+        force: i32,
+    ) -> i32;
+    pub fn host_fs_opendir_sync(
+        path_ptr: *const u8,
+        path_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_fs_watch_poll(
+        path_ptr: *const u8,
+        path_len: u32,
+        interval_ms: i32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
 
     // ---- crypto ------------------------------------------------------
     pub fn host_crypto_hash(

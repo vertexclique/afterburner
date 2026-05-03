@@ -109,6 +109,69 @@ pub fn install<'js>(globals: &Object<'js>) {
     );
 
     let _ = globals.set(
+        "__host_fs_realpath_sync",
+        Func::from(|path: String| -> String {
+            let pb = path.as_bytes();
+            match call_read(|out, cap| unsafe {
+                host_fs_realpath_sync(pb.as_ptr(), pb.len() as u32, out, cap)
+            }) {
+                Ok(s) => s,
+                Err(e) => format!("__HOST_ERR__:{e}"),
+            }
+        }),
+    );
+
+    let _ = globals.set(
+        "__host_fs_cp",
+        Func::from(|src: String, dst: String, force: Option<bool>| -> String {
+            let sb = src.as_bytes();
+            let db = dst.as_bytes();
+            let f = if force.unwrap_or(false) { 1 } else { 0 };
+            let code = unsafe {
+                host_fs_cp(
+                    sb.as_ptr(),
+                    sb.len() as u32,
+                    db.as_ptr(),
+                    db.len() as u32,
+                    f,
+                )
+            };
+            if code >= 0 {
+                String::new()
+            } else {
+                format!("__HOST_ERR__:{}", read_last_error(code))
+            }
+        }),
+    );
+
+    let _ = globals.set(
+        "__host_fs_opendir_sync",
+        Func::from(|path: String| -> String {
+            let pb = path.as_bytes();
+            match call_read(|out, cap| unsafe {
+                host_fs_opendir_sync(pb.as_ptr(), pb.len() as u32, out, cap)
+            }) {
+                Ok(s) => s,
+                Err(e) => format!("__HOST_ERR__:{e}"),
+            }
+        }),
+    );
+
+    let _ = globals.set(
+        "__host_fs_watch_poll",
+        Func::from(|path: String, interval_ms: f64| -> String {
+            let pb = path.as_bytes();
+            let interval = interval_ms.max(0.0) as i32;
+            match call_read(|out, cap| unsafe {
+                host_fs_watch_poll(pb.as_ptr(), pb.len() as u32, interval, out, cap)
+            }) {
+                Ok(s) => s,
+                Err(e) => format!("__HOST_ERR__:{e}"),
+            }
+        }),
+    );
+
+    let _ = globals.set(
         "__host_fs_stat_sync",
         Func::from(|path: String| -> String {
             let pb = path.as_bytes();

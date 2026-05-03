@@ -468,6 +468,149 @@ fn wrap_fs(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         )
         .map_err(link_err)?;
 
+    linker
+        .func_wrap(
+            NS,
+            "host_fs_realpath_sync",
+            |mut caller: Caller<'_, HostState>,
+             ptr: i32,
+             len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let path = match read_str(&memory, &caller, ptr, len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let m = caller.data().manifold.clone();
+                match fs_host::realpath_sync(&path, &m) {
+                    Ok(s) => write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes()),
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_fs_cp",
+            |mut caller: Caller<'_, HostState>,
+             src_ptr: i32,
+             src_len: i32,
+             dst_ptr: i32,
+             dst_len: i32,
+             force: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let src = match read_str(&memory, &caller, src_ptr, src_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let dst = match read_str(&memory, &caller, dst_ptr, dst_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let m = caller.data().manifold.clone();
+                match fs_host::cp_recursive(&src, &dst, force != 0, &m) {
+                    Ok(()) => 0,
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_fs_opendir_sync",
+            |mut caller: Caller<'_, HostState>,
+             ptr: i32,
+             len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let path = match read_str(&memory, &caller, ptr, len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let m = caller.data().manifold.clone();
+                match fs_host::opendir_sync(&path, &m) {
+                    Ok(entries) => {
+                        let mut json = String::from("[");
+                        for (i, e) in entries.iter().enumerate() {
+                            if i > 0 {
+                                json.push(',');
+                            }
+                            json.push_str(&format!(
+                                "{{\"name\":{},\"isFile\":{},\"isDir\":{},\"isSymlink\":{}}}",
+                                js_string_literal(&e.name),
+                                e.is_file,
+                                e.is_dir,
+                                e.is_symlink
+                            ));
+                        }
+                        json.push(']');
+                        write_out(&mut caller, &memory, out_ptr, out_cap, json.as_bytes())
+                    }
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_fs_watch_poll",
+            |mut caller: Caller<'_, HostState>,
+             ptr: i32,
+             len: i32,
+             interval_ms: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let path = match read_str(&memory, &caller, ptr, len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                if interval_ms < 0 {
+                    return E_OTHER;
+                }
+                let m = caller.data().manifold.clone();
+                match fs_host::watch_poll(&path, interval_ms as u32, &m) {
+                    Ok(events) => {
+                        let mut json = String::from("[");
+                        for (i, e) in events.iter().enumerate() {
+                            if i > 0 {
+                                json.push(',');
+                            }
+                            json.push_str(&format!(
+                                "{{\"kind\":{},\"filename\":{}}}",
+                                js_string_literal(e.kind.as_str()),
+                                js_string_literal(&e.filename)
+                            ));
+                        }
+                        json.push(']');
+                        write_out(&mut caller, &memory, out_ptr, out_cap, json.as_bytes())
+                    }
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
     Ok(())
 }
 

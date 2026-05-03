@@ -124,6 +124,238 @@ pub fn file_size(path: &str, m: &Manifold) -> Result<u64> {
     Ok(meta.len())
 }
 
+/// Canonicalize `path` (resolves `..` segments + symlinks) and return
+/// the absolute resolved path as a String. Backs `fs.realpath` /
+/// `fs.realpathSync` / `fs.promises.realpath`.
+pub fn realpath_sync(path: &str, m: &Manifold) -> Result<String> {
+    let resolved = validate_read(path, &m.fs)?;
+    let canon = std::fs::canonicalize(&resolved)
+        .map_err(|e| AfterburnerError::Host(format!("fs.realpath({path}): {e}")))?;
+    Ok(canon.to_string_lossy().into_owned())
+}
+
+/// Recursively copy `src` to `dst`. Files are written byte-for-byte;
+/// directories are created on demand; nested entries recursed.
+/// `force` overwrites existing destination files (matches Node's
+/// `fs.cp({force: true})`); without `force`, existing files at the
+/// destination cause an error.
+///
+/// Both `src` and `dst` go through `validate_write` so the active
+/// FS manifold has to admit *both* paths — copying *out of* a
+/// read-only root into a read-write one is allowed (read on src,
+/// write on dst), so we use validate_read for src.
+pub fn cp_recursive(src: &str, dst: &str, force: bool, m: &Manifold) -> Result<()> {
+    let src_resolved = validate_read(src, &m.fs)?;
+    let dst_resolved = validate_write(dst, &m.fs)?;
+    cp_recursive_resolved(&src_resolved, &dst_resolved, force)
+        .map_err(|e| AfterburnerError::Host(format!("fs.cp({src} → {dst}): {e}")))
+}
+
+fn cp_recursive_resolved(src: &Path, dst: &Path, force: bool) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(src)?;
+    if meta.is_dir() {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let child_src = entry.path();
+            let child_dst = dst.join(entry.file_name());
+            cp_recursive_resolved(&child_src, &child_dst, force)?;
+        }
+    } else {
+        if dst.exists() && !force {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "destination exists and force=false",
+            ));
+        }
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(src, dst)?;
+    }
+    Ok(())
+}
+
+/// Directory entry returned by [`opendir`] / `readdirSync({withFileTypes:
+/// true})`. Carries enough info for `Dirent` to expose `isFile`/`isDirectory`/
+/// `isSymbolicLink` without a follow-up stat per entry.
+#[derive(Debug, Clone)]
+pub struct DirEntry {
+    pub name: String,
+    pub is_file: bool,
+    pub is_dir: bool,
+    pub is_symlink: bool,
+}
+
+/// Enumerate `path` and return rich entries. Backs `fs.opendir`,
+/// `fs.opendirSync`, `fs.promises.opendir`, and the `withFileTypes:
+/// true` variant of `readdir(Sync)`.
+pub fn opendir_sync(path: &str, m: &Manifold) -> Result<Vec<DirEntry>> {
+    let resolved = validate_read(path, &m.fs)?;
+    let iter = std::fs::read_dir(&resolved)
+        .map_err(|e| AfterburnerError::Host(format!("fs.opendir({path}): {e}")))?;
+    let mut out = Vec::new();
+    for entry in iter {
+        let e = entry.map_err(|e| AfterburnerError::Host(format!("fs.opendir({path}): {e}")))?;
+        let ft = e.file_type().map_err(|e| {
+            AfterburnerError::Host(format!("fs.opendir({path}): file_type {e}"))
+        })?;
+        out.push(DirEntry {
+            name: e.file_name().to_string_lossy().into_owned(),
+            is_file: ft.is_file(),
+            is_dir: ft.is_dir(),
+            is_symlink: ft.is_symlink(),
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// Watch event delivered to `fs.watch` listeners. Captures the
+/// platform-agnostic minimum: a kind tag (`rename` or `change`) and
+/// the affected file's basename relative to the watched root, matching
+/// Node's `fs.FSWatcher` 'change' event signature.
+#[derive(Debug, Clone)]
+pub struct WatchEvent {
+    pub kind: WatchKind,
+    pub filename: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum WatchKind {
+    Rename,
+    Change,
+}
+
+impl WatchKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WatchKind::Rename => "rename",
+            WatchKind::Change => "change",
+        }
+    }
+}
+
+/// Single-shot poll for changes to `path`. Compares two stat snapshots
+/// taken `interval_ms` apart and returns any deltas observed. This is
+/// the polling-based fallback fs.watch — burn never installs an
+/// inotify/kqueue/FSEvents subscription because:
+///
+/// 1. inotify file descriptors don't survive the Wasmtime instance
+///    boundary cleanly (each engine instance gets its own caps);
+/// 2. polling is platform-agnostic and works the same on every OS
+///    Wasmtime supports;
+/// 3. the audience for `fs.watch` inside burn (UDF/per-row scripts)
+///    almost never needs sub-second latency.
+///
+/// Returns `Vec<WatchEvent>` so a single host call can surface both
+/// 'rename' (mtime jump on the directory itself) and 'change' (mtime
+/// jump on a child) deltas in one envelope.
+pub fn watch_poll(
+    path: &str,
+    interval_ms: u32,
+    m: &Manifold,
+) -> Result<Vec<WatchEvent>> {
+    let resolved = validate_read(path, &m.fs)?;
+    let snap_a = snapshot_dir(&resolved);
+    std::thread::sleep(std::time::Duration::from_millis(interval_ms as u64));
+    let snap_b = snapshot_dir(&resolved);
+    Ok(diff_snapshots(&snap_a, &snap_b))
+}
+
+#[derive(Default)]
+struct DirSnapshot {
+    /// (name, mtime_ms, size, kind) per child.
+    entries: Vec<(String, u64, u64, char)>,
+}
+
+fn snapshot_dir(p: &Path) -> DirSnapshot {
+    let mut snap = DirSnapshot::default();
+    if let Ok(meta) = std::fs::metadata(p) {
+        if meta.is_file() {
+            // Single-file watch: record the file itself with its
+            // basename so diff still produces 'change' deltas.
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            snap.entries.push((name, mtime, meta.len(), 'F'));
+            return snap;
+        }
+    }
+    if let Ok(iter) = std::fs::read_dir(p) {
+        for e in iter.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let (mtime, size, kind) = match e.metadata() {
+                Ok(meta) => {
+                    let mtime = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    let kind = if meta.is_dir() {
+                        'D'
+                    } else if meta.is_file() {
+                        'F'
+                    } else {
+                        '?'
+                    };
+                    (mtime, meta.len(), kind)
+                }
+                Err(_) => (0, 0, '?'),
+            };
+            snap.entries.push((name, mtime, size, kind));
+        }
+    }
+    snap.entries.sort();
+    snap
+}
+
+fn diff_snapshots(a: &DirSnapshot, b: &DirSnapshot) -> Vec<WatchEvent> {
+    use std::collections::HashMap;
+    let map_a: HashMap<&str, &(String, u64, u64, char)> =
+        a.entries.iter().map(|e| (e.0.as_str(), e)).collect();
+    let map_b: HashMap<&str, &(String, u64, u64, char)> =
+        b.entries.iter().map(|e| (e.0.as_str(), e)).collect();
+    let mut out = Vec::new();
+    // Additions / deletions surface as 'rename' events to match Node.
+    for name in map_b.keys() {
+        if !map_a.contains_key(name) {
+            out.push(WatchEvent {
+                kind: WatchKind::Rename,
+                filename: (*name).to_string(),
+            });
+        }
+    }
+    for name in map_a.keys() {
+        if !map_b.contains_key(name) {
+            out.push(WatchEvent {
+                kind: WatchKind::Rename,
+                filename: (*name).to_string(),
+            });
+        }
+    }
+    // Mtime/size deltas on persisted entries surface as 'change'.
+    for (name, a_entry) in &map_a {
+        if let Some(b_entry) = map_b.get(name) {
+            if a_entry.1 != b_entry.1 || a_entry.2 != b_entry.2 {
+                out.push(WatchEvent {
+                    kind: WatchKind::Change,
+                    filename: (*name).to_string(),
+                });
+            }
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct FileStat {
     pub size: u64,

@@ -4,20 +4,18 @@ Source of truth for what's shipped vs. what's left in the
 `burn` runtime plan (`docs/IMPL_PLAN_BURN_RUNTIME.md`) and the
 adjacent L3 shadow plan (locked decision Q3 in that doc).
 
-**Last refreshed:** post Node 20 LTS round-2 coverage. Every Node 20.x
-LTS built-in module now has a real polyfill — `require('<name>')` for
-any name listed in `Module.builtinModules` returns a non-null object,
-no module surfaces a "not supported" stub error any more. Newly
-polyfilled in this round: `perf_hooks`, `async_hooks`, `vm`, `v8`,
-`domain`, `trace_events`, `inspector`, `wasi`, `cluster`, `repl`,
-`readline`, `tty`, `module`, `dgram`, `http2`, plus the subpaths
-`util/types`, `stream/web`, `constants`, `sys`, `path/posix`, and
-`path/win32`. Sibling crates re-exported as `afterburner::core` /
-`::wasi` / `::ignite` / `::node_compat` / `::adaptive_crate` /
-`::flow_crate` / `::thrust_crate` for users who want the full crate
-surface from the facade.
-Regenerate by hand when a phase lands; `git log --oneline` is
-authoritative if this file drifts.
+**Last refreshed:** 2026-05-03. Post crates/ reorganization (every
+member crate now lives under `crates/`; plugin .wasm collapsed into
+`crates/afterburner-wasi/plugin/` so `cargo publish` ships it
+self-contained); post B7 TLS SNI multi-cert routing
+(`tls.createSecureContext` + `Server.addContext` + `serverContexts`,
+backed by a host `rustls::server::ResolvesServerCert` impl with exact
++ wildcard SNI matching); post DNS `setServers`/`getServers` plumbed
+through every dns host fn; post CI + Release GitHub Actions workflows
+(automatic on `cargo release --execute`); post Apache-2.0 license
+consolidation. The "Remaining" table below is the authoritative
+forward ledger; `git log --oneline` is the audit trail if this file
+drifts.
 
 ---
 
@@ -84,12 +82,36 @@ extern + plugin JS global.
 
 ## Remaining — plan phases not yet shipped
 
-### Major unblocks
+Cross-referenced against `IMPL_PLAN_REMAINING_WORK.md` Phases A–I and
+the polish backlog below. Items are ordered by user-visible value.
 
-| Phase | Scope | Unblocks |
-|:--|:--|:--|
-| **B7 — `fs/promises` expansion** | `watch`, `realpath`, `cp`, `opendir`, file-descriptor APIs | File-watcher scripts, complex fs scripts |
-| **B7 — `child_process` for WASM** | WASM-side `spawn` / `exec` — currently native-only (WASM can't `fork(2)`; would need a host proxy) | Scripts that orchestrate subprocesses under the sandbox |
+| # | Item | Source | Size | State | Notes |
+|:-:|:--|:--|:-:|:-:|:--|
+| 1 | `fs/promises` expansion: `watch`, `realpath`, `cp`, `opendir`, `FileHandle` | B7 | M | ❌ | No host fns yet. Unblocks file-watcher and complex-fs scripts. |
+| 2 | `child_process` for WASM (host proxy) | B7 | L | ❌ | Native-only today; WASM can't `fork(2)`, needs an out-of-sandbox proxy layer. |
+| 3 | WIT-driven host-import codegen | IMPL_PLAN B + H | M | ❌ | Each import lives in 4 places today (wit/, host_imports.rs, plugin host_api.rs, native_install.rs); ~25+ imports. Codegen kills `docs/REVIEW.md` Smell #16. |
+| 4 | `require` Resolver cache TTLs surfaced to JS | polish | S | ❌ | Internal cache works; just not user-visible. |
+| 5 | Streaming `crypto.createHash` / `createHmac` polyfill rewrite | IMPL_PLAN A | S | ⚠️ | Host side `hash_handles.rs` shipped. Need polyfill rewrite of `crypto.js::Hash`/`Hmac` to call streaming host path with buffering fallback + 1MB-chunked-vs-one-shot regression on both backends. |
+| 6 | `dgram` (UDP) host-side coordinator | round-2 polyfills | L | ⚠️ | Surface ships; `.bind`/`.send` throw. |
+| 7 | `http2` host-side coordinator | round-2 polyfills | L | ⚠️ | Module + classes load; `.connect`/`.createServer` throw. |
+| 8 | Consolidated integration tests (Phase I top-up) | IMPL_PLAN I | S | ⚠️ | b0–b10 + b7_* + round-2 + shadow-* + wasm-loader cover most ground; Phase I lists a few extras (`tests/data_flow.rs` for `udf_batch` array shape, more `tests/event_loop.rs` cases). |
+| 9 | Configuration sweep | session backlog | S | ❌ | Audit feature gates / runtime opts for naming + defaults consistency. |
+
+**Already shipped this session that earlier docs called "remaining":**
+B7 TLS SNI multi-cert routing · B7 DNS `setServers`/`getServers` · B7 net
+`setNoDelay`/`setKeepAlive` real syscalls · B7 TLS `getPeerCertificate` /
+`getCipher` real values · WebAssembly host loader · all 5 L3 shadows ·
+Node 20 LTS round-2 polyfills · `AdaptiveCombustor` (Phase D) ·
+`BurnCacheBackend` trait (Phase G) · `HostFunction` enum +
+`BurnCache::execute_batch` (Phase C) · B10 worker_threads (process-per-worker
+— supersedes Phase F's pseudo-worker design) · TypeScript (B8) · ESM→CJS (B9).
+
+**Officially deferred / not in scope** (won't get done):
+native `.node` addons (architectural — same boundary as Cloudflare Workers) ·
+pseudo-`worker_threads` via second QuickJS context (Phase F deferred per
+IMPL_PLAN's own re-evaluation; B10 covers the real use case differently) ·
+full WASI Preview 2 component-model migration (Phase H variant b — blocked
+on upstream Wizer/component-linker convergence).
 
 ### More L3 shadows
 
@@ -154,7 +176,7 @@ two seams.
 | **B7 tls** | `socket.getPeerCertificate()` returns the real chain | S | ✅ shipped — DER bytes + colon-hex SHA-256 fingerprint. `getPeerCertChain()` for the full chain. |
 | **B7 tls** | `socket.getCipher()` returns the real negotiated suite | S | ✅ shipped — IANA-normalized name (rustls' `TLS13_*` mapped to `TLS_*`). |
 | **B7 tls** | Server-side SNI multi-cert routing (cert callback) | M | ✅ shipped — `tls.createSecureContext({cert, key})`, `Server.addContext(servername, ctx)`, and the `serverContexts` ctor option. Host installs a `rustls::server::ResolvesServerCert` impl (`SniResolver`) that matches ClientHello `server_name` exactly first, then via single-label wildcards (`*.example.com`), and falls through to the default cert. |
-| **B7 dns** | `Resolver.setServers([...])` actually plumbs through to hickory | M | Larger than initially sized — needs a server-list parameter plumbed through 7 dns functions × {host coord, host import, plugin bridge, polyfill}. Still pending. |
+| **B7 dns** | `Resolver.setServers([...])` actually plumbs through to hickory | M | ✅ shipped — `(servers_csv)` parameter threaded through all 7 dns host functions (resolve4/6/mx/txt/cname/ns/reverse) on both wasm and native paths; module-level `dns.setServers/getServers` plus per-`Resolver` instance methods. Resolver-rebuild-per-call keeps the host coord lock-free. |
 | **B7 net** | `socket.setNoDelay` / `setKeepAlive` actually toggle the flags | S | ✅ shipped — `tokio::net::TcpStream::set_nodelay` for `TCP_NODELAY`, `socket2::SockRef::set_tcp_keepalive` for `SO_KEEPALIVE` + idle timer. |
 | **B6 require** | `Resolver` cache control / TTLs surface to JS | S | Internal cache works; not user-visible. |
 | **A11 — ergonomics** | `process.binding(*)` clear-error messages | XS | ✅ shipped — `process.binding('tcp_wrap')` now throws with the requested binding name in the message and `err.bindingName`. `_linkedBinding` symmetric. |

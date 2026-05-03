@@ -173,6 +173,87 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
     )
     .map_err(err_to_ab)?;
 
+    g.set(
+        "__host_fs_realpath_sync",
+        Function::new(ctx.clone(), |ctx: Ctx<'_>, path: String| {
+            active_manifold::with(|m| fs_host::realpath_sync(&path, m))
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))
+        })
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_fs_cp",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, src: String, dst: String, force: Option<bool>| {
+                active_manifold::with(|m| {
+                    fs_host::cp_recursive(&src, &dst, force.unwrap_or(false), m)
+                })
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                Ok::<_, rquickjs::Error>(())
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_fs_opendir_sync",
+        Function::new(ctx.clone(), |ctx: Ctx<'_>, path: String| {
+            let entries = active_manifold::with(|m| fs_host::opendir_sync(&path, m))
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+            // Marshal to a JSON string so the polyfill's parsing path is
+            // identical between native and WASM. JSON.parse on the JS
+            // side rebuilds the array of `{name, isFile, isDir, isSymlink}`.
+            let mut json = String::from("[");
+            for (i, e) in entries.iter().enumerate() {
+                if i > 0 {
+                    json.push(',');
+                }
+                json.push_str(&format!(
+                    "{{\"name\":{},\"isFile\":{},\"isDir\":{},\"isSymlink\":{}}}",
+                    js_string_literal(&e.name),
+                    e.is_file,
+                    e.is_dir,
+                    e.is_symlink
+                ));
+            }
+            json.push(']');
+            Ok::<_, rquickjs::Error>(json)
+        })
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_fs_watch_poll",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, path: String, interval_ms: f64| {
+                let interval = interval_ms.max(0.0) as u32;
+                let events = active_manifold::with(|m| fs_host::watch_poll(&path, interval, m))
+                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                let mut json = String::from("[");
+                for (i, e) in events.iter().enumerate() {
+                    if i > 0 {
+                        json.push(',');
+                    }
+                    json.push_str(&format!(
+                        "{{\"kind\":{},\"filename\":{}}}",
+                        js_string_literal(e.kind.as_str()),
+                        js_string_literal(&e.filename)
+                    ));
+                }
+                json.push(']');
+                Ok::<_, rquickjs::Error>(json)
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
     // ---- crypto ----------------------------------------------------------
     g.set(
         "__host_crypto_hash",
