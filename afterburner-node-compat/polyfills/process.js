@@ -63,7 +63,39 @@
 
         stdout: { write: function(s) { if (globalThis.console) console.log(String(s)); return true; } },
         stderr: { write: function(s) { if (globalThis.console) console.error(String(s)); return true; } },
-        stdin:  { on: function() {}, read: function() { return null; } }
+        stdin:  { on: function() {}, read: function() { return null; } },
+
+        // `process.binding(name)` is Node's internal hook for native
+        // bindings (e.g. `process.binding('uv')`, `'tcp_wrap'`,
+        // `'fs_event_wrap'`). They expose libuv-side primitives
+        // that have no analogue in the WASM sandbox. Surface a
+        // clear error that names the requested binding so users
+        // can identify which library is reaching for an
+        // unsupported internal.
+        binding: function(name) {
+            var which = typeof name === 'string' ? name : String(name);
+            var err = new Error(
+                "process.binding('" + which + "') is not supported in the " +
+                "Afterburner sandbox: native bindings (libuv internals, " +
+                ".node addons) cannot run in WASM. See " +
+                "docs/STATUS.md → 'Why we cannot run .node addons inside the sandbox'."
+            );
+            err.code = 'ERR_NOT_SUPPORTED_IN_SANDBOX';
+            err.bindingName = which;
+            throw err;
+        },
+
+        // Same surface as `process.binding` but for the post-Node-16
+        // internal-only API.
+        _linkedBinding: function(name) {
+            var err = new Error(
+                "process._linkedBinding('" + String(name) + "') is not " +
+                "supported in the Afterburner sandbox"
+            );
+            err.code = 'ERR_NOT_SUPPORTED_IN_SANDBOX';
+            err.bindingName = String(name);
+            throw err;
+        }
     };
 
     fields.hrtime.bigint = function() {

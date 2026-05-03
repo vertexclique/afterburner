@@ -439,6 +439,159 @@ fn alpn_echo_negotiates_protocol() {
 }
 
 #[test]
+#[serial]
+fn get_peer_certificate_returns_real_chain() {
+    // After the handshake, `socket.getPeerCertificate()` returns the
+    // server's leaf certificate (DER bytes + sha256 fingerprint).
+    // Verify the bytes match what we generated.
+    let certs = make_test_certs();
+    let port = spawn_tls_echo_server(&certs);
+    let expected_der_b64 = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(certs.cert_der.as_ref())
+    };
+    let parent = format!(
+        r#"
+            const tls = require('tls');
+            const {{ Buffer }} = require('buffer');
+            const sock = tls.connect({{
+                port: {port},
+                host: '127.0.0.1',
+                servername: 'localhost',
+                rejectUnauthorized: false,
+            }});
+            sock.on('secureConnect', () => {{
+                const cert = sock.getPeerCertificate();
+                if (!cert.raw || !Buffer.isBuffer(cert.raw)) {{
+                    console.error('no raw'); process.exit(2);
+                }}
+                if (cert.raw.toString('base64') !== {expected_der_b64:?}) {{
+                    console.error('cert DER mismatch'); process.exit(3);
+                }}
+                if (typeof cert.fingerprint256 !== 'string' || !/^[A-F0-9:]+$/.test(cert.fingerprint256)) {{
+                    console.error('bad fingerprint:', cert.fingerprint256); process.exit(4);
+                }}
+                console.log('PEER_CERT_OK fp=' + cert.fingerprint256.slice(0, 11));
+                sock.end();
+            }});
+            sock.on('close', () => process.exit(0));
+            sock.on('error', (e) => {{
+                console.error('client error:', e.message); process.exit(5);
+            }});
+            setTimeout(() => process.exit(99), 8000);
+        "#
+    );
+    let out = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .args(["-A", "-e", &parent])
+        .output()
+        .expect("spawn burn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stdout.contains("PEER_CERT_OK fp="), "stdout:\n{stdout}");
+}
+
+#[test]
+#[serial]
+fn get_cipher_returns_negotiated_suite_name() {
+    // rustls negotiates a TLS 1.3 suite by default; the IANA name
+    // surfaces as `cipher.name`. We assert the shape (name + version)
+    // rather than a specific suite to avoid pinning to one kernel /
+    // platform.
+    let certs = make_test_certs();
+    let port = spawn_tls_echo_server(&certs);
+    let parent = format!(
+        r#"
+            const tls = require('tls');
+            const sock = tls.connect({{
+                port: {port},
+                host: '127.0.0.1',
+                servername: 'localhost',
+                rejectUnauthorized: false,
+            }});
+            sock.on('secureConnect', () => {{
+                const c = sock.getCipher();
+                if (typeof c.name !== 'string' || c.name === 'unknown') {{
+                    console.error('cipher name:', c.name); process.exit(2);
+                }}
+                if (!/^TLS_/.test(c.name)) {{
+                    console.error('cipher name not IANA-shaped:', c.name); process.exit(3);
+                }}
+                if (c.standardName !== c.name) {{
+                    console.error('standardName mismatch:', c.standardName, c.name); process.exit(4);
+                }}
+                if (!/^TLSv1\./.test(c.version)) {{
+                    console.error('version:', c.version); process.exit(5);
+                }}
+                console.log('CIPHER_OK name=' + c.name + ' version=' + c.version);
+                sock.end();
+            }});
+            sock.on('close', () => process.exit(0));
+            sock.on('error', (e) => {{
+                console.error(e.message); process.exit(6);
+            }});
+            setTimeout(() => process.exit(99), 8000);
+        "#
+    );
+    let out = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .args(["-A", "-e", &parent])
+        .output()
+        .expect("spawn burn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stdout.contains("CIPHER_OK name=TLS_"), "stdout:\n{stdout}");
+}
+
+#[test]
+#[serial]
+fn get_peer_cert_chain_returns_full_chain() {
+    // For our self-signed test cert the chain is length 1; assert
+    // `getPeerCertChain()` exposes that uniform shape.
+    let certs = make_test_certs();
+    let port = spawn_tls_echo_server(&certs);
+    let parent = format!(
+        r#"
+            const tls = require('tls');
+            const {{ Buffer }} = require('buffer');
+            const sock = tls.connect({{
+                port: {port},
+                host: '127.0.0.1',
+                servername: 'localhost',
+                rejectUnauthorized: false,
+            }});
+            sock.on('secureConnect', () => {{
+                const chain = sock.getPeerCertChain();
+                if (!Array.isArray(chain) || chain.length < 1) {{
+                    console.error('chain length:', chain.length); process.exit(2);
+                }}
+                if (!Buffer.isBuffer(chain[0].raw)) {{
+                    console.error('chain[0].raw not Buffer'); process.exit(3);
+                }}
+                console.log('CHAIN_OK len=' + chain.length);
+                sock.end();
+            }});
+            sock.on('close', () => process.exit(0));
+            sock.on('error', (e) => {{
+                console.error(e.message); process.exit(4);
+            }});
+            setTimeout(() => process.exit(99), 8000);
+        "#
+    );
+    let out = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .args(["-A", "-e", &parent])
+        .output()
+        .expect("spawn burn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stdout.contains("CHAIN_OK len=1"), "stdout:\n{stdout}");
+}
+
+#[test]
 fn ip_helpers() {
     // tls.isIP* re-exports net's helpers — quick smoke test.
     let parent = r#"

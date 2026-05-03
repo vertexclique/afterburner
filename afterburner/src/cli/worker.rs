@@ -395,18 +395,31 @@ fn tls_event_to_envelope(evt: &TlsEvent) -> (serde_json::Value, Option<i32>) {
             alpn_protocol,
             protocol,
             authorized,
-        } => (
-            serde_json::json!({
-                "kind": "tls-connect",
-                "conn_id": conn_id,
-                "local": addr_json(local),
-                "remote": addr_json(remote),
-                "alpn_protocol": alpn_protocol,
-                "protocol": protocol,
-                "authorized": authorized,
-            }),
-            None,
-        ),
+            cipher,
+            peer_cert_chain_der,
+        } => {
+            use base64::Engine as _;
+            let chain: Vec<serde_json::Value> = peer_cert_chain_der
+                .iter()
+                .map(|d| serde_json::Value::String(
+                    base64::engine::general_purpose::STANDARD.encode(d),
+                ))
+                .collect();
+            (
+                serde_json::json!({
+                    "kind": "tls-connect",
+                    "conn_id": conn_id,
+                    "local": addr_json(local),
+                    "remote": addr_json(remote),
+                    "alpn_protocol": alpn_protocol,
+                    "protocol": protocol,
+                    "authorized": authorized,
+                    "cipher": cipher,
+                    "peer_cert_chain_der_b64": chain,
+                }),
+                None,
+            )
+        }
         TlsEvent::Connection {
             server_id,
             conn_id,
@@ -414,18 +427,31 @@ fn tls_event_to_envelope(evt: &TlsEvent) -> (serde_json::Value, Option<i32>) {
             remote,
             alpn_protocol,
             protocol,
-        } => (
-            serde_json::json!({
-                "kind": "tls-connection",
-                "server_id": server_id,
-                "conn_id": conn_id,
-                "local": addr_json(local),
-                "remote": addr_json(remote),
-                "alpn_protocol": alpn_protocol,
-                "protocol": protocol,
-            }),
-            None,
-        ),
+            cipher,
+            peer_cert_chain_der,
+        } => {
+            use base64::Engine as _;
+            let chain: Vec<serde_json::Value> = peer_cert_chain_der
+                .iter()
+                .map(|d| serde_json::Value::String(
+                    base64::engine::general_purpose::STANDARD.encode(d),
+                ))
+                .collect();
+            (
+                serde_json::json!({
+                    "kind": "tls-connection",
+                    "server_id": server_id,
+                    "conn_id": conn_id,
+                    "local": addr_json(local),
+                    "remote": addr_json(remote),
+                    "alpn_protocol": alpn_protocol,
+                    "protocol": protocol,
+                    "cipher": cipher,
+                    "peer_cert_chain_der_b64": chain,
+                }),
+                None,
+            )
+        }
         TlsEvent::Data { conn_id, payload_b64 } => (
             serde_json::json!({
                 "kind": "tls-data",

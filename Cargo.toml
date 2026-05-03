@@ -125,6 +125,14 @@ hickory-resolver = { version = "0.24", default-features = false, features = [
     "tokio-runtime", "system-config",
 ] }
 
+# `socket2` is the canonical low-level socket-options crate; we use
+# its `SockRef::from(&tokio::net::TcpStream)` to actually toggle
+# TCP_NODELAY / SO_KEEPALIVE on a tokio-owned socket without
+# detaching the stream. tokio itself exposes set_nodelay but no
+# keepalive knob, hence this dep. Gated behind `daemon` since net /
+# tls are the only callers.
+socket2 = { version = "0.5", features = ["all"] }
+
 rquickjs = { version = "0.11", features = ["bindgen"] }
 
 fastrace = { version = "0.7", features = ["enable"] }

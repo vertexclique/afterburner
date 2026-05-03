@@ -445,6 +445,8 @@ fn tls_event_to_envelope(evt: &TlsEvent) -> (serde_json::Value, Option<i32>) {
             alpn_protocol,
             protocol,
             authorized,
+            cipher,
+            peer_cert_chain_der,
         } => (
             serde_json::json!({
                 "kind": "tls-connect",
@@ -454,6 +456,8 @@ fn tls_event_to_envelope(evt: &TlsEvent) -> (serde_json::Value, Option<i32>) {
                 "alpn_protocol": alpn_protocol,
                 "protocol": protocol,
                 "authorized": authorized,
+                "cipher": cipher,
+                "peer_cert_chain_der_b64": cert_chain_to_b64(peer_cert_chain_der),
             }),
             None,
         ),
@@ -464,6 +468,8 @@ fn tls_event_to_envelope(evt: &TlsEvent) -> (serde_json::Value, Option<i32>) {
             remote,
             alpn_protocol,
             protocol,
+            cipher,
+            peer_cert_chain_der,
         } => (
             serde_json::json!({
                 "kind": "tls-connection",
@@ -473,6 +479,8 @@ fn tls_event_to_envelope(evt: &TlsEvent) -> (serde_json::Value, Option<i32>) {
                 "remote": addr_json(remote),
                 "alpn_protocol": alpn_protocol,
                 "protocol": protocol,
+                "cipher": cipher,
+                "peer_cert_chain_der_b64": cert_chain_to_b64(peer_cert_chain_der),
             }),
             None,
         ),
@@ -540,6 +548,23 @@ fn addr_json(addr: &Option<std::net::SocketAddr>) -> serde_json::Value {
         }
         None => serde_json::Value::Null,
     }
+}
+
+/// Encode a TLS peer-cert chain (each entry DER-encoded) as a JSON
+/// array of base64 strings. The polyfill pulls this out of the
+/// `tls-connect` envelope, parses out subject/fingerprint/etc, and
+/// surfaces it through `socket.getPeerCertificate()`.
+fn cert_chain_to_b64(chain: &[Vec<u8>]) -> serde_json::Value {
+    use base64::Engine as _;
+    let arr: Vec<serde_json::Value> = chain
+        .iter()
+        .map(|der| {
+            serde_json::Value::String(
+                base64::engine::general_purpose::STANDARD.encode(der),
+            )
+        })
+        .collect();
+    serde_json::Value::Array(arr)
 }
 
 /// Translate a [`WorkerEvent`] into the daemon-event envelope shape

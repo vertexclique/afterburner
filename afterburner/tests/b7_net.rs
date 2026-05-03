@@ -248,18 +248,83 @@ fn destroy_kills_connection() {
 #[test]
 #[serial]
 fn set_no_delay_and_keep_alive_no_throw() {
+    // Both calls go through the host coordinator → socket2 →
+    // setsockopt path now (previously they were best-effort no-ops).
+    // The test passes if (a) no 'error' event fires, (b) the
+    // connection still works for reading + writing afterwards.
+    let (port, _server) = spawn_echo_server();
+    let parent = format!(
+        r#"
+            const net = require('net');
+            const sock = net.connect({{ port: {port}, host: '127.0.0.1' }});
+            let errored = false;
+            sock.on('error', (e) => {{
+                errored = true;
+                console.error('unexpected error:', e.code, e.message);
+            }});
+            sock.on('connect', () => {{
+                sock.setNoDelay(true);
+                sock.setKeepAlive(true, 10000);
+                // Round-trip a tiny payload after toggling options to
+                // prove the connection is still healthy.
+                sock.write('post-opts');
+            }});
+            sock.on('data', (chunk) => {{
+                if (chunk.toString('utf8') === 'post-opts' && !errored) {{
+                    console.log('OPTS_OK');
+                }} else {{
+                    console.error('echo mismatch:', chunk.toString('utf8'));
+                    process.exit(2);
+                }}
+                sock.end();
+            }});
+            sock.on('close', () => process.exit(errored ? 3 : 0));
+            setTimeout(() => process.exit(99), 5000);
+        "#
+    );
+    let out = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .args(["-A", "-e", &parent])
+        .output()
+        .expect("spawn burn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("OPTS_OK"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn set_no_delay_disable_then_re_enable() {
+    // Toggle TCP_NODELAY off, then back on, then verify the
+    // connection still echoes correctly. Catches any case where the
+    // flag flip leaves the stream in a bad state.
     let (port, _server) = spawn_echo_server();
     let parent = format!(
         r#"
             const net = require('net');
             const sock = net.connect({{ port: {port}, host: '127.0.0.1' }});
             sock.on('connect', () => {{
-                sock.setNoDelay(true);
-                sock.setKeepAlive(true, 10000);
-                console.log('OPTS_OK');
-                sock.end();
+                sock.setNoDelay(false);  // explicit disable
+                sock.setNoDelay(true);   // re-enable
+                sock.write('toggle-test');
+            }});
+            sock.on('data', (chunk) => {{
+                if (chunk.toString('utf8') === 'toggle-test') {{
+                    console.log('TOGGLE_OK');
+                    sock.end();
+                }}
             }});
             sock.on('close', () => process.exit(0));
+            sock.on('error', (e) => {{
+                console.error('error:', e.message); process.exit(2);
+            }});
             setTimeout(() => process.exit(99), 5000);
         "#
     );
@@ -270,7 +335,48 @@ fn set_no_delay_and_keep_alive_no_throw() {
         .expect("spawn burn");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "stdout:\n{stdout}");
-    assert!(stdout.contains("OPTS_OK"), "stdout: {stdout}");
+    assert!(stdout.contains("TOGGLE_OK"), "stdout: {stdout}");
+}
+
+#[test]
+#[serial]
+fn set_keep_alive_with_short_delay_does_not_disconnect() {
+    // SO_KEEPALIVE with a short idle (1s) should configure the
+    // option without immediately tearing the connection down. We
+    // round-trip a payload after waiting > the idle to prove the
+    // socket survives.
+    let (port, _server) = spawn_echo_server();
+    let parent = format!(
+        r#"
+            const net = require('net');
+            const sock = net.connect({{ port: {port}, host: '127.0.0.1' }});
+            sock.on('connect', () => {{
+                sock.setKeepAlive(true, 1000);
+                // Wait briefly so the option is in effect, then
+                // exchange data.
+                setTimeout(() => sock.write('post-keepalive'), 1500);
+            }});
+            sock.on('data', (chunk) => {{
+                if (chunk.toString('utf8') === 'post-keepalive') {{
+                    console.log('KEEPALIVE_OK');
+                    sock.end();
+                }}
+            }});
+            sock.on('close', () => process.exit(0));
+            sock.on('error', (e) => {{
+                console.error('error:', e.message); process.exit(2);
+            }});
+            setTimeout(() => process.exit(99), 8000);
+        "#
+    );
+    let out = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .args(["-A", "-e", &parent])
+        .output()
+        .expect("spawn burn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "stdout:\n{stdout}");
+    assert!(stdout.contains("KEEPALIVE_OK"), "stdout: {stdout}");
 }
 
 #[test]

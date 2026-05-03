@@ -3488,7 +3488,39 @@ __register_module('path', function(module, exports, require) {
 
         stdout: { write: function(s) { if (globalThis.console) console.log(String(s)); return true; } },
         stderr: { write: function(s) { if (globalThis.console) console.error(String(s)); return true; } },
-        stdin:  { on: function() {}, read: function() { return null; } }
+        stdin:  { on: function() {}, read: function() { return null; } },
+
+        // `process.binding(name)` is Node's internal hook for native
+        // bindings (e.g. `process.binding('uv')`, `'tcp_wrap'`,
+        // `'fs_event_wrap'`). They expose libuv-side primitives
+        // that have no analogue in the WASM sandbox. Surface a
+        // clear error that names the requested binding so users
+        // can identify which library is reaching for an
+        // unsupported internal.
+        binding: function(name) {
+            var which = typeof name === 'string' ? name : String(name);
+            var err = new Error(
+                "process.binding('" + which + "') is not supported in the " +
+                "Afterburner sandbox: native bindings (libuv internals, " +
+                ".node addons) cannot run in WASM. See " +
+                "docs/STATUS.md → 'Why we cannot run .node addons inside the sandbox'."
+            );
+            err.code = 'ERR_NOT_SUPPORTED_IN_SANDBOX';
+            err.bindingName = which;
+            throw err;
+        },
+
+        // Same surface as `process.binding` but for the post-Node-16
+        // internal-only API.
+        _linkedBinding: function(name) {
+            var err = new Error(
+                "process._linkedBinding('" + String(name) + "') is not " +
+                "supported in the Afterburner sandbox"
+            );
+            err.code = 'ERR_NOT_SUPPORTED_IN_SANDBOX';
+            err.bindingName = String(name);
+            throw err;
+        }
     };
 
     fields.hrtime.bigint = function() {
@@ -5601,7 +5633,9 @@ __register_module('tls', function(module, exports, require) {
         globalThis.__ab_tls_handlers[this._connId] = this;
     };
 
-    TLSSocket.prototype._dispatchSecureConnect = function(local, remote, alpn, protocol, authorized) {
+    TLSSocket.prototype._dispatchSecureConnect = function(
+        local, remote, alpn, protocol, authorized, cipher, certChainB64
+    ) {
         this._connecting = false;
         this.readyState = 'open';
         this.localAddress = local && local.address;
@@ -5611,6 +5645,8 @@ __register_module('tls', function(module, exports, require) {
         this.remoteFamily = remote && remote.family;
         this.alpnProtocol = alpn || null;
         this._protocol = protocol || null;
+        this._cipher = cipher || null;
+        this._peerCertChainB64 = Array.isArray(certChainB64) ? certChainB64 : [];
         this.authorized = !!authorized;
         if (!this.authorized) {
             this.authorizationError = new Error(
@@ -5804,17 +5840,79 @@ __register_module('tls', function(module, exports, require) {
     };
 
     TLSSocket.prototype.getCipher = function() {
-        // rustls doesn't expose cipher name through the post-handshake
-        // ConnectionCommon API in a stable form across versions; we
-        // surface the negotiated TLS protocol instead, leaving the
-        // cipher object as a best-effort placeholder shaped like
-        // Node's. Real cipher introspection can land in a follow-up.
-        return { name: 'unknown', standardName: 'unknown', version: this._protocol || '' };
+        // The IANA cipher-suite name comes from rustls'
+        // `negotiated_cipher_suite()` and is the same string Node's
+        // `getCipher()` returns for `name` / `standardName`.
+        var name = this._cipher || 'unknown';
+        return {
+            name: name,
+            standardName: name,
+            version: this._protocol || '',
+        };
     };
 
-    TLSSocket.prototype.getPeerCertificate = function() {
-        return {};
+    /// Return the leaf peer certificate, shaped close enough to Node
+    /// for the common assertions:
+    ///   { raw: Buffer, fingerprint256: '...' }
+    /// Subject/issuer parsing requires full ASN.1 — out of scope for
+    /// the minimum subset; callers needing those fields can parse
+    /// `raw` themselves.
+    TLSSocket.prototype.getPeerCertificate = function(detailed) {
+        var chain = this._peerCertChainB64 || [];
+        if (chain.length === 0) return {};
+        var raw = Buffer.from(chain[0], 'base64');
+        var cert = {
+            raw: raw,
+            fingerprint256: sha256Fingerprint(raw),
+            subject: {},
+            issuer: {},
+            valid_from: '',
+            valid_to: '',
+        };
+        if (detailed && chain.length > 1) {
+            cert.issuerCertificate = (function makeIssuer(rest) {
+                if (rest.length === 0) return undefined;
+                var rawIssuer = Buffer.from(rest[0], 'base64');
+                return {
+                    raw: rawIssuer,
+                    fingerprint256: sha256Fingerprint(rawIssuer),
+                    subject: {},
+                    issuer: {},
+                    issuerCertificate: makeIssuer(rest.slice(1)),
+                };
+            })(chain.slice(1));
+        }
+        return cert;
     };
+
+    /// Return the entire leaf-first peer certificate chain as an
+    /// array of `{raw, fingerprint256}` objects. Convenient when
+    /// callers need to walk every cert; mirrors Node's `getPeerX509Certificate()`
+    /// shape.
+    TLSSocket.prototype.getPeerCertChain = function() {
+        var chain = this._peerCertChainB64 || [];
+        return chain.map(function(b64) {
+            var raw = Buffer.from(b64, 'base64');
+            return { raw: raw, fingerprint256: sha256Fingerprint(raw) };
+        });
+    };
+
+    function sha256Fingerprint(buf) {
+        // Node returns colon-separated uppercase hex (`AA:BB:...`).
+        // We prefer this format because real-world certificate
+        // pinning code matches it byte-for-byte.
+        try {
+            var crypto = require('crypto');
+            var hash = crypto.createHash('sha256').update(buf).digest('hex');
+            var out = [];
+            for (var i = 0; i < hash.length; i += 2) {
+                out.push(hash.slice(i, i + 2).toUpperCase());
+            }
+            return out.join(':');
+        } catch (_) {
+            return '';
+        }
+    }
 
     Object.defineProperty(TLSSocket.prototype, 'destroyed', {
         get: function() { return this._destroyed; },
@@ -5942,7 +6040,9 @@ __register_module('tls', function(module, exports, require) {
         try { this.emit('listening'); } catch (_) {}
     };
 
-    Server.prototype._dispatchConnection = function(connId, local, remote, alpn, protocol) {
+    Server.prototype._dispatchConnection = function(
+        connId, local, remote, alpn, protocol, cipher, certChainB64
+    ) {
         var sock = new TLSSocket();
         sock._attach(connId | 0);
         sock._connecting = false;
@@ -5954,6 +6054,8 @@ __register_module('tls', function(module, exports, require) {
         sock.remoteFamily = remote && remote.family;
         sock.alpnProtocol = alpn || null;
         sock._protocol = protocol || null;
+        sock._cipher = cipher || null;
+        sock._peerCertChainB64 = Array.isArray(certChainB64) ? certChainB64 : [];
         sock.authorized = false; // server side never verifies client by default
         var self = this;
         this._connections.add(sock);

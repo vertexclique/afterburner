@@ -105,6 +105,14 @@ pub enum TlsEvent {
         alpn_protocol: Option<String>,
         protocol: Option<String>,
         authorized: bool,
+        /// IANA cipher-suite name (e.g. `TLS_AES_256_GCM_SHA384`).
+        /// `None` if rustls couldn't supply one (shouldn't happen
+        /// post-handshake but defensively typed).
+        cipher: Option<String>,
+        /// Server's certificate chain, leaf-first, DER-encoded.
+        /// Empty for client-cert-not-presented or
+        /// `rejectUnauthorized: false` paths that didn't populate it.
+        peer_cert_chain_der: Vec<Vec<u8>>,
     },
     Connection {
         server_id: TlsServerId,
@@ -113,6 +121,10 @@ pub enum TlsEvent {
         remote: Option<SocketAddr>,
         alpn_protocol: Option<String>,
         protocol: Option<String>,
+        cipher: Option<String>,
+        /// Client cert chain when the server requested one. Empty
+        /// when no client auth was configured (the default).
+        peer_cert_chain_der: Vec<Vec<u8>>,
     },
     Data {
         conn_id: TlsConnId,
@@ -399,7 +411,7 @@ impl DaemonTls {
         stream: tokio_rustls::server::TlsStream<TcpStream>,
         local: Option<SocketAddr>,
         remote: Option<SocketAddr>,
-    ) -> (TlsConnId, Option<String>, Option<String>) {
+    ) -> (TlsConnId, Option<String>, Option<String>, Option<String>, Vec<Vec<u8>>) {
         let conn_id = self.next_conn_id.fetch_add(1, Ordering::Relaxed);
         let (write_tx, write_rx) = unbounded_channel::<WriteCmd>();
         let pending = Arc::new(AtomicUsize::new(0));
@@ -412,6 +424,14 @@ impl DaemonTls {
             .alpn_protocol()
             .map(|b| String::from_utf8_lossy(b).into_owned());
         let protocol = conn_state.protocol_version().map(protocol_label);
+        let cipher = conn_state
+            .negotiated_cipher_suite()
+            .and_then(|cs| cs.suite().as_str())
+            .map(normalize_cipher_name);
+        let peer_certs = conn_state
+            .peer_certificates()
+            .map(|chain| chain.iter().map(|c| c.as_ref().to_vec()).collect::<Vec<_>>())
+            .unwrap_or_default();
 
         let abort = self
             .runtime
@@ -435,7 +455,7 @@ impl DaemonTls {
         self.conns.insert(conn_id, handle);
         self.alive_conns.fetch_add(1, Ordering::Release);
         let _ = (local, remote);
-        (conn_id, alpn, protocol)
+        (conn_id, alpn, protocol, cipher, peer_certs)
     }
 }
 
@@ -601,6 +621,19 @@ impl ServerCertVerifier for NoVerify {
     }
 }
 
+/// Translate rustls' internal cipher-suite identifier into the
+/// IANA-standard name that Node's `socket.getCipher()` returns.
+/// rustls names TLS 1.3 suites as `TLS13_AES_256_GCM_SHA384` etc.;
+/// the canonical IANA / Node form drops the `13` prefix to
+/// `TLS_AES_256_GCM_SHA384`. TLS 1.2 names already match.
+fn normalize_cipher_name(rustls_name: &'static str) -> String {
+    if let Some(rest) = rustls_name.strip_prefix("TLS13_") {
+        format!("TLS_{rest}")
+    } else {
+        rustls_name.to_string()
+    }
+}
+
 fn protocol_label(v: rustls::ProtocolVersion) -> String {
     use rustls::ProtocolVersion::*;
     match v {
@@ -685,12 +718,22 @@ async fn client_task(
 
     let alpn_protocol;
     let protocol;
+    let cipher;
+    let peer_cert_chain_der;
     {
         let (_, conn_state) = stream.get_ref();
         alpn_protocol = conn_state
             .alpn_protocol()
             .map(|b| String::from_utf8_lossy(b).into_owned());
         protocol = conn_state.protocol_version().map(protocol_label);
+        cipher = conn_state
+            .negotiated_cipher_suite()
+            .and_then(|cs| cs.suite().as_str())
+            .map(normalize_cipher_name);
+        peer_cert_chain_der = conn_state
+            .peer_certificates()
+            .map(|chain| chain.iter().map(|c| c.as_ref().to_vec()).collect::<Vec<_>>())
+            .unwrap_or_default();
     }
     evt_tx.send(TlsEvent::Connect {
         conn_id,
@@ -699,6 +742,8 @@ async fn client_task(
         alpn_protocol,
         protocol,
         authorized: opts.reject_unauthorized,
+        cipher,
+        peer_cert_chain_der,
     });
 
     drive_client_socket(conn_id, stream, write_rx, wake, pending, evt_tx).await;
@@ -758,7 +803,8 @@ async fn server_task(
                     return;
                 }
             };
-            let (conn_id, alpn_protocol, protocol) = coord2.register_accepted(tls, local, remote);
+            let (conn_id, alpn_protocol, protocol, cipher, peer_cert_chain_der) =
+                coord2.register_accepted(tls, local, remote);
             evt_tx2.send(TlsEvent::Connection {
                 server_id,
                 conn_id,
@@ -766,6 +812,8 @@ async fn server_task(
                 remote,
                 alpn_protocol,
                 protocol,
+                cipher,
+                peer_cert_chain_der,
             });
         });
     }

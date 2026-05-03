@@ -159,6 +159,15 @@ struct ListenerHandle {
 enum WriteCmd {
     Bytes(Vec<u8>),
     End,
+    /// `socket.setNoDelay(enable)` — toggles `TCP_NODELAY`. We route
+    /// it through the same queue as writes so the option flip can't
+    /// race with bytes already in flight (the worker task is the
+    /// single owner of the stream).
+    SetNoDelay(bool),
+    /// `socket.setKeepAlive(enable[, initialDelayMs])`. `delay_ms` is
+    /// the idle interval before the first keep-alive probe; ignored
+    /// when `enable` is false.
+    SetKeepAlive { enable: bool, delay_ms: i32 },
 }
 
 pub struct DaemonNet {
@@ -299,16 +308,26 @@ impl DaemonNet {
         0
     }
 
-    pub fn set_no_delay(&self, _conn_id: ConnId, _enable: bool) -> i32 {
-        // Best-effort no-op for the minimum subset. DB drivers call
-        // this defensively but don't depend on it. Wiring TCP_NODELAY
-        // through `socket2` is straightforward future work — see the
-        // B7b ticket.
+    pub fn set_no_delay(&self, conn_id: ConnId, enable: bool) -> i32 {
+        // Cross to the worker thread that owns the TcpStream. The
+        // option flip happens in `drive_socket` via tokio's
+        // `set_nodelay` (which itself goes through `setsockopt`).
+        let Some(handle) = self.conns.get(&conn_id) else {
+            return errors::E_BAD_ID;
+        };
+        handle.write_tx.send(WriteCmd::SetNoDelay(enable));
+        handle.wake.notify_one();
         0
     }
 
-    pub fn set_keep_alive(&self, _conn_id: ConnId, _enable: bool, _delay_ms: i32) -> i32 {
-        // Same posture as `set_no_delay`.
+    pub fn set_keep_alive(&self, conn_id: ConnId, enable: bool, delay_ms: i32) -> i32 {
+        let Some(handle) = self.conns.get(&conn_id) else {
+            return errors::E_BAD_ID;
+        };
+        handle
+            .write_tx
+            .send(WriteCmd::SetKeepAlive { enable, delay_ms });
+        handle.wake.notify_one();
         0
     }
 
@@ -591,6 +610,47 @@ async fn drive_socket(
                 WriteCmd::End => {
                     let _ = write_half.shutdown().await;
                     writer_open = false;
+                }
+                WriteCmd::SetNoDelay(enable) => {
+                    // tokio's TcpStream exposes set_nodelay; we get
+                    // back to the underlying stream via OwnedWriteHalf::as_ref.
+                    if let Err(e) = write_half.as_ref().set_nodelay(enable) {
+                        // Log via error event but don't tear the
+                        // connection down — `setNoDelay` is advisory
+                        // in Node and shouldn't kill the socket.
+                        evt_tx.send(NetEvent::Error {
+                            conn_id,
+                            message: format!("set_nodelay({enable}): {e}"),
+                            code: io_error_code(&e),
+                        });
+                    }
+                }
+                WriteCmd::SetKeepAlive { enable, delay_ms } => {
+                    use socket2::{SockRef, TcpKeepalive};
+                    use std::time::Duration;
+                    let sock = SockRef::from(write_half.as_ref());
+                    let result: std::io::Result<()> = if enable {
+                        // Build a keepalive config with the requested
+                        // initial idle. Node's `setKeepAlive(true, ms)`
+                        // documents `ms` as the time before the first
+                        // probe — that maps to TCP_KEEPIDLE on Linux,
+                        // which is what `with_time` controls.
+                        let mut ka = TcpKeepalive::new();
+                        if delay_ms > 0 {
+                            ka = ka.with_time(Duration::from_millis(delay_ms as u64));
+                        }
+                        sock.set_tcp_keepalive(&ka)
+                    } else {
+                        // Disable: clear SO_KEEPALIVE.
+                        sock.set_keepalive(false)
+                    };
+                    if let Err(e) = result {
+                        evt_tx.send(NetEvent::Error {
+                            conn_id,
+                            message: format!("set_keepalive({enable}, {delay_ms}): {e}"),
+                            code: io_error_code(&e),
+                        });
+                    }
                 }
             }
         }

@@ -26,6 +26,7 @@ daemon = [
     "dep:tokio-rustls",
     "dep:rustls-pemfile",
     "dep:webpki-roots",
+    "dep:socket2",
 ]
 # L3 shadows. Each shadow pulls in its own Rust crate (e.g. bcrypt)
 # and wires a host import the plugin's JS-side polyfill calls at
@@ -62,6 +63,7 @@ rustls = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }
 rustls-pemfile = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
+socket2 = { workspace = true, optional = true }
 
 [dev-dependencies]
 afterburner-ignite.workspace = true

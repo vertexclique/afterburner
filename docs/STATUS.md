@@ -141,13 +141,13 @@ two seams.
 
 | Area | Item | Size | Today |
 |:--|:--|:-:|:--|
-| **B7 tls** | `socket.getPeerCertificate()` returns the real chain | S | Returns `{}`. `rustls::ConnectionCommon::peer_certificates()` exposes the DER chain. |
-| **B7 tls** | `socket.getCipher()` returns the real negotiated suite | S | Returns `{name: 'unknown'}`. rustls' negotiated suite is reachable post-handshake. |
+| **B7 tls** | `socket.getPeerCertificate()` returns the real chain | S | ✅ shipped — DER bytes + colon-hex SHA-256 fingerprint. `getPeerCertChain()` for the full chain. |
+| **B7 tls** | `socket.getCipher()` returns the real negotiated suite | S | ✅ shipped — IANA-normalized name (rustls' `TLS13_*` mapped to `TLS_*`). |
 | **B7 tls** | Server-side SNI multi-cert routing (cert callback) | M | `tls.createServer` takes one `cert`/`key` pair; SNI dispatch needs a `ServerName → ServerConfig` map (rustls `ResolvesServerCert`). |
-| **B7 dns** | `Resolver.setServers([...])` actually plumbs through to hickory | S | Stable no-op stub today. Wire into hickory's `ResolverConfig::add_name_server`. |
-| **B7 net** | `socket.setNoDelay` / `setKeepAlive` actually toggle the flags | S | Best-effort no-op. Plumb via `socket2` once we own the raw `TcpStream`. |
+| **B7 dns** | `Resolver.setServers([...])` actually plumbs through to hickory | M | Larger than initially sized — needs a server-list parameter plumbed through 7 dns functions × {host coord, host import, plugin bridge, polyfill}. Still pending. |
+| **B7 net** | `socket.setNoDelay` / `setKeepAlive` actually toggle the flags | S | ✅ shipped — `tokio::net::TcpStream::set_nodelay` for `TCP_NODELAY`, `socket2::SockRef::set_tcp_keepalive` for `SO_KEEPALIVE` + idle timer. |
 | **B6 require** | `Resolver` cache control / TTLs surface to JS | S | Internal cache works; not user-visible. |
-| **A11 — ergonomics** | `process.binding(*)` clear-error messages | XS | Today: `ERR_NOT_SUPPORTED_IN_SANDBOX` generically; could carry which binding was asked for. |
+| **A11 — ergonomics** | `process.binding(*)` clear-error messages | XS | ✅ shipped — `process.binding('tcp_wrap')` now throws with the requested binding name in the message and `err.bindingName`. `_linkedBinding` symmetric. |
 | **L3 long tail** | **WASM-npm-loader** — generic loader for WASM-shipped npm packages | M | Detects when a require resolves to a WASM-built npm package (e.g. `sql.js`, `@jsquash/*`, `libheif-js`), instantiates the WASM module via wasmtime alongside the main JS sandbox, bridges its exports to the calling JS. Built **once**; every WASM-built npm package then works without per-package shadow code. This is the architectural escape hatch for everything beyond the L3 launch list. |
 
 ---

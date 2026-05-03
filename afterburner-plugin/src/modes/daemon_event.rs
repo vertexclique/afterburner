@@ -183,7 +183,9 @@ const DISPATCH_SOURCE: &str = r#"
                     ev.remote || null,
                     ev.alpn_protocol || null,
                     ev.protocol || null,
-                    !!ev.authorized
+                    !!ev.authorized,
+                    ev.cipher || null,
+                    ev.peer_cert_chain_der_b64 || []
                 );
             } catch (e) {
                 try { console.error('tls connect dispatch:', (e && e.stack) || e); } catch (_) {}
@@ -236,7 +238,9 @@ const DISPATCH_SOURCE: &str = r#"
                     ev.local || null,
                     ev.remote || null,
                     ev.alpn_protocol || null,
-                    ev.protocol || null
+                    ev.protocol || null,
+                    ev.cipher || null,
+                    ev.peer_cert_chain_der_b64 || []
                 );
             } catch (e) {
                 try { console.error('tls connection dispatch:', (e && e.stack) || e); } catch (_) {}
