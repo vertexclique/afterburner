@@ -1,0 +1,18 @@
+[package]
+name = "afterburner-example-fetch-and-env"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+# `host-http` enables the outbound HTTP host import path in the wasi
+# backend — the example narrowly grants it via `NetAccess::OutboundFull`
+# with a one-host allow-list.
+afterburner = { path = "../../crates/afterburner", features = ["host-http"] }
+anyhow = "1"
+serde_json = "1"
+# Lock-free map for the demo host's emit_row sink — matches the
+# workspace's "kovan primitives, no std::sync::Mutex" rule.
+kovan-map = "0.1"

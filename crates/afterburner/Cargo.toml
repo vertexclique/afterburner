@@ -1,0 +1,137 @@
+[package]
+name = "afterburner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Afterburner - JS ~> WASM Sandboxed Execution VM"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "burn"
+path = "src/bin/burn.rs"
+required-features = ["bin"]
+
+[dependencies]
+afterburner-core = { workspace = true }
+afterburner-node-compat = { workspace = true }
+afterburner-wasi = { workspace = true, optional = true }
+afterburner-ignite = { workspace = true, optional = true }
+afterburner-adaptive = { workspace = true, optional = true }
+afterburner-flow = { workspace = true, optional = true }
+afterburner-thrust = { workspace = true, optional = true }
+serde_json = { workspace = true }
+# bin-only — gated behind `bin` feature so library consumers don't pull them.
+clap = { version = "4", features = ["derive"], optional = true }
+rustyline = { version = "14", optional = true }
+anyhow = { version = "1", optional = true }
+tokio = { workspace = true, optional = true }
+# Pulled in unconditionally — the CLI's tls envelope translator
+# encodes peer-cert-chain DER as base64 for the polyfill.
+base64 = { workspace = true }
+# B8 — TypeScript strip-types via oxc. Gated behind `ts` because the
+# oxc graph adds ~3 MiB of binary size and non-TS users never pay it.
+oxc = { version = "=0.127.0", default-features = false, features = [
+    "transformer",
+    "codegen",
+    "semantic",
+], optional = true }
+thiserror = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Serialize tests that spawn long-lived `burn` subprocesses. Each
+# subprocess cold-starts the wasmtime engine + plugin (~seconds in
+# debug builds), and running them in parallel oversubscribes CPU
+# until their timing assertions flake. `#[serial]` pins those tests
+# to a shared lock group while leaving the rest of the suite parallel.
+serial_test = "3"
+tempfile.workspace = true
+afterburner-core.workspace = true
+afterburner-wasi.workspace = true
+# B7 tls test fixtures — generate self-signed certs and spin up a
+# tokio-rustls server in a background thread so the burn-as-client
+# tests don't need any external infrastructure.
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+rcgen = { workspace = true }
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "io-util",
+    "net",
+    "macros",
+] }
+# B7 sharp test fixtures — generate small PNGs / RGBA images at
+# test time so we don't ship binary fixture files.
+image = { workspace = true }
+base64 = { workspace = true }
+# WebAssembly loader tests — compile WAT to bytes at test time
+# instead of hand-encoding binary modules.
+wat = "1"
+
+[features]
+default = ["wasm", "native", "thrust"]
+wasm = ["dep:afterburner-wasi"]
+native = ["dep:afterburner-ignite"]
+adaptive = ["dep:afterburner-adaptive", "wasm", "native"]
+thrust = ["dep:afterburner-thrust", "wasm"]
+flow = ["dep:afterburner-flow", "wasm"]
+# host-http propagates to afterburner-wasi only today; node-compat compiles
+# all host backends unconditionally (no feature block there).
+host-http = ["afterburner-wasi?/host-http"]
+# `bin` pulls in the CLI deps + selects the default modes that `burn`
+# assumes (adaptive for auto-tier, thrust for --workers, wasi/daemon
+# for http.createServer() support, tokio for the daemon event loop
+# and SIGINT handler).
+bin = [
+    "dep:clap",
+    "dep:rustyline",
+    "dep:anyhow",
+    "dep:tokio",
+    "adaptive",
+    "thrust",
+    "afterburner-wasi/daemon",
+]
+# B8 — TypeScript strip-types. `burn foo.ts` transpiles via oxc and
+# runs the resulting JS through the normal pipeline. Opt-in only.
+ts = ["dep:oxc", "dep:thiserror"]
+# L3 shadow: bcrypt. `require('bcrypt')` resolves to a pure-Rust
+# shadow that works inside the WASM sandbox (where native .node
+# addons cannot load). Forwards the feature through afterburner-wasi
+# to afterburner-node-compat, which pulls in the `bcrypt` crate.
+shadow-bcrypt = ["afterburner-wasi?/shadow-bcrypt"]
+shadow-argon2 = ["afterburner-wasi?/shadow-argon2"]
+shadow-jsonwebtoken = ["afterburner-wasi?/shadow-jsonwebtoken"]
+shadow-sqlite3 = ["afterburner-wasi?/shadow-sqlite3"]
+shadow-sharp = ["afterburner-wasi?/shadow-sharp"]
+# Convenience: enable every L3 shadow at once.
+all-shadows = [
+    "shadow-bcrypt",
+    "shadow-argon2",
+    "shadow-jsonwebtoken",
+    "shadow-sqlite3",
+    "shadow-sharp",
+]
+# Convenience: full-fat release build of the `burn` CLI — every
+# runtime backend, every L3 shadow, host HTTP daemon, TypeScript
+# loader. This is what `--features release-cli` should pass to
+# release artifacts.
+release-cli = [
+    "bin",
+    "wasm",
+    "native",
+    "adaptive",
+    "thrust",
+    "flow",
+    "host-http",
+    "ts",
+    "all-shadows",
+]

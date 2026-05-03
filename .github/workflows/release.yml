@@ -1,0 +1,224 @@
+name: Release
+
+# Disabled: tag-push auto-trigger commented out. The release workflow
+# only runs when manually invoked from the GitHub UI's "Run workflow"
+# button (workflow_dispatch) with a `tag` input. Re-enable by
+# uncommenting the `push` block to restore the automatic
+# `cargo release --execute <bump>` flow.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish (e.g. v0.1.0). Must already exist if no `push` event.'
+        required: true
+        type: string
+  # push:
+  #   tags:
+  #     - 'v*.*.*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: build burn (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install libclang (Linux)
+        if: runner.os == 'Linux' && !matrix.cross
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+
+      - name: Install libclang (macOS)
+        if: runner.os == 'macOS'
+        run: brew install llvm
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --rev 7b79041c9278769eca57fae10c74741f5aa5c14b
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build burn (cli-release profile, full features)
+        shell: bash
+        env:
+          # Reduce LTO codegen units to 1 for the tightest binary.
+          CARGO_PROFILE_CLI_RELEASE_CODEGEN_UNITS: '1'
+          CARGO_PROFILE_CLI_RELEASE_LTO: 'fat'
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.cross }}" == "true" ]]; then
+            cross build --profile cli-release \
+              --target ${{ matrix.target }} \
+              -p afterburner --bin burn \
+              --no-default-features \
+              --features release-cli
+          else
+            cargo build --profile cli-release \
+              --target ${{ matrix.target }} \
+              -p afterburner --bin burn \
+              --no-default-features \
+              --features release-cli
+          fi
+
+      - name: Stage artifact
+        id: stage
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.name }}"
+          target="${{ matrix.target }}"
+          version="${tag#v}"
+          stem="burn-${version}-${target}"
+          stage="dist/${stem}"
+          mkdir -p "${stage}"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp "target/${target}/cli-release/burn.exe" "${stage}/burn.exe"
+          else
+            cp "target/${target}/cli-release/burn" "${stage}/burn"
+            chmod +x "${stage}/burn"
+          fi
+          cp README.md "${stage}/README.md"
+          cp -r docs "${stage}/docs" || true
+          # License file.
+          [[ -f LICENSE ]] && cp LICENSE "${stage}/"
+          echo "stem=${stem}" >> "$GITHUB_OUTPUT"
+          echo "stage=${stage}" >> "$GITHUB_OUTPUT"
+
+      - name: Archive (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          stem="${{ steps.stage.outputs.stem }}"
+          tar -C dist -czf "dist/${stem}.tar.gz" "${stem}"
+          (cd dist && shasum -a 256 "${stem}.tar.gz" > "${stem}.tar.gz.sha256")
+
+      - name: Archive (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $stem = "${{ steps.stage.outputs.stem }}"
+          Compress-Archive -Path "dist/$stem/*" -DestinationPath "dist/$stem.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/$stem.zip").Hash.ToLower()
+          "$hash  $stem.zip" | Out-File -Encoding ascii -FilePath "dist/$stem.zip.sha256"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: burn-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish GitHub release
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lah dist
+
+      - name: Create / update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.name }}"
+          notes_file="$(mktemp)"
+          {
+            echo "# burn ${tag}"
+            echo
+            echo "Sandboxed JavaScript runtime CLI. Drop-in for Node-style scripts, runs untrusted JS in a Wasmtime sandbox."
+            echo
+            echo "## Install"
+            echo
+            echo '```sh'
+            echo "# Linux x86_64"
+            echo "curl -L https://github.com/${{ github.repository }}/releases/download/${tag}/burn-${tag#v}-x86_64-unknown-linux-gnu.tar.gz | tar xz"
+            echo "sudo mv burn-${tag#v}-x86_64-unknown-linux-gnu/burn /usr/local/bin/"
+            echo
+            echo "# macOS arm64"
+            echo "curl -L https://github.com/${{ github.repository }}/releases/download/${tag}/burn-${tag#v}-aarch64-apple-darwin.tar.gz | tar xz"
+            echo "sudo mv burn-${tag#v}-aarch64-apple-darwin/burn /usr/local/bin/"
+            echo '```'
+            echo
+            echo "## Verify"
+            echo
+            echo "Each archive ships with an accompanying \`.sha256\` file."
+            echo
+            echo "## Bundled features"
+            echo
+            echo "Built with \`--features release-cli\`: bin + wasm + native + adaptive + thrust + flow + host-http + ts + all-shadows."
+          } > "$notes_file"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --notes-file "$notes_file"
+          else
+            gh release create "$tag" --notes-file "$notes_file" --title "$tag"
+          fi
+          shopt -s nullglob
+          assets=(dist/*.tar.gz dist/*.zip dist/*.sha256)
+          gh release upload "$tag" "${assets[@]}" --clobber

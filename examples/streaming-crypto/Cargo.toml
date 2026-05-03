@@ -1,0 +1,12 @@
+[package]
+name = "afterburner-example-streaming-crypto"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+afterburner = { path = "../../crates/afterburner" }
+anyhow = "1"
+serde_json = "1"

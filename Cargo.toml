@@ -1,0 +1,194 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/afterburner",
+    "crates/afterburner-core",
+    "crates/afterburner-wasi",
+    "crates/afterburner-ignite",
+    "crates/afterburner-flow",
+    "crates/afterburner-adaptive",
+    "crates/afterburner-node-compat",
+    "crates/afterburner-plugin",
+    "crates/afterburner-thrust",
+]
+# `afterburner-plugin` targets `wasm32-wasip1`. Building it on the host
+# triple fails because `javy-plugin-api` assumes a WASI environment.
+# Keep it out of `cargo build --workspace` by trimming default-members;
+# the plugin is built explicitly via `afterburner-plugin/build.sh`.
+default-members = [
+    "crates/afterburner",
+    "crates/afterburner-core",
+    "crates/afterburner-wasi",
+    "crates/afterburner-ignite",
+    "crates/afterburner-flow",
+    "crates/afterburner-adaptive",
+    "crates/afterburner-node-compat",
+    "crates/afterburner-thrust",
+]
+
+# `examples/*` are standalone Cargo projects (each with its own
+# [workspace] root). Exclude the directory defensively in case a
+# user drops a new example without the stanza.
+exclude = ["examples"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+authors = ["Theo Bulut <vertexclique@gmail.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/vertexclique/afterburner"
+homepage = "https://github.com/vertexclique/afterburner"
+documentation = "https://docs.rs/afterburner"
+keywords = ["javascript", "wasm", "sandbox", "runtime"]
+categories = ["wasm", "development-tools"]
+
+[workspace.dependencies]
+afterburner = { version = "0.1.0", path = "crates/afterburner" }
+afterburner-core = { version = "0.1.0", path = "crates/afterburner-core" }
+afterburner-wasi = { version = "0.1.0", path = "crates/afterburner-wasi" }
+afterburner-ignite = { version = "0.1.0", path = "crates/afterburner-ignite" }
+afterburner-flow = { version = "0.1.0", path = "crates/afterburner-flow" }
+afterburner-adaptive = { version = "0.1.0", path = "crates/afterburner-adaptive" }
+afterburner-node-compat = { version = "0.1.0", path = "crates/afterburner-node-compat" }
+afterburner-thrust = { version = "0.1.0", path = "crates/afterburner-thrust" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sha1 = "0.10"
+thiserror = "2"
+hmac = "0.12"
+md-5 = "0.10"
+getrandom = "0.2"
+aes-gcm = "0.10"
+aes = "0.8"
+cbc = { version = "0.1", features = ["std"] }
+pbkdf2 = "0.12"
+scrypt = "0.11"
+rsa = { version = "0.9", features = ["sha2"] }
+p256 = { version = "0.13", features = ["ecdsa", "pem"] }
+spki = { version = "0.7", features = ["pem"] }
+pkcs8 = { version = "0.10", features = ["pem"] }
+base64 = "0.22"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+ureq = { version = "2", features = ["json"] }
+tempfile = "3"
+flate2 = "1"
+kovan-map = "0.1"
+kovan-channel = "0.1"
+libc = "0.2"
+
+wasmtime = { version = "36", features = ["cranelift", "cache"] }
+wasmtime-wasi = "36"
+anyhow = "1"
+
+# B2 daemon-mode HTTP server plumbing. axum/tokio/hyper are only
+# pulled by `afterburner-wasi/daemon` (off by default) and the `burn`
+# CLI — library consumers who don't run `http.createServer().listen()`
+# don't pay the compile-time or binary-size cost.
+axum = "0.7"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "macros", "signal", "sync"] }
+hyper = "1"
+bytes = "1"
+
+# B7 tls — `tls.connect` / `tls.createServer`, gated the same way as
+# the daemon HTTP plumbing above. `webpki-roots` ships the Mozilla
+# root CA bundle so client connects work without filesystem access.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = "2"
+webpki-roots = "0.26"
+rcgen = "0.13"
+
+# L3 shadow for `sqlite3`. `bundled` compiles the SQLite C
+# amalgamation at build time and links it statically into the burn
+# binary — no runtime dependency on `libsqlite3.so`. The Rust crate
+# itself is the only public surface; the C is encapsulated. Gated
+# behind `shadow-sqlite3` so non-SQLite builds don't compile the
+# amalgamation (~2 MB compile-time cost).
+rusqlite = { version = "0.32", default-features = false, features = ["bundled"] }
+
+# L3 shadow for `sharp`. Both crates are 100% pure Rust:
+#   * `image` — codec layer (PNG, JPEG, WebP, GIF, BMP, TIFF)
+#   * `fast_image_resize` — SIMD-accelerated resampling (much
+#     faster than image's built-in `imageops::resize`)
+# Gated behind `shadow-sharp` so non-image builds don't pull these
+# in (~2 MB of compiled deps).
+image = { version = "0.25", default-features = false, features = [
+    "png", "jpeg", "webp", "gif", "bmp",
+] }
+fast_image_resize = { version = "5", features = ["image"] }
+
+# B7 dns — `hickory-resolver` (formerly trust-dns-resolver) is the
+# canonical pure-Rust async DNS resolver. We use it synchronously
+# from a worker thread so the host-import boundary stays sync (the
+# plugin can't host-call from inside an async stack — it's running
+# inside Wasmtime). Default features pull in tokio + ring; we keep
+# them off and use the resolver's `Resolver` (sync) entry points.
+hickory-resolver = { version = "0.24", default-features = false, features = [
+    "tokio-runtime", "system-config",
+] }
+
+# `socket2` is the canonical low-level socket-options crate; we use
+# its `SockRef::from(&tokio::net::TcpStream)` to actually toggle
+# TCP_NODELAY / SO_KEEPALIVE on a tokio-owned socket without
+# detaching the stream. tokio itself exposes set_nodelay but no
+# keepalive knob, hence this dep. Gated behind `daemon` since net /
+# tls are the only callers.
+socket2 = { version = "0.5", features = ["all"] }
+
+rquickjs = { version = "0.11", features = ["bindgen"] }
+
+fastrace = { version = "0.7", features = ["enable"] }
+
+javy-plugin-api = "6.0"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = false
+strip = "symbols"
+panic = "abort"
+incremental = false
+overflow-checks = false
+
+[profile.bench]
+inherits = "release"
+
+# Tightest possible CLI profile. Used by `cargo build --profile=cli-release`
+# for shipping the `burn` binary — maxes every optimization knob:
+#   * opt-level = 3 + LTO fat: aggressive cross-crate inlining
+#   * codegen-units = 1: single TU per crate, lets the optimizer see
+#     everything in one pass at link time
+#   * panic = "abort": drops the unwind tables (~5% binary size,
+#     small perf win on hot paths that otherwise emit landing pads)
+#   * strip = "symbols": removes debug symbols + symbol table from
+#     the final ELF/Mach-O
+#   * overflow-checks = false: integer overflow checks compile out
+#     (release default; explicit so future-us doesn't accidentally
+#     re-enable them through `[profile.release.package.<crate>]`)
+[profile.cli-release]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = false
+strip = "symbols"
+panic = "abort"
+incremental = false
+overflow-checks = false
+
+# `wasm-release` profile is what `afterburner-plugin/build.sh` uses
+# when re-Wizer-preinitializing the QuickJS plugin. We want a small
+# wasm32-wasip1 binary (every byte ships with the Rust binary via
+# include_bytes!) so size beats raw speed at the codegen-unit knob.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"   # size-first
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

@@ -1,0 +1,892 @@
+//! `NativeCombustor` — executes JS via `rquickjs` FFI directly (no WASM).
+//!
+//! The trusted-code path. No sandbox beyond QuickJS's own fuel/memory
+//! knobs, but startup is <300 μs and throughput is higher than the WASM
+//! route for short-lived scripts.
+//!
+//! ### Concurrency model — thread-local runtimes
+//!
+//! rquickjs's `Runtime`/`Context` are `!Send`/`!Sync` (without the
+//! `parallel` feature, which drags in tokio). Rather than serialize
+//! access with a Mutex, each client thread gets its own lazily-created
+//! `Runtime` via `thread_local!`. There is **no cross-thread
+//! synchronization** on the hot path — two client threads can call
+//! `thrust` concurrently without ever talking to each other.
+//!
+//! Shared state:
+//! * `source_store` — lock-free `kovan_map::HopscotchMap` caching the
+//!   JS source text, keyed by SHA-256 of the source. Any thread can
+//!   read a source another thread ignited.
+//!
+//! Trade-off: each client thread carries a per-thread Runtime (~100 KB
+//! residual memory). In practice the caller is a small pool of worker
+//! threads, so the memory footprint is bounded and the throughput win
+//! is substantial.
+
+use afterburner_core::log::Level;
+use afterburner_core::{
+    AfterburnerError, Combustor, EngineMode, FuelGauge, InMemoryStateStore, Result, ScriptId,
+    ScriptInvocation, ScriptOutcome, SharedStateStore, ab_event, sha256,
+};
+use kovan_map::HopscotchMap;
+use rquickjs::{Context, Ctx, Error as RquickjsError, Runtime, Value as RqValue};
+use serde_json::Value as JsonValue;
+use std::cell::RefCell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+thread_local! {
+    /// One rquickjs Runtime per client thread. Lazily initialized on
+    /// first use. Wrapped in RefCell because we need `&mut` access to
+    /// the interrupt-handler slot; RefCell is single-threaded, not a
+    /// synchronization primitive.
+    static THREAD_RT: RefCell<Option<ThreadRuntime>> = const { RefCell::new(None) };
+
+    /// When `Some`, native script mode is active on this thread:
+    /// `__host_log` writes into the per-call buffers instead of
+    /// emitting workspace log events. Set + cleared by
+    /// [`ScriptCaptureGuard`]; never observed across calls because
+    /// each `run_script` activates and drops its own guard.
+    static SCRIPT_CAPTURE: RefCell<Option<ScriptCapture>> = const { RefCell::new(None) };
+}
+
+/// Per-script-mode-call capture buffers that `__host_log` writes into.
+#[derive(Default)]
+struct ScriptCapture {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// RAII guard that activates script-mode capture for the current
+/// thread and takes ownership back on drop. Calling code uses
+/// [`ScriptCaptureGuard::take`] to retrieve the buffers — the `Drop`
+/// impl is the safety net that fires if the caller panics.
+struct ScriptCaptureGuard;
+
+impl ScriptCaptureGuard {
+    fn activate() -> Self {
+        SCRIPT_CAPTURE.with(|c| {
+            *c.borrow_mut() = Some(ScriptCapture::default());
+        });
+        Self
+    }
+
+    fn take(self) -> ScriptCapture {
+        // Take BEFORE drop runs so we get the populated buffers
+        // (drop's path leaves an empty default in place).
+        let captured = SCRIPT_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default());
+        std::mem::forget(self);
+        captured
+    }
+}
+
+impl Drop for ScriptCaptureGuard {
+    fn drop(&mut self) {
+        // Caller panicked before `take()` — clear the slot so the
+        // next call doesn't observe stale captures.
+        SCRIPT_CAPTURE.with(|c| {
+            let _ = c.borrow_mut().take();
+        });
+    }
+}
+
+/// Append a captured log line. Handles the "info"/"debug" → stdout vs
+/// "warn"/"error" → stderr split that matches Node's console
+/// semantics (and what the wasm path does via Javy.IO).
+fn append_capture(level: &str, msg: &str) {
+    SCRIPT_CAPTURE.with(|c| {
+        if let Some(cap) = c.borrow_mut().as_mut() {
+            let buf = if matches!(level, "warn" | "error") {
+                &mut cap.stderr
+            } else {
+                &mut cap.stdout
+            };
+            buf.extend_from_slice(msg.as_bytes());
+            buf.push(b'\n');
+        }
+    });
+}
+
+/// True iff the current thread is mid-script-mode capture. The
+/// closure-installed `__host_log` consults this to decide whether to
+/// route to the capture buffer or emit a workspace log event.
+fn capture_is_active() -> bool {
+    SCRIPT_CAPTURE.with(|c| c.borrow().is_some())
+}
+
+struct ThreadRuntime {
+    runtime: Runtime,
+    context: Context,
+}
+
+impl ThreadRuntime {
+    fn new() -> std::result::Result<Self, AfterburnerError> {
+        let runtime = Runtime::new()
+            .map_err(|e| AfterburnerError::Engine(format!("rquickjs runtime init: {e}")))?;
+        let context = Context::full(&runtime)
+            .map_err(|e| AfterburnerError::Engine(format!("rquickjs context init: {e}")))?;
+
+        // Eval the plenum bundle once per thread-local Runtime so every
+        // thrust on this thread can `require('path')` etc. without
+        // paying the ~45 KB parse cost again. Host-backed modules
+        // (`fs`, `crypto`, `os`, `http`) are wired here too — the
+        // per-thrust Manifold is read via a thread-local slot that
+        // `do_thrust` populates for the duration of each call.
+        context.with(|ctx| -> std::result::Result<(), AfterburnerError> {
+            install_host_globals(&ctx)?;
+            afterburner_node_compat::register_native_builtins(&ctx)?;
+            ctx.eval::<(), _>(afterburner_node_compat::PLENUM_BUNDLE.as_bytes())
+                .map_err(|e| AfterburnerError::Engine(format!("plenum bundle eval: {e}")))?;
+            Ok(())
+        })?;
+
+        Ok(Self { runtime, context })
+    }
+}
+
+/// Install the small set of host-provided globals the plenum bundle
+/// expects (currently just `__host_log` for `console.*`). Keeps the JS
+/// side agnostic to where logs end up.
+fn install_host_globals(ctx: &Ctx<'_>) -> std::result::Result<(), AfterburnerError> {
+    use rquickjs::Function;
+    let globals = ctx.globals();
+    globals
+        .set(
+            "__host_log",
+            Function::new(ctx.clone(), |level: String, msg: String| {
+                host_log(&level, &msg);
+            })
+            .map_err(|e| AfterburnerError::Engine(format!("Function::new host_log: {e}")))?,
+        )
+        .map_err(|e| AfterburnerError::Engine(format!("globals.set host_log: {e}")))?;
+    Ok(())
+}
+
+fn host_log(level: &str, msg: &str) {
+    // In native script mode, console output is captured per-call so
+    // the embedder can hand it back through [`ScriptOutcome`]. Outside
+    // script mode (i.e. UDF thrust), it falls through to the workspace
+    // logger as before.
+    if capture_is_active() {
+        append_capture(level, msg);
+        return;
+    }
+    use afterburner_core::ab_event;
+    use afterburner_core::log::Level;
+    let level = match level {
+        "error" => Level::Error,
+        "warn" => Level::Warn,
+        "debug" => Level::Debug,
+        _ => Level::Info,
+    };
+    ab_event!(level, "script.console", "message" => msg);
+}
+
+/// Run a closure with access to the current thread's `ThreadRuntime`,
+/// initializing it lazily on first use.
+fn with_thread_rt<R>(f: impl FnOnce(&ThreadRuntime) -> Result<R>) -> Result<R> {
+    THREAD_RT.with(|slot| {
+        let mut borrow = slot.borrow_mut();
+        if borrow.is_none() {
+            *borrow = Some(ThreadRuntime::new()?);
+        }
+        let rt = borrow
+            .as_ref()
+            .ok_or_else(|| AfterburnerError::Engine("thread runtime uninitialized".into()))?;
+        f(rt)
+    })
+}
+
+pub struct NativeCombustor {
+    source_store: HopscotchMap<[u8; 32], String>,
+    state_store: SharedStateStore,
+    host_context: Option<Arc<dyn afterburner_core::HostContext>>,
+}
+
+impl NativeCombustor {
+    pub fn new() -> Result<Self> {
+        Self::with_state_store(InMemoryStateStore::shared())
+    }
+
+    /// Construct a combustor backed by an explicit state store.
+    pub fn with_state_store(state_store: SharedStateStore) -> Result<Self> {
+        with_thread_rt(|_rt| Ok(()))?;
+        Ok(Self {
+            source_store: HopscotchMap::new(),
+            state_store,
+            host_context: None,
+        })
+    }
+
+    /// Attach an embedder-provided [`afterburner_core::HostContext`]. Scripts that call
+    /// `require('afterburner:host').readColumn` or `emitRow` dispatch
+    /// through this context. Default (no context) returns empty
+    /// column / swallows emitted rows.
+    pub fn with_host_context(mut self, ctx: Arc<dyn afterburner_core::HostContext>) -> Self {
+        self.host_context = Some(ctx);
+        self
+    }
+
+    pub fn state_store(&self) -> &SharedStateStore {
+        &self.state_store
+    }
+}
+
+impl Combustor for NativeCombustor {
+    #[fastrace::trace(name = "NativeCombustor::ignite")]
+    fn ignite(&self, source: &str) -> Result<ScriptId> {
+        let hash = sha256(source.as_bytes());
+        // Fast-path: source already registered — skip the parse probe.
+        if self.source_store.get(&hash).is_some() {
+            ab_event!(Level::Debug, "native.ignite.cache_hit");
+            return Ok(ScriptId {
+                hash,
+                mode: EngineMode::Native,
+            });
+        }
+        // Cheap parse check against this thread's Runtime. Syntax errors
+        // surface here rather than at thrust time.
+        with_thread_rt(|rt| {
+            rt.context.with(|ctx| -> Result<()> {
+                let probe = format!("(function(){{ {source}\nreturn undefined; }})");
+                let _: RqValue<'_> = ctx
+                    .eval(probe.as_bytes())
+                    .map_err(|e| AfterburnerError::CompileFailed(format!("{e}")))?;
+                Ok(())
+            })
+        })?;
+        self.source_store.insert(hash, source.to_string());
+        ab_event!(Level::Info, "native.ignite.compiled", "source_bytes" => source.len());
+        Ok(ScriptId {
+            hash,
+            mode: EngineMode::Native,
+        })
+    }
+
+    #[fastrace::trace(name = "NativeCombustor::thrust")]
+    fn thrust(&self, id: &ScriptId, input: &JsonValue, limits: &FuelGauge) -> Result<JsonValue> {
+        let source = self
+            .source_store
+            .get(&id.hash)
+            .ok_or(AfterburnerError::ScriptNotFound)?;
+        let input_json = serde_json::to_string(input)?;
+        let output_json = with_thread_rt(|rt| {
+            // Thread the engine's state store + optional host context
+            // into the per-thrust slots.
+            let _g = afterburner_node_compat::state_active::activate(self.state_store.clone());
+            let _hg = self
+                .host_context
+                .as_ref()
+                .map(|c| afterburner_node_compat::host_context_active::activate(c.clone()));
+            do_thrust(rt, &source, &input_json, limits)
+        })?;
+        Ok(serde_json::from_str(&output_json)?)
+    }
+
+    fn extinguish(&self, id: &ScriptId) {
+        self.source_store.remove(&id.hash);
+        ab_event!(Level::Info, "native.extinguish");
+    }
+
+    #[fastrace::trace(name = "NativeCombustor::run_script")]
+    fn run_script(
+        &self,
+        source: &str,
+        invocation: &ScriptInvocation,
+        limits: &FuelGauge,
+    ) -> Result<ScriptOutcome> {
+        let argv_json = serde_json::to_string(&invocation.argv)
+            .map_err(|e| AfterburnerError::Engine(format!("argv json: {e}")))?;
+        let env_json = serde_json::to_string(&invocation.env)
+            .map_err(|e| AfterburnerError::Engine(format!("env json: {e}")))?;
+        let cwd_json = serde_json::to_string(
+            &(if invocation.cwd.is_empty() { "/" } else { invocation.cwd.as_str() }),
+        )
+        .map_err(|e| AfterburnerError::Engine(format!("cwd json: {e}")))?;
+        let stage = build_script_stage(source, &argv_json, &env_json, &cwd_json);
+
+        let _capture_guard = ScriptCaptureGuard::activate();
+        let exit_code = with_thread_rt(|rt| {
+            let _g = afterburner_node_compat::state_active::activate(self.state_store.clone());
+            let _hg = self
+                .host_context
+                .as_ref()
+                .map(|c| afterburner_node_compat::host_context_active::activate(c.clone()));
+            let _mg = afterburner_node_compat::active_manifold::activate(limits.manifold.clone());
+
+            rt.runtime
+                .set_memory_limit(limits.memory_bytes.unwrap_or(0));
+            let fuel_budget = limits.fuel;
+            let counter = Arc::new(AtomicU64::new(0));
+            let counter_clone = counter.clone();
+            rt.runtime
+                .set_interrupt_handler(Some(Box::new(move || match fuel_budget {
+                    Some(budget) => counter_clone.fetch_add(1, Ordering::Relaxed) >= budget,
+                    None => false,
+                })));
+
+            let res = rt
+                .context
+                .with(|ctx| -> Result<()> { run_script_stage(&ctx, &stage) });
+
+            rt.runtime.set_interrupt_handler(None);
+
+            // Translate the JS-side outcome into a Node-style exit code.
+            // Anything that's *not* a script-level exception bubbles up
+            // as Err — fuel exhaustion and memory limits stay typed.
+            match res {
+                Ok(()) => Ok(0),
+                Err(e) => {
+                    if let Some(budget) = fuel_budget
+                        && counter.load(Ordering::Relaxed) >= budget
+                    {
+                        ab_event!(
+                            Level::Warn,
+                            "native.script.fuel_exhausted",
+                            "budget" => budget,
+                        );
+                        return Err(AfterburnerError::FuelExhausted);
+                    }
+                    if matches!(e, AfterburnerError::MemoryLimit) {
+                        ab_event!(Level::Warn, "native.script.memory_limit");
+                        return Err(e);
+                    }
+                    // Treat as user-script exception — surface the
+                    // message on captured stderr and return exit 1.
+                    append_capture("error", &format!("{e}"));
+                    Ok(1)
+                }
+            }
+        })?;
+        let captured = _capture_guard.take();
+        Ok(ScriptOutcome {
+            stdout: captured.stdout,
+            stderr: captured.stderr,
+            exit_code,
+        })
+    }
+}
+
+/// Build the JS stage that script mode evaluates. Sync outer IIFE
+/// does the global setup (`__ab_argv`, `__host_env`, refreshing the
+/// live `process` polyfill) and runs the user source inside a plain
+/// `new Function(...)` wrapper. The wrapper's return value is
+/// whatever the user source's last statement yields — typically
+/// `undefined` (script mode doesn't JSON-stringify a result).
+///
+/// **Top-level `await` is NOT supported on this path.** rquickjs's
+/// thread-local runtime surfaces a "line 3:1" parse-time exception
+/// when we attempt to construct an `AsyncFunction` from here —
+/// reproduced against the real `NativeCombustor::run_script` but not
+/// against a fresh `Runtime` in isolation, pointing at a
+/// version-pinning quirk we'd rather not paper over with a
+/// half-working workaround. Scripts that need top-level `await`
+/// should run through the WASM / adaptive backends (the default) —
+/// that path compiles via Javy's ES-module pipeline where it's
+/// first-class. On native, the idiomatic workaround is the
+/// self-invoking async IIFE pattern:
+///
+/// ```js
+/// (async () => { const v = await something(); console.log(v); })();
+/// ```
+///
+/// which compiles fine as a sync-returned Promise; the pumping loop
+/// below drains its microtasks.
+fn build_script_stage(user: &str, argv_json: &str, env_json: &str, cwd_json: &str) -> String {
+    let user_lit = js_string_literal(user);
+    format!(
+        r#"
+        (function() {{
+            globalThis.__ab_argv = {argv_json};
+            globalThis.__host_env = {env_json};
+            globalThis.__host_cwd = {cwd_json};
+            if (globalThis.process) {{
+                globalThis.process.argv = globalThis.__ab_argv;
+                globalThis.process.env  = globalThis.__host_env;
+            }}
+            if (typeof globalThis.__plenum_refresh_entry_require === 'function') {{
+                globalThis.__plenum_refresh_entry_require();
+            }}
+            var __ab_module = {{ exports: {{}} }};
+            var __ab_user = new Function(
+                'module', 'exports', 'require', {user_lit}
+            );
+            return __ab_user(__ab_module, __ab_module.exports, globalThis.require);
+        }})()
+        "#
+    )
+}
+
+/// Eval the script-mode stage and pump pending jobs until the
+/// returned Promise resolves or rejects. Uses the same microtask-cap
+/// guardrail as `run_script` (UDF mode) to bound runaway chains even
+/// if the interrupt handler under-fires.
+fn run_script_stage(ctx: &Ctx<'_>, stage: &str) -> Result<()> {
+    let result_val: rquickjs::Value<'_> = ctx
+        .eval(stage.as_bytes())
+        .map_err(|e| map_script_err(ctx, e))?;
+
+    // Same belt-and-suspenders cap as the UDF path. See run_script in
+    // this file for the rationale.
+    const MAX_PUMP_ITERATIONS: usize = 1_000_000;
+    for _ in 0..MAX_PUMP_ITERATIONS {
+        if !ctx.execute_pending_job() {
+            break;
+        }
+    }
+    if ctx.execute_pending_job() {
+        return Err(AfterburnerError::FuelExhausted);
+    }
+
+    // The sync `new Function(...)` wrapper returns whatever the user
+    // source's last statement produces. If that's a Promise (e.g. an
+    // `(async () => {...})()` IIFE), we pump it; otherwise done.
+    // Detect a thenable via duck-typing rather than
+    // `Promise::from_value` because the latter errors on non-Promise
+    // objects, and script-mode user code commonly returns `undefined`.
+    let is_thenable = result_val
+        .as_object()
+        .and_then(|o| o.get::<_, rquickjs::Value<'_>>("then").ok())
+        .map(|v| v.is_function())
+        .unwrap_or(false);
+    if !is_thenable {
+        return Ok(());
+    }
+    let promise = rquickjs::Promise::from_value(result_val.clone())
+        .map_err(|e| AfterburnerError::Engine(format!("Promise::from_value: {e}")))?;
+    promise
+        .finish::<rquickjs::Value<'_>>()
+        .map(|_| ())
+        .map_err(|e| map_script_err(ctx, e))
+}
+
+/// Script-mode error mapper. Unlike [`map_rquickjs_err`] (used by UDF
+/// mode), this variant extracts the real exception detail via
+/// `ctx.catch()` so the captured stderr carries the actual error
+/// message rather than a generic "uncaught exception" placeholder.
+/// The distinction matters for user debugging: a Node-like
+/// `TypeError: foo is not a function` is far more actionable than
+/// the opaque fallback.
+fn map_script_err(ctx: &Ctx<'_>, err: RquickjsError) -> AfterburnerError {
+    match err {
+        RquickjsError::Allocation => AfterburnerError::MemoryLimit,
+        RquickjsError::Unknown => AfterburnerError::Engine("unknown rquickjs error".into()),
+        ref other => {
+            let base = format!("{other}");
+            if base.contains("interrupt") || base.contains("Interrupt") {
+                return AfterburnerError::FuelExhausted;
+            }
+            if base.contains("out of memory") || base.contains("OutOfMemory") {
+                return AfterburnerError::MemoryLimit;
+            }
+            if matches!(other, RquickjsError::Exception) {
+                // Pull the actual exception value out of the context.
+                let exc_val = ctx.catch();
+                let detail = exception_detail(&exc_val);
+                return AfterburnerError::CompileFailed(detail);
+            }
+            AfterburnerError::Engine(base)
+        }
+    }
+}
+
+/// Best-effort human-readable rendering of an rquickjs exception
+/// value. Prefers the shape `"Error: <message>\n<stack>"` that Node
+/// users recognize — QuickJS's `.stack` lacks the leading "Error:
+/// msg" line that V8 includes, so we reassemble it here.
+fn exception_detail(value: &rquickjs::Value<'_>) -> String {
+    if let Some(obj) = value.as_object() {
+        let message = obj
+            .get::<_, String>("message")
+            .ok()
+            .filter(|m| !m.is_empty());
+        let stack = obj.get::<_, String>("stack").ok().filter(|s| !s.is_empty());
+        let name = obj
+            .get::<_, String>("name")
+            .ok()
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "Error".to_string());
+        return match (message, stack) {
+            (Some(m), Some(s)) => format!("{name}: {m}\n{s}"),
+            (Some(m), None) => format!("{name}: {m}"),
+            (None, Some(s)) => s,
+            (None, None) => name,
+        };
+    }
+    if value.is_string()
+        && let Some(s) = value.as_string()
+        && let Ok(text) = s.to_string()
+    {
+        return text;
+    }
+    format!("uncaught exception (type {})", value.type_of().as_str())
+}
+
+/// Actual script execution — runs on the caller's thread against the
+/// thread-local `ThreadRuntime`.
+fn do_thrust(
+    rt: &ThreadRuntime,
+    source: &str,
+    input_json: &str,
+    limits: &FuelGauge,
+) -> Result<String> {
+    // Activate the per-thrust manifold so host globals can read it. The
+    // guard restores the previous value when `do_thrust` returns.
+    let _manifold_guard =
+        afterburner_node_compat::active_manifold::activate(limits.manifold.clone());
+
+    rt.runtime
+        .set_memory_limit(limits.memory_bytes.unwrap_or(0));
+
+    let fuel_budget = limits.fuel;
+    let counter = Arc::new(AtomicU64::new(0));
+    let counter_clone = counter.clone();
+    rt.runtime
+        .set_interrupt_handler(Some(Box::new(move || match fuel_budget {
+            Some(budget) => counter_clone.fetch_add(1, Ordering::Relaxed) >= budget,
+            None => false,
+        })));
+
+    let result = rt
+        .context
+        .with(|ctx| -> Result<String> { run_script(&ctx, source, input_json) });
+
+    // Unwire the interrupt handler so a stale closure doesn't outlive the call.
+    rt.runtime.set_interrupt_handler(None);
+
+    match result {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            if let Some(budget) = fuel_budget
+                && counter.load(Ordering::Relaxed) >= budget
+            {
+                ab_event!(Level::Warn, "native.thrust.fuel_exhausted", "budget" => budget);
+                return Err(AfterburnerError::FuelExhausted);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Build + evaluate the envelope-wrapped script and return
+/// `JSON.stringify(result)`.
+///
+/// Fast path: the user function returns a non-Promise. We `eval` the
+/// envelope, get a `String` back, done — no pending-job pump, no extra
+/// allocation. This is the vast majority of scripts (UDFs,
+/// transforms, flow ops).
+///
+/// Slow path: the user function returns a Promise (directly or via
+/// `async`). We detect that, drain pending microtasks until the
+/// Promise resolves, then JSON-stringify the resolved value. Matches
+/// the Javy `event_loop(true)` behavior on the WASM side so scripts
+/// that use `fetch().then(...)` or `await` work identically across
+/// engines.
+fn run_script(ctx: &Ctx<'_>, source: &str, input_json: &str) -> Result<String> {
+    let stage = format!(
+        r#"
+        (function() {{
+            var __module = {{ exports: undefined }};
+            var module = __module;
+            var exports = __module.exports;
+            var __input = JSON.parse({input});
+            (function() {{
+                {user_source}
+            }})();
+            var __fn = module.exports;
+            var __result = (typeof __fn === 'function') ? __fn(__input) : __fn;
+            // If the user didn't return a thenable, hand back the
+            // stringified result directly — no Promise wrap, no pump.
+            if (__result === null || typeof __result !== 'object' || typeof __result.then !== 'function') {{
+                return JSON.stringify(__result === undefined ? null : __result);
+            }}
+            // Slow path: thenable. Return the Promise chain; caller
+            // will pump microtasks and `.finish::<String>()` on it.
+            return __result.then(function(v) {{
+                return JSON.stringify(v === undefined ? null : v);
+            }});
+        }})()
+        "#,
+        input = js_string_literal(input_json),
+        user_source = source,
+    );
+    let result_val: rquickjs::Value<'_> = ctx.eval(stage.as_bytes()).map_err(map_rquickjs_err)?;
+
+    // Fast path: plain string result — done.
+    if let Some(s) = result_val.as_string() {
+        return s
+            .to_string()
+            .map_err(|e| AfterburnerError::Engine(format!("result to_string: {e}")));
+    }
+
+    // Slow path: result is a Promise. Pump microtasks until the queue
+    // drains, then resolve.
+    //
+    // Belt-and-suspenders iteration cap: the rquickjs interrupt
+    // handler should fire between bytecode ops within each job, which
+    // in theory bounds runaway microtask chains via fuel. In practice
+    // we've observed `queueMicrotask(step)` recursion where the
+    // per-job opcode count is so low that the interrupt handler
+    // rarely fires — scripts can run for minutes before the counter
+    // accumulates past the fuel budget. The MAX_PUMP_ITERATIONS cap
+    // guarantees we can never spin forever even if the interrupt
+    // path mis-fires.
+    const MAX_PUMP_ITERATIONS: usize = 1_000_000;
+    for _ in 0..MAX_PUMP_ITERATIONS {
+        if !ctx.execute_pending_job() {
+            break;
+        }
+    }
+    if ctx.execute_pending_job() {
+        return Err(AfterburnerError::FuelExhausted);
+    }
+    let promise = rquickjs::Promise::from_value(result_val.clone())
+        .map_err(|e| AfterburnerError::Engine(format!("Promise::from_value: {e}")))?;
+    promise.finish::<String>().map_err(map_rquickjs_err)
+}
+
+/// Convert rquickjs errors to the typed `AfterburnerError` set.
+fn map_rquickjs_err(err: RquickjsError) -> AfterburnerError {
+    match err {
+        RquickjsError::Allocation => AfterburnerError::MemoryLimit,
+        RquickjsError::Unknown => AfterburnerError::Engine("unknown rquickjs error".into()),
+        ref other => {
+            let msg = format!("{other}");
+            if msg.contains("interrupt") || msg.contains("Interrupt") {
+                AfterburnerError::FuelExhausted
+            } else if msg.contains("out of memory") || msg.contains("OutOfMemory") {
+                AfterburnerError::MemoryLimit
+            } else if matches!(other, RquickjsError::Exception) {
+                AfterburnerError::CompileFailed("uncaught exception".into())
+            } else {
+                AfterburnerError::Engine(msg)
+            }
+        }
+    }
+}
+
+/// Escape a Rust string so it can be embedded as a JS string literal.
+fn js_string_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000C}' => out.push_str("\\f"),
+            ch if (ch as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", ch as u32));
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn combust(source: &str, input: JsonValue) -> Result<JsonValue> {
+        let c = NativeCombustor::new()?;
+        let id = c.ignite(source)?;
+        c.thrust(&id, &input, &FuelGauge::unlimited())
+    }
+
+    #[test]
+    fn eval_arithmetic() {
+        let out = combust("module.exports = () => 1 + 2", json!(null)).unwrap();
+        assert_eq!(out, json!(3));
+    }
+
+    #[test]
+    fn require_path_join_works() {
+        let src = r#"
+            const path = require('path');
+            module.exports = () => path.join('/var', 'data', 'x.json');
+        "#;
+        let out = combust(src, json!(null)).unwrap();
+        assert_eq!(out, json!("/var/data/x.json"));
+    }
+
+    #[test]
+    fn require_querystring_roundtrip() {
+        let src = r#"
+            const qs = require('querystring');
+            module.exports = () => qs.parse(qs.stringify({ a: '1', b: 'two & three' }));
+        "#;
+        let out = combust(src, json!(null)).unwrap();
+        assert_eq!(out, json!({ "a": "1", "b": "two & three" }));
+    }
+
+    #[test]
+    fn require_events_emitter_roundtrip() {
+        let src = r#"
+            const EventEmitter = require('events');
+            module.exports = () => {
+                const ee = new EventEmitter();
+                let captured = null;
+                ee.on('ping', (x) => { captured = x; });
+                ee.emit('ping', 42);
+                return captured;
+            };
+        "#;
+        let out = combust(src, json!(null)).unwrap();
+        assert_eq!(out, json!(42));
+    }
+
+    #[test]
+    fn require_buffer_hex_roundtrip() {
+        let src = r#"
+            const { Buffer } = require('buffer');
+            module.exports = () => Buffer.from('afterburner').toString('hex');
+        "#;
+        let out = combust(src, json!(null)).unwrap();
+        assert_eq!(out, json!("61667465726275726e6572"));
+    }
+
+    #[test]
+    fn require_unknown_module_throws() {
+        let src = r#"
+            module.exports = () => {
+                try { require('no-such-module'); return 'unexpected'; }
+                catch (e) { return e.message; }
+            };
+        "#;
+        let out = combust(src, json!(null)).unwrap();
+        assert_eq!(out, json!("Cannot find module 'no-such-module'"));
+    }
+
+    #[test]
+    fn require_node_prefix_stripped() {
+        let src = r#"
+            const path = require('node:path');
+            module.exports = () => path.basename('/a/b/c.js');
+        "#;
+        let out = combust(src, json!(null)).unwrap();
+        assert_eq!(out, json!("c.js"));
+    }
+
+    #[test]
+    fn eval_string_ops() {
+        let out = combust(
+            "module.exports = (d) => d.name.toUpperCase()",
+            json!({"name": "alice"}),
+        )
+        .unwrap();
+        assert_eq!(out, json!("ALICE"));
+    }
+
+    #[test]
+    fn eval_json_roundtrip() {
+        let out = combust(
+            "module.exports = (d) => ({ doubled: d.n * 2, keys: Object.keys(d).length })",
+            json!({"n": 21}),
+        )
+        .unwrap();
+        assert_eq!(out, json!({"doubled": 42, "keys": 1}));
+    }
+
+    #[test]
+    fn eval_array_methods() {
+        let out = combust(
+            "module.exports = (d) => d.xs.map(x => x * 2).reduce((a, b) => a + b, 0)",
+            json!({"xs": [1, 2, 3, 4]}),
+        )
+        .unwrap();
+        assert_eq!(out, json!(20));
+    }
+
+    #[test]
+    fn eval_object_destructuring() {
+        let out = combust(
+            "module.exports = ({a, b}) => ({sum: a + b})",
+            json!({"a": 3, "b": 4}),
+        )
+        .unwrap();
+        assert_eq!(out, json!({"sum": 7}));
+    }
+
+    #[test]
+    fn eval_es2020_optional_chain() {
+        let out = combust(
+            "module.exports = (d) => d?.nested?.missing ?? 'fallback'",
+            json!({"nested": {}}),
+        )
+        .unwrap();
+        assert_eq!(out, json!("fallback"));
+    }
+
+    #[test]
+    fn compile_failed_on_syntax_error() {
+        let c = NativeCombustor::new().unwrap();
+        let err = c.ignite("module.exports = (").unwrap_err();
+        match err {
+            AfterburnerError::CompileFailed(_) => {}
+            other => panic!("expected CompileFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fuel_exhaustion_returns_typed_error() {
+        let c = NativeCombustor::new().unwrap();
+        let id = c
+            .ignite("module.exports = () => { while (true) {} }")
+            .unwrap();
+        let limits = FuelGauge {
+            fuel: Some(1_000),
+            ..FuelGauge::default()
+        };
+        let err = c.thrust(&id, &json!(null), &limits).unwrap_err();
+        match err {
+            AfterburnerError::FuelExhausted => {}
+            other => panic!("expected FuelExhausted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn script_not_found_after_extinguish() {
+        let c = NativeCombustor::new().unwrap();
+        let id = c.ignite("module.exports = () => 1").unwrap();
+        c.extinguish(&id);
+        let err = c
+            .thrust(&id, &json!(null), &FuelGauge::unlimited())
+            .unwrap_err();
+        assert!(matches!(err, AfterburnerError::ScriptNotFound));
+    }
+
+    #[test]
+    fn hash_is_content_addressed() {
+        let c = NativeCombustor::new().unwrap();
+        let id1 = c.ignite("module.exports = () => 1").unwrap();
+        let id2 = c.ignite("module.exports = () => 1").unwrap();
+        assert_eq!(id1.hash, id2.hash);
+    }
+
+    #[test]
+    fn cross_thread_thrust_uses_per_thread_runtime() {
+        use std::thread;
+
+        let c = Arc::new(NativeCombustor::new().unwrap());
+        let id = c.ignite("module.exports = (d) => d.n * 2").unwrap();
+
+        // Thrust from 4 different threads. Each should spin up its own
+        // thread-local Runtime and compute independently.
+        let mut handles = Vec::new();
+        for n in 1..=4u64 {
+            let c = c.clone();
+            handles.push(thread::spawn(move || {
+                c.thrust(&id, &json!({ "n": n }), &FuelGauge::unlimited())
+                    .unwrap()
+            }));
+        }
+        let outs: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(outs, vec![json!(2), json!(4), json!(6), json!(8)]);
+    }
+}

@@ -1,0 +1,86 @@
+[package]
+name = "afterburner-wasi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Afterburner WASM engine — Wasmtime + QuickJS sandbox"
+
+[features]
+default = []
+# Expose HostFunction::HttpRequest to JS scripts. Off by default so flow
+# scripts don't get ambient network access. Forwards to afterburner-core's
+# feature of the same name.
+host-http = ["afterburner-core/host-http"]
+# Daemon-mode HTTP server plumbing (http.createServer().listen()).
+# Pulls axum + tokio + hyper into the crate. The `burn` CLI enables
+# this; library consumers that only run UDF / one-shot scripts
+# leave it off and don't pay the cost.
+daemon = [
+    "dep:axum",
+    "dep:tokio",
+    "dep:hyper",
+    "dep:bytes",
+    "dep:rustls",
+    "dep:tokio-rustls",
+    "dep:rustls-pemfile",
+    "dep:webpki-roots",
+    "dep:socket2",
+]
+# L3 shadows. Each shadow pulls in its own Rust crate (e.g. bcrypt)
+# and wires a host import the plugin's JS-side polyfill calls at
+# require() time. Plugin itself always ships the import stubs;
+# without the feature the host returns "shadow-bcrypt not enabled".
+shadow-bcrypt = ["afterburner-node-compat/shadow-bcrypt"]
+shadow-argon2 = ["afterburner-node-compat/shadow-argon2"]
+shadow-jsonwebtoken = ["afterburner-node-compat/shadow-jsonwebtoken"]
+shadow-sqlite3 = ["afterburner-node-compat/shadow-sqlite3"]
+shadow-sharp = ["afterburner-node-compat/shadow-sharp"]
+
+[dependencies]
+afterburner-core.workspace = true
+wasmtime.workspace = true
+wasmtime-wasi = { workspace = true, features = ["preview1"] }
+serde.workspace = true
+serde_json.workspace = true
+kovan-map.workspace = true
+kovan-channel.workspace = true
+anyhow.workspace = true
+tempfile.workspace = true
+fastrace.workspace = true
+afterburner-node-compat.workspace = true
+hex.workspace = true
+base64.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+axum = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
+socket2 = { workspace = true, optional = true }
+
+[dev-dependencies]
+afterburner-ignite.workspace = true
+rsa.workspace = true
+p256.workspace = true
+rand = "0.8"
+# Compile WAT (WebAssembly text format) to bytes inside tests so we
+# don't have to hand-encode binary fixtures.
+wat = "1"
+# B7 tls — generate self-signed certs in unit tests for the
+# server-config builder.
+rcgen = { workspace = true }
+
+[build-dependencies]
+sha2.workspace = true

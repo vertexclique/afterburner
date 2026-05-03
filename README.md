@@ -1,0 +1,124 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/vertexclique/afterburner/main/art/png/afterburner-bg-2000x500.png" alt="Afterburner" width="100%"/>
+</p>
+
+<p align="center">
+  <strong>A sandboxed JavaScript VM for Rust. Execute untrusted scripts with memory limits, timeouts, capability-gated I/O, and threading.</strong>
+</p>
+
+<p align="center">
+  <a href="https://crates.io/crates/afterburner-core"><img src="https://img.shields.io/crates/v/afterburner-core?style=flat-square&color=e6832e" alt="crates.io"/></a>
+  <a href="https://docs.rs/afterburner-core"><img src="https://img.shields.io/docsrs/afterburner-core?style=flat-square&color=2a9d8f" alt="docs.rs"/></a>
+  <img src="https://img.shields.io/badge/rust-1.90%2B_(2024_ed)-blue?style=flat-square&logo=rust&logoColor=white" alt="MSRV"/>
+  <img src="https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square" alt="License"/>
+</p>
+
+---
+
+Afterburner lets you load, execute, and unload JavaScript from Rust with hard resource limits and fine-grained permission controls. Node.js built-ins — `fs`, `crypto`, `http`, `zlib`, `child_process`, and more — are available but locked behind capability gates you configure per-script.
+
+## Library usage
+
+```toml
+[dependencies]
+afterburner = "0.1"
+```
+
+```rust
+use afterburner::Afterburner;
+use serde_json::json;
+
+let ab = Afterburner::new()?;
+let id = ab.register("module.exports = (d) => d.n + 1")?;
+let out = ab.run(&id, &json!({ "n": 41 }))?;
+assert_eq!(out, json!(42));
+```
+
+The default picks the best mode available (`adaptive` → native on the first call, WASM-sandboxed on the second). Use `Afterburner::builder()` for mode + limits + capabilities:
+
+```rust
+use afterburner::{Afterburner, Manifold, FsAccess};
+
+let ab = Afterburner::builder()
+    .fuel(1_000_000_000)
+    .memory_bytes(64 << 20)
+    .timeout_ms(30_000)
+    .manifold(Manifold {
+        fs: FsAccess::ReadWrite(vec!["/var/data".into()]),
+        ..Manifold::sealed()
+    })
+    .threaded(8)  // 8-worker scheduler; hash-routed with steal-when-idle
+    .build()?;
+```
+
+## `burn` — the command-line runtime
+
+### Install (prebuilt binaries)
+
+```bash
+# One-line installer (Linux / macOS / Windows-via-bash). Fetches the
+# latest GitHub Release, verifies the SHA-256 sidecar, drops `burn`
+# into ~/.local/bin (override with BURN_INSTALL=...).
+curl -fsSL https://raw.githubusercontent.com/vertexclique/afterburner/master/install.sh | bash
+
+# Pin a specific version
+BURN_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/vertexclique/afterburner/master/install.sh | bash
+```
+
+Or grab a tarball directly from the [Releases page](https://github.com/vertexclique/afterburner/releases) — archives are named `burn-<version>-<target>.tar.gz` (or `.zip` for Windows) and ship with a `.sha256` next to them.
+
+Built with `--features release-cli` (every backend + every L3 shadow + TypeScript loader), so it's a single self-contained binary — no runtime libsqlite3 / libssl / libclang required. Plugin `.wasm` is `include_bytes!`-baked into the binary at build time.
+
+### Install (build from source)
+
+```bash
+cargo install afterburner --features bin   # installs the `burn` binary
+burn ./script.js                           # run a file
+burn -e 'module.exports = () => 42'        # eval inline
+echo '{"n":21}' | burn thrust transform.js # UDF mode (stdin → JSON)
+burn bench perf.js --iters 10000 --workers 8
+burn repl                                  # interactive
+```
+
+Deno-style capability grants (deny by default):
+
+```bash
+burn --allow-net=api.example.com,*.trusted.io script.js
+burn --allow-fs=/tmp,/var/data etl.js
+burn --allow-env=HOME,PATH launcher.js
+burn -A runall.js                          # grant everything
+```
+
+See [`examples/`](./examples/) for standalone projects covering: single
+UDF, batched UDF, multi-worker scheduling, streaming crypto,
+`HostContext` + capability grants, rebuilding `burn` in 30 lines, and a
+**full axum HTTP server dispatching Express-style handlers to
+Afterburner** (`examples/express-app`).
+
+---
+
+## Workspace Crates
+
+| Crate | Purpose |
+|:------|:--------|
+| **`afterburner`**              | Facade: `Afterburner` + builder, `burn` binary, one ergonomic entry point |
+| **`afterburner-core`**         | `Combustor` trait, `Manifold`, `FuelGauge`, `BurnCache`, level-gated logging |
+| **`afterburner-ignite`**       | Native QuickJS via `rquickjs`, thread-local runtimes |
+| **`afterburner-wasi`**         | Wasmtime + Javy plugin sandbox with host-function imports, pooling allocator + InstancePre, bytecode cache |
+| **`afterburner-node-compat`**  | `plenum.js` polyfill bundle + Rust-backed host impls (incl. bounded HTTP + DNS with per-call timeouts) |
+| **`afterburner-flow`**         | High-level `FlowEngine::load/execute/unload` for flow-style pipelines |
+| **`afterburner-adaptive`**     | Flying Start: native → WASM tier switch |
+| **`afterburner-thrust`**       | Multi-threaded scheduler: bounded per-worker queues + global injector, token-bucket admission, NUMA-aware steal-when-idle, graceful drain |
+| **`afterburner-plugin`**       | WASM-side Javy plugin (`wasm32-wasip1`) |
+
+---
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
+
+---
+
+<p align="center">
+  <sub>Apache-2.0</sub>
+</p>

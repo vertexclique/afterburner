@@ -1,0 +1,9 @@
+/target
+**/target/
+/.claude/
+/dist/
+/.idea/
+/.vscode/
+*.swp
+!docs/wit
+docs/**

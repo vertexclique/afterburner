@@ -1,0 +1,52 @@
+# cargo-release configuration.
+#
+# `cargo release --execute <bump>` from master will:
+#   1. Bump the workspace version (the workspace owns `version` and
+#      every member crate inherits via `version.workspace = true`,
+#      so a single workspace bump propagates everywhere).
+#   2. Commit the bump using `pre-release-commit-message`.
+#   3. Tag the commit `v{version}` (controlled by `tag-prefix`).
+#   4. Push the commit AND the tag to `origin`.
+#
+# The tag push is what triggers `.github/workflows/release.yml`.
+# That workflow builds `burn` for every supported target and uploads
+# the archives + sha256 sidecars to a GitHub Release named after
+# the tag — fully hands-off.
+#
+# Manual roll is still supported:
+#   * Bump `version` in the workspace `[workspace.package]`, commit,
+#     then `git tag v0.x.y && git push origin v0.x.y`.
+#   * Or run the release workflow via "Run workflow" in the GitHub
+#     UI with the tag name as input — `workflow_dispatch` is wired
+#     for that case.
+
+# Tag format: v0.1.0
+tag-prefix = "v"
+tag-name = "{{prefix}}{{version}}"
+tag-message = "{{crate_name}} {{version}}"
+
+# Commit messages.
+pre-release-commit-message = "chore: release {{version}}"
+
+# Push everything that cargo-release produces. The release workflow
+# fires off the tag, not the commit, so we always need both.
+push = true
+push-remote = "origin"
+
+# Publish to crates.io. cargo-release walks the workspace in topological
+# dependency order: afterburner-core first, then crates that depend on
+# it, etc. It also waits for each publish to land in the registry index
+# before moving to the next dependent crate (handles the ~30s crates.io
+# propagation delay). `afterburner-plugin` has `publish = false` in its
+# own Cargo.toml so it's skipped automatically.
+publish = true
+
+# Single shared version across the workspace — never independent.
+shared-version = true
+
+# Allow `cargo release` to run from these branches.
+allow-branch = ["master", "main", "release/*"]
+
+# `--execute` is itself explicit consent; don't double-ask.
+sign-commit = false
+sign-tag = false

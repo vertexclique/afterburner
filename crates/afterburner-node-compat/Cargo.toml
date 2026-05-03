@@ -1,0 +1,78 @@
+[package]
+name = "afterburner-node-compat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Afterburner Node.js compat — polyfills + host shims"
+
+[dependencies]
+afterburner-core.workspace = true
+kovan-map.workspace = true
+rquickjs.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sha1.workspace = true
+hmac.workspace = true
+md-5.workspace = true
+getrandom.workspace = true
+aes-gcm.workspace = true
+aes.workspace = true
+cbc.workspace = true
+pbkdf2.workspace = true
+scrypt.workspace = true
+rsa.workspace = true
+p256.workspace = true
+spki.workspace = true
+pkcs8.workspace = true
+base64.workspace = true
+hex.workspace = true
+uuid.workspace = true
+ureq.workspace = true
+flate2.workspace = true
+kovan-channel.workspace = true
+# B7 dns expansion — hickory-resolver replaces ToSocketAddrs for
+# record-type-aware lookups (MX/TXT/CNAME/...). We run it
+# synchronously from a worker thread; the timeout pattern is shared
+# with `lookup`.
+hickory-resolver = { workspace = true }
+
+# L3 shadows — pure-Rust substitutes for popular npm packages with
+# .node native addons. Each shadow gated behind its own feature so
+# binary size scales with opt-in. `require('bcrypt')` etc. work
+# inside the WASM sandbox where loading a .node binary would be
+# impossible.
+bcrypt = { version = "0.17", optional = true }
+argon2 = { version = "0.5", optional = true, features = ["std"] }
+password-hash = { version = "0.5", optional = true, features = ["std"] }
+jsonwebtoken = { version = "10", optional = true, default-features = false, features = ["use_pem", "rust_crypto"] }
+# L3 shadow: sqlite3. `bundled` compiles the SQLite C amalgamation
+# into the burn binary (no runtime dependency on libsqlite3.so).
+rusqlite = { workspace = true, optional = true }
+# L3 shadow: sharp.
+image = { workspace = true, optional = true }
+fast_image_resize = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Used by shadow tests that need a real on-disk SQLite file.
+tempfile.workspace = true
+
+[features]
+# L3 shadow features. Off by default — enable via
+# `--features shadow-<pkg>` or bundle via `afterburner/bin` if
+# the CLI wants the full shadow set.
+shadow-bcrypt = ["dep:bcrypt"]
+shadow-argon2 = ["dep:argon2", "dep:password-hash"]
+shadow-jsonwebtoken = ["dep:jsonwebtoken"]
+shadow-sqlite3 = ["dep:rusqlite"]
+shadow-sharp = ["dep:image", "dep:fast_image_resize"]
+
+[build-dependencies]
+# Phase 1 keeps the bundler in pure Rust (concatenation). Phase 2 pulls in
+# esbuild when AFTERBURNER_REBUILD_PLENUM=1 is set and npm deps are present.

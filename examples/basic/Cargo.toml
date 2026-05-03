@@ -1,0 +1,16 @@
+[package]
+name = "afterburner-example-basic"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Standalone-workspace marker. Without this, Cargo would walk up the
+# tree searching for a [workspace] and attach this example to the
+# afterburner root — which is *not* what we want. This empty stanza
+# says "I am my own workspace."
+[workspace]
+
+[dependencies]
+afterburner = { path = "../../crates/afterburner" }
+anyhow = "1"
+serde_json = "1"
