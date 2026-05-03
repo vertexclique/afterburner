@@ -79,21 +79,65 @@ where
     }
 }
 
-/// Build a hickory `Resolver` from `/etc/resolv.conf`. Falls back to
-/// Cloudflare's 1.1.1.1 if the system config can't be read (rare —
-/// happens in chroots / containers without `/etc/resolv.conf`). We
+/// Build a hickory `Resolver`. When `servers` is non-empty, build a
+/// `ResolverConfig` from those addresses (UDP+TCP, port 53 default
+/// unless the address already specifies one). When empty, fall back
+/// to the system `/etc/resolv.conf` and finally to Cloudflare. We
 /// build per-call rather than caching: avoiding a global resolver
 /// keeps the code simpler and the `Resolver` constructor is cheap
 /// (~microseconds; no I/O until a lookup runs).
-fn make_resolver() -> Result<Resolver> {
+fn make_resolver(servers: &[String]) -> Result<Resolver> {
+    use hickory_resolver::config::{
+        NameServerConfig, Protocol, ResolverConfig, ResolverOpts,
+    };
+    if !servers.is_empty() {
+        let mut config = ResolverConfig::new();
+        for s in servers {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // Accept "1.1.1.1", "1.1.1.1:53", or "[::1]:53" forms.
+            let addr: std::net::SocketAddr = match trimmed.parse() {
+                Ok(a) => a,
+                Err(_) => {
+                    // Bare IP without port — append default DNS port 53.
+                    let with_port = if trimmed.contains(':') && !trimmed.starts_with('[') {
+                        // IPv6 without brackets — wrap.
+                        format!("[{trimmed}]:53")
+                    } else {
+                        format!("{trimmed}:53")
+                    };
+                    with_port.parse().map_err(|e| {
+                        AfterburnerError::Host(format!(
+                            "dns: setServers: cannot parse `{trimmed}`: {e}"
+                        ))
+                    })?
+                }
+            };
+            // Add both UDP and TCP — DNS responses larger than 512 bytes
+            // (DNSSEC, big TXT) fall back to TCP; matching `getaddrinfo`
+            // behavior keeps records like long SPF strings retrievable.
+            for protocol in [Protocol::Udp, Protocol::Tcp] {
+                let mut ns = NameServerConfig::new(addr, protocol);
+                ns.trust_negative_responses = false;
+                config.add_name_server(ns);
+            }
+        }
+        return Resolver::new(config, ResolverOpts::default()).map_err(|e| {
+            AfterburnerError::Host(format!("dns: resolver init (custom servers): {e}"))
+        });
+    }
     match Resolver::from_system_conf() {
         Ok(r) => Ok(r),
         Err(_) => {
             // Fall back to Cloudflare's resolver. Hickory ships preset
             // configs for the major public resolvers.
-            use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-            Ok(Resolver::new(ResolverConfig::cloudflare(), ResolverOpts::default())
-                .map_err(|e| AfterburnerError::Host(format!("dns resolver init: {e}")))?)
+            Resolver::new(
+                hickory_resolver::config::ResolverConfig::cloudflare(),
+                hickory_resolver::config::ResolverOpts::default(),
+            )
+            .map_err(|e| AfterburnerError::Host(format!("dns resolver init: {e}")))
         }
     }
 }
@@ -119,11 +163,12 @@ pub fn lookup(hostname: &str, m: &Manifold) -> Result<String> {
 
 // ----- record-type-aware resolvers ----------------------------------------
 
-pub fn resolve4(hostname: &str, m: &Manifold) -> Result<Vec<String>> {
+pub fn resolve4(hostname: &str, servers: &[String], m: &Manifold) -> Result<Vec<String>> {
     check_net(m, &format!("dns.resolve4({hostname})"))?;
     let hn = hostname.to_string();
+    let s = servers.to_vec();
     with_timeout(m, format!("dns.resolve4({hostname})"), move || {
-        let resolver = make_resolver()?;
+        let resolver = make_resolver(&s)?;
         let lookup = resolver
             .ipv4_lookup(&hn)
             .map_err(|e| AfterburnerError::Host(format!("dns.resolve4({hn}): {e}")))?;
@@ -131,11 +176,12 @@ pub fn resolve4(hostname: &str, m: &Manifold) -> Result<Vec<String>> {
     })
 }
 
-pub fn resolve6(hostname: &str, m: &Manifold) -> Result<Vec<String>> {
+pub fn resolve6(hostname: &str, servers: &[String], m: &Manifold) -> Result<Vec<String>> {
     check_net(m, &format!("dns.resolve6({hostname})"))?;
     let hn = hostname.to_string();
+    let s = servers.to_vec();
     with_timeout(m, format!("dns.resolve6({hostname})"), move || {
-        let resolver = make_resolver()?;
+        let resolver = make_resolver(&s)?;
         let lookup = resolver
             .ipv6_lookup(&hn)
             .map_err(|e| AfterburnerError::Host(format!("dns.resolve6({hn}): {e}")))?;
@@ -143,11 +189,12 @@ pub fn resolve6(hostname: &str, m: &Manifold) -> Result<Vec<String>> {
     })
 }
 
-pub fn resolve_mx(hostname: &str, m: &Manifold) -> Result<Vec<MxRecord>> {
+pub fn resolve_mx(hostname: &str, servers: &[String], m: &Manifold) -> Result<Vec<MxRecord>> {
     check_net(m, &format!("dns.resolveMx({hostname})"))?;
     let hn = hostname.to_string();
+    let s = servers.to_vec();
     with_timeout(m, format!("dns.resolveMx({hostname})"), move || {
-        let resolver = make_resolver()?;
+        let resolver = make_resolver(&s)?;
         let lookup = resolver
             .mx_lookup(&hn)
             .map_err(|e| AfterburnerError::Host(format!("dns.resolveMx({hn}): {e}")))?;
@@ -161,11 +208,12 @@ pub fn resolve_mx(hostname: &str, m: &Manifold) -> Result<Vec<MxRecord>> {
     })
 }
 
-pub fn resolve_txt(hostname: &str, m: &Manifold) -> Result<Vec<Vec<String>>> {
+pub fn resolve_txt(hostname: &str, servers: &[String], m: &Manifold) -> Result<Vec<Vec<String>>> {
     check_net(m, &format!("dns.resolveTxt({hostname})"))?;
     let hn = hostname.to_string();
+    let s = servers.to_vec();
     with_timeout(m, format!("dns.resolveTxt({hostname})"), move || {
-        let resolver = make_resolver()?;
+        let resolver = make_resolver(&s)?;
         let lookup = resolver
             .txt_lookup(&hn)
             .map_err(|e| AfterburnerError::Host(format!("dns.resolveTxt({hn}): {e}")))?;
@@ -183,12 +231,13 @@ pub fn resolve_txt(hostname: &str, m: &Manifold) -> Result<Vec<Vec<String>>> {
     })
 }
 
-pub fn resolve_cname(hostname: &str, m: &Manifold) -> Result<Vec<String>> {
+pub fn resolve_cname(hostname: &str, servers: &[String], m: &Manifold) -> Result<Vec<String>> {
     check_net(m, &format!("dns.resolveCname({hostname})"))?;
     let hn = hostname.to_string();
+    let s = servers.to_vec();
     with_timeout(m, format!("dns.resolveCname({hostname})"), move || {
         use hickory_resolver::proto::rr::RecordType;
-        let resolver = make_resolver()?;
+        let resolver = make_resolver(&s)?;
         let lookup = resolver
             .lookup(&hn, RecordType::CNAME)
             .map_err(|e| AfterburnerError::Host(format!("dns.resolveCname({hn}): {e}")))?;
@@ -199,12 +248,13 @@ pub fn resolve_cname(hostname: &str, m: &Manifold) -> Result<Vec<String>> {
     })
 }
 
-pub fn resolve_ns(hostname: &str, m: &Manifold) -> Result<Vec<String>> {
+pub fn resolve_ns(hostname: &str, servers: &[String], m: &Manifold) -> Result<Vec<String>> {
     check_net(m, &format!("dns.resolveNs({hostname})"))?;
     let hn = hostname.to_string();
+    let s = servers.to_vec();
     with_timeout(m, format!("dns.resolveNs({hostname})"), move || {
         use hickory_resolver::proto::rr::RecordType;
-        let resolver = make_resolver()?;
+        let resolver = make_resolver(&s)?;
         let lookup = resolver
             .lookup(&hn, RecordType::NS)
             .map_err(|e| AfterburnerError::Host(format!("dns.resolveNs({hn}): {e}")))?;
@@ -215,13 +265,14 @@ pub fn resolve_ns(hostname: &str, m: &Manifold) -> Result<Vec<String>> {
     })
 }
 
-pub fn reverse(ip: &str, m: &Manifold) -> Result<Vec<String>> {
+pub fn reverse(ip: &str, servers: &[String], m: &Manifold) -> Result<Vec<String>> {
     check_net(m, &format!("dns.reverse({ip})"))?;
     let parsed: IpAddr = ip
         .parse()
         .map_err(|_| AfterburnerError::Host(format!("dns.reverse({ip}): not a valid IP address")))?;
+    let s = servers.to_vec();
     with_timeout(m, format!("dns.reverse({ip})"), move || {
-        let resolver = make_resolver()?;
+        let resolver = make_resolver(&s)?;
         let lookup = resolver
             .reverse_lookup(parsed)
             .map_err(|e| AfterburnerError::Host(format!("dns.reverse: {e}")))?;
@@ -294,32 +345,33 @@ mod tests {
         // Every entry checks `check_net` first — none of them get to
         // the resolver under `Manifold::sealed`.
         let m = Manifold::sealed();
+        let no_servers: Vec<String> = vec![];
         assert!(matches!(
-            resolve4("example.com", &m),
+            resolve4("example.com", &no_servers, &m),
             Err(AfterburnerError::PermissionDenied(_))
         ));
         assert!(matches!(
-            resolve6("example.com", &m),
+            resolve6("example.com", &no_servers, &m),
             Err(AfterburnerError::PermissionDenied(_))
         ));
         assert!(matches!(
-            resolve_mx("example.com", &m),
+            resolve_mx("example.com", &no_servers, &m),
             Err(AfterburnerError::PermissionDenied(_))
         ));
         assert!(matches!(
-            resolve_txt("example.com", &m),
+            resolve_txt("example.com", &no_servers, &m),
             Err(AfterburnerError::PermissionDenied(_))
         ));
         assert!(matches!(
-            resolve_cname("example.com", &m),
+            resolve_cname("example.com", &no_servers, &m),
             Err(AfterburnerError::PermissionDenied(_))
         ));
         assert!(matches!(
-            resolve_ns("example.com", &m),
+            resolve_ns("example.com", &no_servers, &m),
             Err(AfterburnerError::PermissionDenied(_))
         ));
         assert!(matches!(
-            reverse("8.8.8.8", &m),
+            reverse("8.8.8.8", &no_servers, &m),
             Err(AfterburnerError::PermissionDenied(_))
         ));
     }
@@ -327,7 +379,23 @@ mod tests {
     #[test]
     fn reverse_rejects_non_ip() {
         let m = Manifold::open();
-        let result = reverse("not-an-ip", &m);
+        let result = reverse("not-an-ip", &[], &m);
         assert!(matches!(result, Err(AfterburnerError::Host(_))));
+    }
+
+    #[test]
+    fn make_resolver_with_custom_servers_succeeds() {
+        // Bare IP gets default port 53 appended.
+        let r = make_resolver(&["1.1.1.1".into()]);
+        assert!(r.is_ok(), "err: {:?}", r.err());
+        // IP with explicit port honored verbatim.
+        let r = make_resolver(&["8.8.8.8:53".into()]);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn make_resolver_rejects_garbage_server() {
+        let r = make_resolver(&["not an ip".into()]);
+        assert!(matches!(r, Err(AfterburnerError::Host(_))));
     }
 }

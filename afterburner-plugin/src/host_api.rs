@@ -90,45 +90,67 @@ unsafe extern "C" {
     // strings: `["addr", ...]` for resolve4 / resolve6 / cname / ns /
     // reverse, `[{"exchange": "...", "priority": N}, ...]` for mx,
     // and `[["fragment", ...], ...]` for txt.
+    //
+    // The `servers` argument is a comma-separated address list
+    // (e.g. `"1.1.1.1,8.8.8.8:5353"`); empty string means "use the
+    // system /etc/resolv.conf with a Cloudflare fallback." Per-call
+    // override of the resolver lets `Resolver` JS instances
+    // (`new dns.Resolver(); r.setServers([...])`) target alternate
+    // upstream resolvers without crossing the host boundary for the
+    // settings change.
     pub fn host_dns_resolve4(
         name_ptr: *const u8,
         name_len: u32,
+        servers_ptr: *const u8,
+        servers_len: u32,
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
     pub fn host_dns_resolve6(
         name_ptr: *const u8,
         name_len: u32,
+        servers_ptr: *const u8,
+        servers_len: u32,
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
     pub fn host_dns_resolve_mx(
         name_ptr: *const u8,
         name_len: u32,
+        servers_ptr: *const u8,
+        servers_len: u32,
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
     pub fn host_dns_resolve_txt(
         name_ptr: *const u8,
         name_len: u32,
+        servers_ptr: *const u8,
+        servers_len: u32,
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
     pub fn host_dns_resolve_cname(
         name_ptr: *const u8,
         name_len: u32,
+        servers_ptr: *const u8,
+        servers_len: u32,
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
     pub fn host_dns_resolve_ns(
         name_ptr: *const u8,
         name_len: u32,
+        servers_ptr: *const u8,
+        servers_len: u32,
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
     pub fn host_dns_reverse(
         ip_ptr: *const u8,
         ip_len: u32,
+        servers_ptr: *const u8,
+        servers_len: u32,
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;

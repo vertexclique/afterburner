@@ -819,18 +819,33 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
     .map_err(err_to_ab)?;
 
     // Record-type-aware resolvers — same JSON-encoded result shape as
-    // the WASM bridges, so the polyfill is path-agnostic.
+    // the WASM bridges. `servers_csv` is a comma-separated address
+    // list; empty string means "use system /etc/resolv.conf with a
+    // Cloudflare fallback." The split happens here so dns_host stays
+    // string-list-typed regardless of which JS runtime called us.
+    fn split_servers(csv: &str) -> Vec<String> {
+        csv.split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(String::from)
+            .collect()
+    }
+
     macro_rules! native_dns_string_list {
         ($name:literal, $impl:expr) => {
             g.set(
                 $name,
-                Function::new(ctx.clone(), |ctx: Ctx<'_>, hostname: String| {
-                    let list = active_manifold::with(|m| $impl(&hostname, m))
-                        .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
-                    Ok::<_, rquickjs::Error>(
-                        serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()),
-                    )
-                })
+                Function::new(
+                    ctx.clone(),
+                    |ctx: Ctx<'_>, hostname: String, servers_csv: String| {
+                        let servers = split_servers(&servers_csv);
+                        let list = active_manifold::with(|m| $impl(&hostname, &servers, m))
+                            .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                        Ok::<_, rquickjs::Error>(
+                            serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()),
+                        )
+                    },
+                )
                 .map_err(err_to_ab)?,
             )
             .map_err(err_to_ab)?;
@@ -845,38 +860,48 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
 
     g.set(
         "__host_dns_resolve_mx",
-        Function::new(ctx.clone(), |ctx: Ctx<'_>, hostname: String| {
-            let records = active_manifold::with(|m| dns_host::resolve_mx(&hostname, m))
-                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
-            let v: Vec<serde_json::Value> = records.iter().map(|r| r.to_json()).collect();
-            Ok::<_, rquickjs::Error>(
-                serde_json::to_string(&serde_json::Value::Array(v))
-                    .unwrap_or_else(|_| "[]".into()),
-            )
-        })
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, hostname: String, servers_csv: String| {
+                let servers = split_servers(&servers_csv);
+                let records =
+                    active_manifold::with(|m| dns_host::resolve_mx(&hostname, &servers, m))
+                        .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                let v: Vec<serde_json::Value> = records.iter().map(|r| r.to_json()).collect();
+                Ok::<_, rquickjs::Error>(
+                    serde_json::to_string(&serde_json::Value::Array(v))
+                        .unwrap_or_else(|_| "[]".into()),
+                )
+            },
+        )
         .map_err(err_to_ab)?,
     )
     .map_err(err_to_ab)?;
 
     g.set(
         "__host_dns_resolve_txt",
-        Function::new(ctx.clone(), |ctx: Ctx<'_>, hostname: String| {
-            let records = active_manifold::with(|m| dns_host::resolve_txt(&hostname, m))
-                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
-            // Node's TXT shape: string[][].
-            let v: Vec<serde_json::Value> = records
-                .into_iter()
-                .map(|fragments| {
-                    serde_json::Value::Array(
-                        fragments.into_iter().map(serde_json::Value::String).collect(),
-                    )
-                })
-                .collect();
-            Ok::<_, rquickjs::Error>(
-                serde_json::to_string(&serde_json::Value::Array(v))
-                    .unwrap_or_else(|_| "[]".into()),
-            )
-        })
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, hostname: String, servers_csv: String| {
+                let servers = split_servers(&servers_csv);
+                let records =
+                    active_manifold::with(|m| dns_host::resolve_txt(&hostname, &servers, m))
+                        .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                // Node's TXT shape: string[][].
+                let v: Vec<serde_json::Value> = records
+                    .into_iter()
+                    .map(|fragments| {
+                        serde_json::Value::Array(
+                            fragments.into_iter().map(serde_json::Value::String).collect(),
+                        )
+                    })
+                    .collect();
+                Ok::<_, rquickjs::Error>(
+                    serde_json::to_string(&serde_json::Value::Array(v))
+                        .unwrap_or_else(|_| "[]".into()),
+                )
+            },
+        )
         .map_err(err_to_ab)?,
     )
     .map_err(err_to_ab)?;

@@ -113,28 +113,94 @@ Wizer-preinitialized `.wasm` at
 | libclang | any recent | required by `rquickjs-sys` bindgen |
 | C compiler | any recent | required by `rquickjs-sys` / QuickJS |
 
-### Build (plugin regeneration — optional)
+### Build (plugin regeneration — required for polyfill / extern changes)
 
-Only needed when changing plugin Rust code, the WIT interface, or the
-plenum polyfill bundle. The committed `.wasm` is otherwise authoritative.
+Needed when changing plugin Rust code, plugin extern decls, JS bridges,
+or any file under `afterburner-node-compat/polyfills/`. The committed
+`.wasm` is otherwise authoritative.
 
 | Tool | Version | How to get it |
 |:-----|:--------|:--------------|
-| `wasm32-wasip1` | via rustup | `rustup target add wasm32-wasip1` |
-| `javy` CLI | 8.1.1+ | `cargo install javy-cli` or [releases](https://github.com/bytecodealliance/javy/releases) |
-| Node bundler | not required | Plenum bundle is produced by a pure-Rust `build.rs` (concat + include_str!) |
+| `wasm32-wasip1` target | via rustup | `rustup target add wasm32-wasip1` |
+| `javy` CLI | exactly 8.1.1 | `cargo install javy-cli` or [releases](https://github.com/bytecodealliance/javy/releases). Newer / older javy versions are not validated. |
+| `wasm-opt` (Binaryen) | 119+ | Required to lower modern WASM features (bulk-memory, sign-ext, nontrapping-fptoint) that javy 8.1.1's bundled validator rejects. Install from [Binaryen releases](https://github.com/WebAssembly/binaryen/releases) or `npm install -g binaryen`. The build script falls back to a direct copy if `wasm-opt` isn't on `$PATH`, but the subsequent `javy init-plugin` will then fail with a wasm-validator error. |
+
+The build script auto-discovers `javy` and `wasm-opt` via `$PATH` first,
+then falls back to `~/.local/bin/<tool>`. Override with `JAVY=...` /
+`WASM_OPT=...` env vars.
 
 Regenerate the plugin:
 
 ```bash
-# 1. Rebuild the plenum bundle from polyfills/ (sets AFTERBURNER_REBUILD_PLENUM=1)
+# 1. Rebuild the plenum bundle from polyfills/.
 AFTERBURNER_REBUILD_PLENUM=1 cargo build -p afterburner-node-compat
 
-# 2. Compile + Wizer-preinit the plugin.
-#    `javy init-plugin` is required because Javy runtime state has to be
-#    frozen into the binary before host imports are satisfiable.
-cd afterburner-plugin
-./build.sh     # writes to ../quickjs-provider/afterburner_plugin.wasm
+# 2. Compile + lower wasm features + Wizer-preinit.
+#    The script:
+#      a) cargo build --target wasm32-wasip1 --release
+#      b) wasm-opt lowers bulk-memory / sign-ext / nontrapping-fptoint
+#         to MVP-compatible ops so javy's validator accepts the module
+#      c) javy init-plugin freezes the QuickJS runtime + plenum bundle
+#         into the wasm so first-run startup is sub-millisecond
+bash afterburner-plugin/build.sh   # writes ../quickjs-provider/afterburner_plugin.wasm
+```
+
+### Development environment summary
+
+For local development end-to-end, install in this order:
+
+1. **Rust stable 1.90+** with the wasm32-wasip1 target:
+   ```bash
+   rustup install stable
+   rustup target add wasm32-wasip1
+   ```
+2. **System libraries** for `rquickjs-sys` bindgen:
+   ```bash
+   # Debian/Ubuntu
+   sudo apt install build-essential clang libclang-dev pkg-config
+   # macOS
+   xcode-select --install
+   ```
+3. **Plugin regeneration toolchain** (only if you'll touch
+   `afterburner-plugin/` or `afterburner-node-compat/polyfills/`):
+   ```bash
+   # javy CLI 8.1.1
+   curl -L https://github.com/bytecodealliance/javy/releases/download/v8.1.1/javy-x86_64-linux-v8.1.1.gz \
+     | gunzip > ~/.local/bin/javy && chmod +x ~/.local/bin/javy
+
+   # Binaryen (wasm-opt) 119+
+   curl -L https://github.com/WebAssembly/binaryen/releases/download/version_129/binaryen-version_129-x86_64-linux.tar.gz \
+     | tar -xz -C /tmp && cp /tmp/binaryen-version_129/bin/wasm-opt ~/.local/bin/
+   ```
+4. **Build the workspace**:
+   ```bash
+   cargo build --workspace --exclude afterburner-plugin
+   cargo test  --workspace --exclude afterburner-plugin
+   ```
+
+The plugin crate is excluded from `--workspace` builds because it
+targets `wasm32-wasip1` and can't compile on the host triple — its
+behavior is exercised end-to-end through the host crates' tests
+that load the committed `.wasm`.
+
+### Release builds
+
+The default `[profile.release]` is already tuned (`opt-level=3`, fat
+LTO, single codegen unit, stripped symbols, `panic="abort"`). For
+shipping the `burn` CLI:
+
+```bash
+cargo build -p afterburner --features bin --release
+# 21 MB single binary, statically linked to SQLite (when
+# shadow-sqlite3 is on) and rustls. No runtime libsqlite3.so /
+# libssl needed.
+```
+
+For shipping with **every shadow** baked in:
+
+```bash
+cargo build -p afterburner --release --features \
+  bin,ts,shadow-bcrypt,shadow-argon2,shadow-jsonwebtoken,shadow-sqlite3,shadow-sharp
 ```
 
 ---

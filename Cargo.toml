@@ -143,6 +143,46 @@ javy-plugin-api = "6.0"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
+debug = false
+strip = "symbols"
+panic = "abort"
+incremental = false
+overflow-checks = false
 
 [profile.bench]
 inherits = "release"
+
+# Tightest possible CLI profile. Used by `cargo build --profile=cli-release`
+# for shipping the `burn` binary — maxes every optimization knob:
+#   * opt-level = 3 + LTO fat: aggressive cross-crate inlining
+#   * codegen-units = 1: single TU per crate, lets the optimizer see
+#     everything in one pass at link time
+#   * panic = "abort": drops the unwind tables (~5% binary size,
+#     small perf win on hot paths that otherwise emit landing pads)
+#   * strip = "symbols": removes debug symbols + symbol table from
+#     the final ELF/Mach-O
+#   * overflow-checks = false: integer overflow checks compile out
+#     (release default; explicit so future-us doesn't accidentally
+#     re-enable them through `[profile.release.package.<crate>]`)
+[profile.cli-release]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = false
+strip = "symbols"
+panic = "abort"
+incremental = false
+overflow-checks = false
+
+# `wasm-release` profile is what `afterburner-plugin/build.sh` uses
+# when re-Wizer-preinitializing the QuickJS plugin. We want a small
+# wasm32-wasip1 binary (every byte ships with the Rust binary via
+# include_bytes!) so size beats raw speed at the codegen-unit knob.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"   # size-first
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

@@ -970,17 +970,28 @@ fn install_http_dns<'js>(globals: &Object<'js>) {
         }),
     );
 
-    // Record-type-aware resolvers. Every bridge returns a JSON string
-    // (success) or `__HOST_ERR__:<msg>` (failure). The polyfill is
-    // responsible for `JSON.parse`-ing the success path.
+    // Record-type-aware resolvers. Every bridge takes (hostname,
+    // servers_csv) — the polyfill passes an empty string for
+    // "use system config" and a comma-separated list otherwise.
+    // The bridge returns a JSON string (success) or
+    // `__HOST_ERR__:<msg>` (failure); the polyfill is responsible
+    // for `JSON.parse`-ing the success path.
     macro_rules! bind_dns_str {
         ($name:literal, $fn:ident) => {
             let _ = globals.set(
                 $name,
-                Func::from(|name: String| -> String {
+                Func::from(|name: String, servers_csv: String| -> String {
                     let nb = name.as_bytes();
+                    let sb = servers_csv.as_bytes();
                     match call_read(|out, cap| unsafe {
-                        $fn(nb.as_ptr(), nb.len() as u32, out, cap)
+                        $fn(
+                            nb.as_ptr(),
+                            nb.len() as u32,
+                            sb.as_ptr(),
+                            sb.len() as u32,
+                            out,
+                            cap,
+                        )
                     }) {
                         Ok(s) => s,
                         Err(e) => format!("__HOST_ERR__:{e}"),

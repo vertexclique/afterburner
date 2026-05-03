@@ -295,6 +295,97 @@ fn sealed_manifold_blocks_all_resolvers() {
 
 #[test]
 #[serial]
+fn resolver_setServers_targets_custom_dns() {
+    if !can_resolve() {
+        eprintln!("skip Resolver.setServers: no network");
+        return;
+    }
+    // Point a `dns.Resolver` at Cloudflare explicitly. Even with the
+    // system /etc/resolv.conf pointing somewhere else, this one
+    // instance asks 1.1.1.1 directly.
+    let out = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .args([
+            "-A",
+            "-e",
+            r#"
+                const dns = require('dns');
+                const r = new dns.Resolver();
+                r.setServers(['1.1.1.1', '1.0.0.1']);
+                if (JSON.stringify(r.getServers()) !== '["1.1.1.1","1.0.0.1"]') {
+                    console.error('getServers:', r.getServers()); process.exit(2);
+                }
+                const ips = r.resolve4('cloudflare.com');
+                if (!Array.isArray(ips) || ips.length === 0) {
+                    console.error('ips:', ips); process.exit(3);
+                }
+                console.log('SET_SERVERS_OK count=' + ips.length);
+            "#,
+        ])
+        .output()
+        .expect("spawn burn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("SET_SERVERS_OK"), "stdout: {stdout}");
+}
+
+#[test]
+#[serial]
+fn module_setServers_round_trips() {
+    let out = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .args([
+            "-A",
+            "-e",
+            r#"
+                const dns = require('dns');
+                dns.setServers(['8.8.8.8', '8.8.4.4']);
+                const got = dns.getServers();
+                if (got.length !== 2 || got[0] !== '8.8.8.8' || got[1] !== '8.8.4.4') {
+                    console.error('got:', got); process.exit(2);
+                }
+                console.log('MODULE_SET_OK');
+            "#,
+        ])
+        .output()
+        .expect("spawn burn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "stdout: {stdout}");
+    assert!(stdout.contains("MODULE_SET_OK"), "stdout: {stdout}");
+}
+
+#[test]
+#[serial]
+fn resolver_setServers_rejects_non_array() {
+    let out = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .args([
+            "-A",
+            "-e",
+            r#"
+                const dns = require('dns');
+                const r = new dns.Resolver();
+                try {
+                    r.setServers('1.1.1.1');
+                    console.error('expected throw'); process.exit(2);
+                } catch (e) {
+                    if (!(e instanceof TypeError)) {
+                        console.error('wrong err:', e); process.exit(3);
+                    }
+                    console.log('TYPECHECK_OK');
+                }
+            "#,
+        ])
+        .output()
+        .expect("spawn burn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "stdout: {stdout}");
+    assert!(stdout.contains("TYPECHECK_OK"), "stdout: {stdout}");
+}
+
+#[test]
+#[serial]
 fn invalid_rrtype_throws_enotimp() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")

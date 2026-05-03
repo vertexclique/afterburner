@@ -684,6 +684,16 @@ fn wrap_dns(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
     // a `Vec<String>` result. Macro to dedup; the macro body lives at
     // the top of this function so each `func_wrap` keeps a unique
     // closure type.
+    /// Decode the comma-separated `servers` string the polyfill
+    /// passes through. Empty string → empty list (use system config).
+    fn parse_servers_csv(s: &str) -> Vec<String> {
+        s.split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(String::from)
+            .collect()
+    }
+
     macro_rules! wrap_string_list {
         ($name:literal, $impl:expr, $label:literal) => {
             linker
@@ -693,6 +703,8 @@ fn wrap_dns(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     |mut caller: Caller<'_, HostState>,
                      ptr: i32,
                      len: i32,
+                     servers_ptr: i32,
+                     servers_len: i32,
                      out_ptr: i32,
                      out_cap: i32|
                      -> i32 {
@@ -703,8 +715,13 @@ fn wrap_dns(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                             Some(s) => s,
                             None => return E_OTHER,
                         };
+                        let servers_csv = match read_str(&memory, &caller, servers_ptr, servers_len) {
+                            Some(s) => s,
+                            None => String::new(),
+                        };
+                        let servers = parse_servers_csv(&servers_csv);
                         let m = caller.data().manifold.clone();
-                        match $impl(&arg, &m) {
+                        match $impl(&arg, &servers, &m) {
                             Ok(list) => {
                                 let v: Vec<serde_json::Value> = list
                                     .into_iter()
@@ -740,6 +757,8 @@ fn wrap_dns(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
             |mut caller: Caller<'_, HostState>,
              ptr: i32,
              len: i32,
+             servers_ptr: i32,
+             servers_len: i32,
              out_ptr: i32,
              out_cap: i32|
              -> i32 {
@@ -750,8 +769,13 @@ fn wrap_dns(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     Some(s) => s,
                     None => return E_OTHER,
                 };
+                let servers_csv = match read_str(&memory, &caller, servers_ptr, servers_len) {
+                    Some(s) => s,
+                    None => String::new(),
+                };
+                let servers = parse_servers_csv(&servers_csv);
                 let m = caller.data().manifold.clone();
-                match dns_host::resolve_mx(&name, &m) {
+                match dns_host::resolve_mx(&name, &servers, &m) {
                     Ok(list) => {
                         let v: Vec<serde_json::Value> =
                             list.iter().map(|r| r.to_json()).collect();
@@ -776,6 +800,8 @@ fn wrap_dns(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
             |mut caller: Caller<'_, HostState>,
              ptr: i32,
              len: i32,
+             servers_ptr: i32,
+             servers_len: i32,
              out_ptr: i32,
              out_cap: i32|
              -> i32 {
@@ -786,8 +812,13 @@ fn wrap_dns(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     Some(s) => s,
                     None => return E_OTHER,
                 };
+                let servers_csv = match read_str(&memory, &caller, servers_ptr, servers_len) {
+                    Some(s) => s,
+                    None => String::new(),
+                };
+                let servers = parse_servers_csv(&servers_csv);
                 let m = caller.data().manifold.clone();
-                match dns_host::resolve_txt(&name, &m) {
+                match dns_host::resolve_txt(&name, &servers, &m) {
                     Ok(records) => {
                         // Node's resolveTxt yields `string[][]` —
                         // outer per RR, inner per character-string.

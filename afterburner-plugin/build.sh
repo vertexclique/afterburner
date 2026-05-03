@@ -33,8 +33,53 @@ if ! command -v "$javy" >/dev/null; then
 fi
 
 tmp=$(mktemp)
-trap 'rm -f "$tmp"' EXIT
-"$javy" init-plugin "$raw" -o "$tmp"
+lowered=$(mktemp)
+trap 'rm -f "$tmp" "$lowered"' EXIT
+
+# 2a. Lower newer WASM features that the wasm-validator bundled
+#     inside `javy init-plugin` (Binaryen) doesn't accept yet.
+#     Modern Rust wasi-sysroot emits `memory.copy` / `memory.fill`
+#     (bulk-memory) and sign-extension ops; both are stable WASM
+#     features but javy 8.1.1's embedded validator hasn't caught up.
+#     We run a fresh `wasm-opt` first to either accept (if the local
+#     binary is new enough) or transform the module into a form the
+#     embedded validator handles. Falls back to a direct copy if
+#     wasm-opt isn't installed — that path will fail loudly inside
+#     javy if the plugin actually contains bulk-memory ops, which
+#     is the right bisection signal.
+wasm_opt=${WASM_OPT:-wasm-opt}
+if ! command -v "$wasm_opt" >/dev/null; then
+    if [[ -x /home/vclq/.local/bin/wasm-opt ]]; then
+        wasm_opt=/home/vclq/.local/bin/wasm-opt
+    fi
+fi
+
+if command -v "$wasm_opt" >/dev/null; then
+    # Modern wasi-sysroot emits memory.copy / memory.fill (bulk
+    # memory). javy 8.1.1's bundled wasm-validator rejects them
+    # because its Binaryen build pre-dates bulk-memory acceptance.
+    # `--llvm-memory-copy-fill-lowering` rewrites those ops to
+    # MVP-compatible loops and clears the bulk-memory feature flag,
+    # so the resulting module passes javy's validator while
+    # behaving identically at runtime.
+    "$wasm_opt" \
+        --enable-bulk-memory \
+        --enable-sign-ext \
+        --enable-mutable-globals \
+        --enable-nontrapping-float-to-int \
+        --enable-reference-types \
+        --enable-multivalue \
+        --llvm-memory-copy-fill-lowering \
+        --llvm-nontrapping-fptoint-lowering \
+        --signext-lowering \
+        --strip-target-features \
+        -O2 \
+        "$raw" -o "$lowered"
+else
+    cp "$raw" "$lowered"
+fi
+
+"$javy" init-plugin "$lowered" -o "$tmp"
 
 dest=../quickjs-provider/afterburner_plugin.wasm
 cp "$tmp" "$dest"
