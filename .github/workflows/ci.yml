@@ -105,12 +105,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          plugin_dir=crates/afterburner-wasi/plugin
           # Stash the current artifact + sha
-          cp quickjs-provider/afterburner_plugin.wasm /tmp/expected.wasm
-          cp quickjs-provider/afterburner_plugin.wasm.bundle-sha256 /tmp/expected.sha
+          cp "$plugin_dir/afterburner_plugin.wasm" /tmp/expected.wasm
+          cp "$plugin_dir/afterburner_plugin.wasm.bundle-sha256" /tmp/expected.sha
           bash crates/afterburner-plugin/build.sh
           # The wizer pre-init step is non-deterministic on metadata
           # (timestamps embedded in custom sections). We compare the
           # *bundle* (polyfills/plenum) sha which build.sh writes to
           # the .bundle-sha256 sidecar — that's content-addressed.
-          diff -u /tmp/expected.sha quickjs-provider/afterburner_plugin.wasm.bundle-sha256
+          diff -u /tmp/expected.sha "$plugin_dir/afterburner_plugin.wasm.bundle-sha256"
