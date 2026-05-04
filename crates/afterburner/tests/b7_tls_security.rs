@@ -1,3 +1,4 @@
+#![cfg(feature = "bin")]
 //! B7 security guardrails for `tls`.
 //!
 //! Pinned defenses:

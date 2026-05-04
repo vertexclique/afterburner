@@ -1,3 +1,4 @@
+#![cfg(feature = "bin")]
 //! B7 security guardrails for `net` (raw TCP).
 //!
 //! Each test pins a specific defense in `daemon_net::net_outbound_allowed`

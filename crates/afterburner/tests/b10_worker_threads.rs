@@ -1,3 +1,4 @@
+#![cfg(feature = "bin")]
 #![allow(non_snake_case)]
 //! B10 — `worker_threads` round-trip integration.
 //!

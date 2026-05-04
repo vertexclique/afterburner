@@ -1,0 +1,292 @@
+// Afterburner host interface — authoritative specification for the
+// ABI between `afterburner-plugin` (guest) and `afterburner-wasi`
+// (host). Written as a WASI P2 WIT document.
+//
+// Status: DOCUMENTATION ONLY. The runtime ABI is hand-written in
+// `afterburner-plugin/src/lib.rs` (guest-side extern "C" declarations)
+// and `afterburner-wasi/src/host_imports.rs` (wasmtime linker
+// registrations), kept in sync by humans. This WIT file is the shape
+// contract — anyone adding a new host import SHOULD update this spec
+// in the same change, so the three sides stay aligned.
+//
+// Why not codegen: the runtime uses a raw `(ptr, len)` buffer protocol
+// with base64-encoded binary data and a `__HOST_ERR__:`-prefixed string
+// error sentinel — neither expressible directly in WIT types. A full
+// P2 component-model migration is blocked on upstream wasmtime tooling
+// converging (Wizer preinitialization + `wasmtime::component::Linker`
+// ergonomics). Re-evaluate once that lands.
+
+package afterburner:host@1.1.0;
+
+// ---- shared types --------------------------------------------------------
+
+interface types {
+    /// Structured error returned by any host call that can fail.
+    /// Current buffer-protocol equivalent:
+    ///   * `-1`  -> `permission-denied`
+    ///   * `-2`  -> `not-found`
+    ///   * `-3`  -> `other`
+    ///   * `-4`  -> `buffer-too-small`
+    variant host-error {
+        permission-denied(string),
+        not-found(string),
+        other(string),
+        buffer-too-small(u32),
+    }
+
+    record file-stat {
+        size: u64,
+        is-file: bool,
+        is-directory: bool,
+        mtime-ms: u64,
+    }
+
+    record http-response {
+        status: u16,
+        body: list<u8>,
+    }
+
+    /// Handle to a streaming hash / sign / verify context held on the
+    /// host side. Opaque to the guest — the guest only passes it back
+    /// unmodified on update / finalize. `0` is reserved as the
+    /// "invalid handle" sentinel and means "open failed; read
+    /// `__host_last_error` for the reason".
+    type handle = u64;
+}
+
+// ---- filesystem ---------------------------------------------------------
+
+/// Capability-gated filesystem access. Roots are supplied by the host's
+/// `Manifold::fs` and enforced via canonicalized path validation.
+interface fs {
+    use types.{host-error, file-stat};
+
+    read-file-sync:  func(path: string) -> result<list<u8>, host-error>;
+    write-file-sync: func(path: string, data: list<u8>) -> result<_, host-error>;
+    exists-sync:     func(path: string) -> bool;
+    stat-sync:       func(path: string) -> result<file-stat, host-error>;
+    readdir-sync:    func(path: string) -> result<list<string>, host-error>;
+    mkdir-sync:      func(path: string, recursive: bool) -> result<_, host-error>;
+    unlink-sync:     func(path: string) -> result<_, host-error>;
+    rename-sync:     func(from: string, to: string) -> result<_, host-error>;
+
+    /// Chunked read for `fs.createReadStream`. `offset` + `len` are
+    /// 64-bit; guest passes them as two 32-bit halves on the wire.
+    read-chunk: func(path: string, offset: u64, len: u32) -> result<list<u8>, host-error>;
+
+    /// Chunked append for `fs.createWriteStream`.
+    write-chunk: func(path: string, offset: u64, data: list<u8>) -> result<_, host-error>;
+
+    /// Total file size, used by the read-stream polyfill to know when
+    /// to emit `end`.
+    size: func(path: string) -> result<u64, host-error>;
+}
+
+// ---- crypto -------------------------------------------------------------
+
+/// One-shot digest, HMAC, random bytes. For `createHash`/`createHmac`
+/// streaming variants see the separate `crypto-stream` interface.
+interface crypto {
+    use types.{host-error};
+
+    hash:              func(algorithm: string, data: list<u8>) -> result<list<u8>, host-error>;
+    hmac:              func(algorithm: string, key: list<u8>, data: list<u8>) -> result<list<u8>, host-error>;
+    random-bytes:      func(len: u32) -> result<list<u8>, host-error>;
+    random-uuid:       func() -> result<string, host-error>;
+    timing-safe-equal: func(a: list<u8>, b: list<u8>) -> bool;
+}
+
+/// Symmetric ciphers. AES-GCM and AES-CBC with PKCS#7 padding.
+/// `algorithm` is `aes-128-gcm` | `aes-256-gcm` | `aes-128-cbc` |
+/// `aes-256-cbc`. GCM returns `ciphertext || 16-byte-tag`; CBC
+/// returns ciphertext only (no tag).
+interface crypto-ciphers {
+    use types.{host-error};
+
+    aes-gcm-encrypt: func(
+        algorithm: string,
+        key: list<u8>,
+        nonce: list<u8>,
+        data: list<u8>,
+        aad: option<list<u8>>,
+    ) -> result<list<u8>, host-error>;
+
+    aes-gcm-decrypt: func(
+        algorithm: string,
+        key: list<u8>,
+        nonce: list<u8>,
+        data: list<u8>,
+        aad: option<list<u8>>,
+    ) -> result<list<u8>, host-error>;
+
+    aes-cbc-encrypt: func(
+        algorithm: string,
+        key: list<u8>,
+        iv: list<u8>,
+        data: list<u8>,
+    ) -> result<list<u8>, host-error>;
+
+    aes-cbc-decrypt: func(
+        algorithm: string,
+        key: list<u8>,
+        iv: list<u8>,
+        data: list<u8>,
+    ) -> result<list<u8>, host-error>;
+}
+
+/// Key derivation functions.
+interface crypto-kdfs {
+    use types.{host-error};
+
+    pbkdf2-sync: func(
+        digest: string,
+        password: list<u8>,
+        salt: list<u8>,
+        iterations: u32,
+        key-len: u32,
+    ) -> result<list<u8>, host-error>;
+
+    scrypt-sync: func(
+        password: list<u8>,
+        salt: list<u8>,
+        n: u32,
+        r: u32,
+        p: u32,
+        key-len: u32,
+    ) -> result<list<u8>, host-error>;
+}
+
+/// One-shot RSA (PKCS#1 v1.5) and ECDSA P-256 signatures. `algorithm`
+/// is `RS256` / `RS384` / `RS512` / `ES256`. PEM-encoded keys.
+interface crypto-sign {
+    use types.{host-error};
+
+    sign:   func(algorithm: string, key-pem: string, data: list<u8>) -> result<list<u8>, host-error>;
+    verify: func(algorithm: string, key-pem: string, data: list<u8>, signature: list<u8>) -> bool;
+}
+
+/// Streaming hash / HMAC / sign / verify. Guest opens a handle, feeds
+/// chunks via `update`, then consumes the handle with `finalize`. The
+/// host-side state is a `DigestState` or `HmacState` stored in a
+/// per-runtime lock-free map; handle `0` means open failed — read
+/// `diagnostics.last-error` for the reason.
+interface crypto-stream {
+    use types.{handle, host-error};
+
+    // Plain digest (sha256/sha384/sha512/md5).
+    hash-open:   func(algorithm: string) -> handle;
+    // Keyed HMAC (sha256/sha384/sha512). Key is embedded at open time;
+    // HMAC doesn't accept a key change mid-stream.
+    hmac-open:   func(algorithm: string, key: list<u8>) -> handle;
+    // Common update + finalize for both hash and hmac handles.
+    hash-update: func(h: handle, data: list<u8>) -> result<_, host-error>;
+    hash-digest: func(h: handle, encoding: string) -> result<string, host-error>;
+
+    // Streaming sign / verify. `sign-open` returns a handle keyed by
+    // the signature algorithm (SHA variant derived from the code); the
+    // key is provided at finalize time since sign semantics are
+    // "finalize with this key".
+    sign-open:       func(algorithm: string) -> handle;
+    sign-update:     func(h: handle, data: list<u8>) -> result<_, host-error>;
+    sign-finalize:   func(h: handle, algorithm: string, key-pem: string) -> result<list<u8>, host-error>;
+    verify-finalize: func(h: handle, algorithm: string, key-pem: string, signature: list<u8>) -> bool;
+}
+
+// ---- os -----------------------------------------------------------------
+
+interface os {
+    platform: func() -> string;
+    arch:     func() -> string;
+}
+
+// ---- http ---------------------------------------------------------------
+
+interface http {
+    use types.{host-error, http-response};
+
+    request: func(
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: option<list<u8>>,
+    ) -> result<http-response, host-error>;
+}
+
+// ---- dns ----------------------------------------------------------------
+
+interface dns {
+    use types.{host-error};
+
+    lookup: func(hostname: string) -> result<string, host-error>;
+}
+
+// ---- zlib ---------------------------------------------------------------
+
+interface zlib {
+    use types.{host-error};
+
+    deflate-sync: func(input: list<u8>) -> result<list<u8>, host-error>;
+    inflate-sync: func(input: list<u8>) -> result<list<u8>, host-error>;
+    gzip-sync:    func(input: list<u8>) -> result<list<u8>, host-error>;
+    gunzip-sync:  func(input: list<u8>) -> result<list<u8>, host-error>;
+}
+
+// ---- state store --------------------------------------------------------
+
+/// Key/value state store surfaced to JS as `require('afterburner:state')`.
+/// Backed by a user-provided `StateStore` trait implementation on the
+/// host (default: in-process `HopscotchMap`).
+interface state {
+    use types.{host-error};
+
+    get:       func(key: string) -> option<list<u8>>;
+    set:       func(key: string, value: list<u8>) -> result<_, host-error>;
+    delete:    func(key: string) -> bool;
+    /// Atomic counter increment. Returns the post-increment value so
+    /// callers can detect races without a read-modify-write cycle.
+    increment: func(key: string, delta: s64) -> s64;
+}
+
+// ---- error inspection ---------------------------------------------------
+
+/// Reads the detailed message for the most recent host call that
+/// returned a negative error code or a zero handle. Called by the
+/// polyfill when it needs to translate a sentinel back into a typed
+/// exception (e.g. `EACCES` for permission-denied).
+interface diagnostics {
+    last-error: func() -> string;
+}
+
+// ---- child_process ------------------------------------------------------
+
+/// Native path only. The plugin does NOT import this interface — the
+/// WASM sandbox has no path to a host subprocess launcher.
+interface child-process {
+    use types.{host-error};
+
+    record exec-result {
+        status: s32,
+        stdout: string,
+        stderr: string,
+    }
+
+    exec-sync: func(command: string, args: list<string>) -> result<exec-result, host-error>;
+}
+
+// ---- plugin world --------------------------------------------------------
+
+/// The plugin imports every interface except `child-process`.
+world afterburner-plugin-v2 {
+    import fs;
+    import crypto;
+    import crypto-ciphers;
+    import crypto-kdfs;
+    import crypto-sign;
+    import crypto-stream;
+    import os;
+    import http;
+    import dns;
+    import zlib;
+    import state;
+    import diagnostics;
+}

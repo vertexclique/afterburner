@@ -73,10 +73,18 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install llvm
       - uses: Swatinem/rust-cache@v2
-      - name: cargo test (default features)
+      - name: cargo test (default features, library-only)
+        # `bin` is NOT in default features, so any test using
+        # `env!("CARGO_BIN_EXE_burn")` is `#![cfg(feature = "bin")]`-
+        # gated and skipped here. Default-features pass exists to
+        # catch breakage in the library API surface (the path that
+        # downstream `cargo install afterburner` users compile).
         run: cargo test --workspace --no-fail-fast -- --test-threads=4
-      - name: cargo test (all-shadows + ts)
-        run: cargo test -p afterburner --features "all-shadows ts" --no-fail-fast -- --test-threads=4
+      - name: cargo test (bin + all-shadows + ts)
+        # Full-feature pass: includes the integration tests that spawn
+        # the `burn` CLI as a subprocess (b7_*, b10_*, b_wasm_loader,
+        # b_node_compat_round2, b_shadow_*, b8/b9 ts+esm pipelines).
+        run: cargo test -p afterburner --features "bin all-shadows ts" --no-fail-fast -- --test-threads=4
 
   doc:
     name: cargo doc

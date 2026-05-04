@@ -1,3 +1,4 @@
+#![cfg(feature = "bin")]
 //! B7 — `tls` raw TLS integration.
 //!
 //! Each test generates a fresh self-signed cert with `rcgen`, starts

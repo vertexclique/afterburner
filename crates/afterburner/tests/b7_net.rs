@@ -1,3 +1,4 @@
+#![cfg(feature = "bin")]
 //! B7 — `net` raw TCP integration.
 //!
 //! Each test spins up a fixture TCP server in a background thread,

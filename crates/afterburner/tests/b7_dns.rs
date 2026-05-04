@@ -1,3 +1,4 @@
+#![cfg(feature = "bin")]
 #![allow(non_snake_case)]
 //! B7 — `dns` record-type-aware resolution.
 //!

@@ -1,0 +1,141 @@
+# Authoritative manifest of every host import declared at the
+# `afterburner:host` namespace. One name per line, alphabetical.
+# Lines starting with `#` and blank lines are ignored.
+#
+# This file is the single source of truth for what host functions
+# exist. The `abi_parity` test in afterburner-wasi/tests asserts
+# that THIS manifest, the plugin's `extern "C"` block in
+# `crates/afterburner-plugin/src/host_api.rs`, and the wasi linker
+# registrations in `crates/afterburner-wasi/src/host_imports.rs`
+# all list the same names. Adding a host import is now a 4-place
+# edit (manifest + extern + linker + JS bridge); removing one is
+# the same in reverse. The test fails CI on any drift.
+#
+# The semantic-level WIT spec at docs/wit/afterburner-host.wit
+# remains the typed contract — update it alongside this manifest
+# when adding new imports so reviewers can see the shape.
+
+host_child_process_exec_sync
+host_crypto_aes_cbc_decrypt
+host_crypto_aes_cbc_encrypt
+host_crypto_aes_gcm_decrypt
+host_crypto_aes_gcm_encrypt
+host_crypto_hash
+host_crypto_hash_digest
+host_crypto_hash_open
+host_crypto_hash_update
+host_crypto_hmac_open
+host_crypto_pbkdf2_sync
+host_crypto_random_bytes
+host_crypto_scrypt_sync
+host_crypto_sign
+host_crypto_sign_finalize
+host_crypto_sign_open
+host_crypto_sign_update
+host_crypto_verify
+host_crypto_verify_finalize
+host_dgram_address
+host_dgram_bind
+host_dgram_close
+host_dgram_send
+host_dns_lookup
+host_dns_resolve4
+host_dns_resolve6
+host_dns_resolve_cname
+host_dns_resolve_mx
+host_dns_resolve_ns
+host_dns_resolve_txt
+host_dns_reverse
+host_emit_row
+host_fs_cp
+host_fs_exists_sync
+host_fs_mkdir_sync
+host_fs_opendir_sync
+host_fs_read_chunk
+host_fs_read_file_sync
+host_fs_readdir_sync
+host_fs_realpath_sync
+host_fs_rename_sync
+host_fs_size
+host_fs_stat_sync
+host_fs_unlink_sync
+host_fs_watch_poll
+host_fs_write_chunk
+host_fs_write_file_sync
+host_get_env
+host_get_envelope
+host_get_input
+host_http_close
+host_http_listen
+host_http_reply
+host_http_request
+host_last_error
+host_net_close_server
+host_net_connect
+host_net_destroy
+host_net_end
+host_net_listen
+host_net_pending
+host_net_set_keep_alive
+host_net_set_no_delay
+host_net_write
+host_os_arch
+host_os_platform
+host_process_exit
+host_read_column
+host_shadow_argon2_hash
+host_shadow_argon2_needs_rehash
+host_shadow_argon2_verify
+host_shadow_bcrypt_gen_salt
+host_shadow_bcrypt_hash
+host_shadow_bcrypt_verify
+host_shadow_jwt_decode
+host_shadow_jwt_sign
+host_shadow_jwt_verify
+host_shadow_sharp_metadata
+host_shadow_sharp_run
+host_shadow_sqlite3_all
+host_shadow_sqlite3_close
+host_shadow_sqlite3_exec
+host_shadow_sqlite3_get
+host_shadow_sqlite3_open
+host_shadow_sqlite3_run
+host_state_delete
+host_state_get
+host_state_increment
+host_state_set
+host_timer_clear
+host_timer_ref
+host_timer_set
+host_timer_unref
+host_tls_close_server
+host_tls_connect
+host_tls_destroy
+host_tls_end
+host_tls_listen
+host_tls_pending
+host_tls_write
+host_ts_transpile
+host_wasm_call_export
+host_wasm_compile
+host_wasm_drop_instance
+host_wasm_drop_module
+host_wasm_instantiate
+host_wasm_memory_read
+host_wasm_memory_size
+host_wasm_memory_write
+host_wasm_module_exports
+host_wasm_module_imports
+host_worker_data
+host_worker_is_main_thread
+host_worker_post_error_to_parent
+host_worker_post_message
+host_worker_post_online_to_parent
+host_worker_post_to_parent
+host_worker_spawn
+host_worker_terminate
+host_worker_thread_id
+host_zlib_deflate_sync
+host_zlib_gunzip_sync
+host_zlib_gzip_sync
+host_zlib_inflate_sync

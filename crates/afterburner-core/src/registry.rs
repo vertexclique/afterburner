@@ -185,11 +185,20 @@ impl BurnCache {
 
         // Slow path: try to install a fresh cell. Whoever wins performs
         // the compile; everyone else waits on the shared cell.
+        //
+        // kovan_map's `insert_if_absent` is *not* a strong CAS: the
+        // CAS-then-hop-bit window can let multiple racing inserts of
+        // the same key all return `None` (each thinking it just
+        // installed). The map then exposes the canonical (lowest-
+        // offset) entry via `get`. We follow the same pattern its own
+        // `get_or_insert` uses — install, then re-get to find the
+        // canonical entry — and decide winner via Arc pointer
+        // identity. Without this re-get, two threads could both run
+        // `engine.ignite` for the same source under contention.
         let fresh = CompileCell::new();
-        let (cell, is_winner) = match self.compiled.insert_if_absent(hash, fresh.clone()) {
-            None => (fresh, true),
-            Some(existing) => (existing, false),
-        };
+        self.compiled.insert_if_absent(hash, fresh.clone());
+        let cell = self.compiled.get(&hash).unwrap_or_else(|| fresh.clone());
+        let is_winner = Arc::ptr_eq(&cell, &fresh);
 
         if is_winner {
             self.stats.cache_misses.fetch_add(1, Ordering::Relaxed);

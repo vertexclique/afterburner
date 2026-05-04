@@ -1,3 +1,4 @@
+#![cfg(feature = "bin")]
 //! B10 security guardrails for `worker_threads`.
 //!
 //! These tests are the contract behind every "no security problems"

@@ -1,3 +1,4 @@
+#![cfg(feature = "bin")]
 #![allow(non_snake_case)]
 //! Round-2 Node 20 built-in coverage — every module added to plug
 //! the gap between "stubbed" and "actually loadable".

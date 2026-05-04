@@ -5,5 +5,9 @@
 /.idea/
 /.vscode/
 *.swp
-!docs/wit
+# docs/ is generated/working notes — gitignored. We carve out only
+# the WIT manifest tree (consumed by the abi_parity drift gate test
+# in CI). Everything else under docs/ stays out of git.
 docs/**
+!docs/wit/
+!docs/wit/**

@@ -55,14 +55,30 @@ let ab = Afterburner::builder()
 
 ### Install (prebuilt binaries)
 
-```bash
-# One-line installer (Linux / macOS / Windows-via-bash). Fetches the
-# latest GitHub Release, verifies the SHA-256 sidecar, drops `burn`
-# into ~/.local/bin (override with BURN_INSTALL=...).
-curl -fsSL https://raw.githubusercontent.com/vertexclique/afterburner/master/install.sh | bash
+The `afterburner.sh` host dispatches by user agent: `curl`/`wget` get the POSIX shell installer, `Invoke-WebRequest`/`PowerShell` get the `.ps1`. Both fetch the latest GitHub Release, verify the SHA-256 sidecar, and drop `burn` into the user's local bin (override with `BURN_INSTALL=...`).
 
-# Pin a specific version
-BURN_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/vertexclique/afterburner/master/install.sh | bash
+Linux / macOS:
+
+```sh
+curl -fsSL https://afterburner.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+iwr -useb https://afterburner.sh | iex
+```
+
+Pin a specific version with `BURN_VERSION`:
+
+```sh
+# POSIX
+BURN_VERSION=v0.1.0 curl -fsSL https://afterburner.sh | sh
+```
+
+```powershell
+# PowerShell
+$env:BURN_VERSION = 'v0.1.0'; iwr -useb https://afterburner.sh | iex
 ```
 
 Or grab a tarball directly from the [Releases page](https://github.com/vertexclique/afterburner/releases). Archives are named `burn-<version>-<target>.tar.gz` (or `.zip` for Windows) and ship with a `.sha256` next to them.

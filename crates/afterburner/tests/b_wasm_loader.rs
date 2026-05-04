@@ -1,3 +1,4 @@
+#![cfg(feature = "bin")]
 //! Integration tests for `globalThis.WebAssembly` — the host-side
 //! wasmtime sub-runner that lets JS load arbitrary `.wasm` modules
 //! at runtime. This is the architectural escape hatch for the long
