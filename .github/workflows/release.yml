@@ -1,8 +1,23 @@
 name: Release
 
-# Fully automatic: `cargo release --execute <bump>` from master pushes
-# a `v*.*.*` tag, which fires this workflow. Manual runs are still
-# supported via `workflow_dispatch` for replays / re-uploads.
+# Builds the `burn` CLI binary for every supported target and attaches
+# the archives to the GitHub Release named after the pushed tag.
+#
+# IMPORTANT: this workflow does NOT run `cargo release` or
+# `cargo publish`. crates.io publishing is intentionally a manual,
+# local-only step (see `release.toml` and the project README) — running
+# it from CI is dangerous (lost CI runs can leave the workspace
+# half-published; cargo publish is one-way and versions can't be
+# unpublished). The publish flow is:
+#
+#   1. Locally: `cargo release --execute <bump>` bumps + commits +
+#      tags + pushes the tag.
+#   2. The tag push fires THIS workflow, which builds + attaches
+#      multi-platform burn binaries to the GitHub Release.
+#   3. crates.io publishing happens locally, separately, by the
+#      maintainer running `cargo publish` per crate (or
+#      `cargo release --execute` with publish=true on a trusted
+#      machine).
 on:
   push:
     tags:
@@ -10,7 +25,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to publish (e.g. v0.1.0). Must already exist if no `push` event.'
+        description: 'Tag to build for (e.g. v0.1.0). The tag must already exist on the repo.'
         required: true
         type: string
 
@@ -153,8 +168,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  publish:
-    name: publish GitHub release
+  attach-binaries:
+    name: attach binaries to GitHub release
     needs: [build]
     runs-on: ubuntu-latest
     steps:
