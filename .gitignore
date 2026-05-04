@@ -12,6 +12,11 @@
 # semver range against a single dep.
 **/node_modules/
 package-lock.json
+
+# Cloudflare Worker build/deploy state — `worker/` is committed but
+# wrangler's local caches and dist artifacts are not.
+worker/dist/
+worker/.wrangler/
 # docs/ is generated/working notes — gitignored. We carve out only
 # the WIT manifest tree (consumed by the abi_parity drift gate test
 # in CI). Everything else under docs/ stays out of git.

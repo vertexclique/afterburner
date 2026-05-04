@@ -1,0 +1,21 @@
+name = "afterburner-site"
+main = "src/index.ts"
+compatibility_date = "2026-04-01"
+workers_dev = false
+
+[assets]
+directory = "../website"
+binding = "ASSETS"
+not_found_handling = "404-page"
+# Run our Worker code BEFORE asset matching so apex UA dispatch can
+# intercept GET / (otherwise the assets binding serves index.html
+# unconditionally and the Worker never sees the request).
+#
+# We use the older `experimental_serve_directly = false` rather than
+# `run_worker_first = true` because @cloudflare/vitest-pool-workers
+# (currently bundling wrangler 3.100) only accepts the former. The
+# top-level wrangler 3.99 also still accepts it (with a deprecation
+# warning that is purely cosmetic — `invoke_user_worker_ahead_of_assets`
+# is set correctly). Switch to `run_worker_first` once vitest-pool-workers
+# adopts it.
+experimental_serve_directly = false

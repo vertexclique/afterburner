@@ -1,0 +1,65 @@
+name: Deploy website
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'website/**'
+      - 'worker/**'
+      - '.github/workflows/deploy-website.yml'
+  workflow_dispatch:
+
+# Only one deploy at a time per ref. Don't cancel a deploy mid-publish:
+# the wrangler deploy is the atomic step and a partially-cancelled one
+# can leave the script ahead of its assets.
+concurrency:
+  group: deploy-website-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  test:
+    name: worker unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: install deps
+        # `package-lock.json` is gitignored repo-wide, so we can't `npm ci`.
+        # `npm install` against the semver ranges in package.json is fine for
+        # this tiny worker (3 devDeps, no runtime deps).
+        run: npm install --no-audit --no-fund --no-progress
+      - name: typecheck
+        run: npm run typecheck
+      - name: vitest
+        run: npm test
+
+  deploy:
+    name: wrangler deploy
+    needs: test
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: install deps
+        run: npm install --no-audit --no-fund --no-progress
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken:  ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: worker
+          command: deploy
