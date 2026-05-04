@@ -108,7 +108,7 @@
     font-size: var(--text-subheading);
     line-height: 1.55;
     color: var(--fg-muted);
-    margin: 0 0 36px;
+    margin: 0 0 var(--spacing-20);
     max-width: 540px;
     font-weight: 400;
   }
@@ -933,6 +933,129 @@
     color: rgba(255,255,255,0.7);
   }
 
+  /* ============= INSTALLER (OS-aware single command) ============= */
+  .installer {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    max-width: 100%;
+  }
+  /* Hero context: left-align children, give breathing room above the buttons */
+  .hero .installer {
+    align-items: flex-start;
+    margin: 0 0 28px;
+    width: 100%;
+    max-width: 540px;
+  }
+  .hero .installer__cmd { width: 100%; }
+  .installer__label {
+    font-family: var(--font-display);
+    font-size: 26px;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+    margin: 0;
+    background: var(--gradient-sunburst);
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: burnShift 6s ease-in-out infinite;
+  }
+  .installer__tabs {
+    display: inline-flex;
+    gap: 4px;
+    padding: 4px;
+    background: rgba(0, 0, 0, 0.06);
+    border: 1px solid var(--stroke);
+    border-radius: 999px;
+  }
+  .installer__tab {
+    padding: 7px 16px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--fg-muted);
+    background: transparent;
+    border: 0;
+    border-radius: 999px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  .installer__tab:hover { color: var(--fg); }
+  .installer__tab.active {
+    background: var(--bg);
+    color: var(--fg);
+    box-shadow: var(--shadow-sm);
+  }
+  .installer__tab svg { width: 14px; height: 14px; opacity: 0.75; }
+  .installer__cmd {
+    display: inline-flex;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 22px;
+    background: var(--code-bg);
+    color: var(--code-fg);
+    border-radius: var(--radius-button);
+    font-family: var(--font-mono);
+    font-size: 14px;
+    cursor: pointer;
+    transition: transform 0.12s ease, box-shadow 0.2s ease;
+    box-shadow: 0 0 0 1px var(--code-stroke), 0 16px 32px -16px var(--code-glow);
+    max-width: 100%;
+  }
+  .installer__cmd:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 0 0 1px var(--code-stroke), 0 24px 40px -16px var(--code-glow);
+  }
+  .installer__cmd .prompt { color: rgba(255, 255, 255, 0.42); flex-shrink: 0; }
+  .installer__cmd .text {
+    flex: 1;
+    min-width: 0;
+    overflow-x: auto;
+    white-space: nowrap;
+    scrollbar-width: none;
+  }
+  .installer__cmd .text::-webkit-scrollbar { display: none; }
+  .installer__cmd .text .kw { color: var(--accent); }
+  .installer__cmd .copy {
+    font-size: 11px;
+    padding: 4px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: var(--radius-tag);
+    color: rgba(255, 255, 255, 0.78);
+    flex-shrink: 0;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  }
+  .installer__cmd:hover .copy {
+    background: var(--action);
+    color: #fff;
+    border-color: var(--action);
+  }
+  .installer__hint {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--fg-subtle);
+    margin: 0;
+    letter-spacing: 0.02em;
+  }
+  .installer__hint code {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--action);
+    background: rgba(83, 58, 253, 0.08);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  @media (max-width: 600px) {
+    .installer__tab { padding: 6px 11px; font-size: 11px; }
+    .installer__cmd { font-size: 12.5px; padding: 12px 16px; gap: 12px; }
+  }
+
   /* ============= FOOTER ============= */
   .site-footer__inner { max-width: 1200px; margin: 0 auto; padding: 0 32px; }
   .footer__top {
@@ -1020,8 +1143,30 @@
         Run real Node apps. On your terms. At <em>full burn</em>.
       </h1>
       <p class="hero__sub">
-        Afterburner is a JavaScript runtime built in Rust. <code>burn server.js</code> stands up Express, Postgres clients, Redis pubsub. <code>burn npm install</code> works. TypeScript works. Worker threads, raw TCP, TLS with SNI, WebAssembly modules, native-addon shadows for <code>bcrypt</code>, <code>sqlite3</code>, <code>sharp</code>: all in. Every capability (files, network, env, processes) is yours to grant or deny, per script.
+        A sandboxed JavaScript execution runtime, in Rust. Real Node apps under per-call fuel, memory, and timeout caps. Every capability (<code>fs</code>, <code>net</code>, <code>env</code>, <code>child_process</code>) is gated by a <code>Manifold</code>. Embed in Rust with one crate.
       </p>
+      <div class="installer">
+        <h3 class="installer__label">Install Burn</h3>
+        <div class="installer__tabs" role="tablist" aria-label="Install command for OS">
+          <button class="installer__tab" data-os="macos" role="tab" aria-selected="false">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M17.523 13.013c-.013-2.31 1.91-3.42 1.999-3.474-1.094-1.601-2.793-1.819-3.405-1.844-1.45-.149-2.835.852-3.572.852-.745 0-1.881-.83-3.094-.806-1.59.024-3.061.927-3.881 2.353-1.656 2.873-.422 7.117 1.193 9.443.793 1.143 1.737 2.422 2.974 2.376 1.193-.048 1.643-.772 3.087-.772 1.443 0 1.85.772 3.111.745 1.286-.022 2.1-1.16 2.886-2.305.911-1.319 1.286-2.598 1.31-2.665-.029-.013-2.51-.965-2.534-3.83l-.073-.073zM15.092 6.16c.66-.797 1.105-1.91.984-3.018-.949.039-2.097.633-2.78 1.43-.61.706-1.143 1.832-.999 2.918 1.057.082 2.135-.537 2.795-1.33z"/></svg>
+            macOS
+          </button>
+          <button class="installer__tab" data-os="linux" role="tab" aria-selected="false">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12.504 0c-.155 0-.315.008-.48.021-4.226.333-3.105 4.807-3.17 6.298-.076 1.092-.3 1.953-1.05 3.02-.885 1.051-2.127 2.75-2.716 4.521-.278.832-.41 1.684-.287 2.489a.424.424 0 00-.11.135c-.26.268-.45.6-.663.839-.199.199-.485.267-.797.4-.313.136-.658.269-.864.68-.09.189-.136.394-.132.602 0 .199.027.4.055.536.058.399.116.728.04.97-.249.68-.28 1.145-.106 1.484.174.334.535.47.94.601.81.2 1.91.135 2.774.6.926.466 1.866.67 2.616.47.526-.116.97-.464 1.208-.946.587-.003 1.23-.269 2.26-.334.699-.058 1.574.267 2.577.2.025.134.063.198.114.333l.003.003c.391.778 1.113 1.132 1.884 1.071.771-.06 1.592-.536 2.257-1.306.631-.765 1.683-1.084 2.378-1.503.348-.199.629-.469.649-.853.023-.4-.2-.811-.714-1.376v-.097l-.003-.003c-.17-.2-.25-.535-.338-.926-.085-.401-.182-.786-.492-1.046h-.003c-.059-.054-.123-.067-.188-.135a.357.357 0 00-.19-.064c.431-1.278.264-2.55-.173-3.694-.533-1.41-1.465-2.638-2.175-3.483-.796-1.005-1.576-1.957-1.56-3.368.026-2.152.236-6.133-3.544-6.139zm.337 21.834c-.65-.025-1.226-.265-1.667-.578-.443-.318-.74-.7-.792-1.062-.041-.297.044-.564.226-.768.197-.218.464-.382.74-.515.276-.13.567-.225.78-.286a.31.31 0 00.094-.04l.029-.022c.226-.246.45-.56.7-.85.253-.296.527-.55.81-.55.282 0 .55.243.812.553.262.31.488.626.713.83l.025.018a.413.413 0 00.094.04c.214.061.504.155.78.286.276.133.543.297.74.515.182.204.267.471.226.768-.052.362-.349.744-.792 1.062-.44.313-1.018.553-1.668.578z"/></svg>
+            Linux
+          </button>
+          <button class="installer__tab" data-os="windows" role="tab" aria-selected="false">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801"/></svg>
+            Windows
+          </button>
+        </div>
+        <div class="installer__cmd" title="Click to copy" role="button" tabindex="0">
+          <span class="prompt">$</span>
+          <span class="text"></span>
+          <span class="copy">Copy</span>
+        </div>
+      </div>
       <div class="hero__cta">
         <a href="docs.html" class="btn btn--primary btn--burn">
           <video class="burn-bg" src="art/burning.mp4" muted loop playsinline preload="metadata"></video>
@@ -1034,8 +1179,8 @@
         </a>
       </div>
       <div class="hero__meta">
-        <span><b>node · npm · pnpm · yarn · bun</b> all pass through</span>
-        <span><b>TypeScript</b> built in</span>
+        <span><b>node · npm · pnpm · yarn · bun</b> pass-through shim</span>
+        <span><b>Node 20 LTS</b> compat surface</span>
         <span><b>Apache-2.0</b></span>
       </div>
     </div>
@@ -1108,8 +1253,8 @@
       <div class="live__copy">
         <span class="kicker">// Live demo</span>
         <h2>Watch <em>burn</em> stand up<br/>a real Node app.</h2>
-        <p>Same commands you already know. <code>burn server.js</code>, <code>burn npm install</code>, <code>burn app.ts</code>. They run through the Rust runtime. Real ports, real sockets, TypeScript stripped on the way in.</p>
-        <p>And when you need isolation: <code>--allow-net</code>, <code>--allow-fs</code>, <code>--sandbox</code>. Default-deny, opt-in surface.</p>
+        <p>Same commands you already know. <code>burn server.js</code>, <code>burn npm install</code>, <code>burn app.ts</code>. They run through the Rust runtime. Real ports, real sockets, TypeScript stripped on the way in. Adaptive by default: native ignition on the first call, fully sandboxed Wasmtime from the second.</p>
+        <p>When you need isolation: <code>--sandbox</code> seals the manifold; <code>--allow-fs</code>, <code>--allow-net</code>, <code>--allow-env</code> grant exactly the surface a script needs. Deny by default.</p>
       </div>
       <div class="live-term">
         <div class="live-term__bar">
@@ -1144,32 +1289,47 @@
       <div class="feat reveal">
         <div class="feat__num">01</div>
         <h3>Real Node apps, unmodified</h3>
-        <p>Express servers, Postgres clients, Redis pubsub. <code>burn server.js</code> binds ports, opens raw TCP / TLS, drives the event loop, handles SIGINT cleanly.</p>
+        <p>Express servers, Postgres clients, Redis pubsub, MongoDB drivers. <code>burn server.js</code> binds ports, opens raw TCP, terminates TLS, drives the event loop, handles SIGINT cleanly.</p>
       </div>
       <div class="feat reveal">
         <div class="feat__num">02</div>
-        <h3>Capability-gated everything</h3>
-        <p>Files, network, environment, subprocesses. Every host capability is gated. Pass <code>--allow-fs=./out</code> and that's all the script gets.</p>
+        <h3>Capability gates via Manifold</h3>
+        <p><code>fs</code>, <code>net</code>, <code>env</code>, <code>crypto</code>, <code>child_process</code>: each is a field on the <code>Manifold</code>. Library default is <code>sealed()</code>. Grant only the surface a script needs; <code>require</code> for anything else throws clearly.</p>
       </div>
       <div class="feat reveal">
         <div class="feat__num">03</div>
-        <h3>TypeScript, no toolchain</h3>
-        <p><code>burn app.ts</code> just runs. <code>.mts</code>, <code>.cts</code>, ESM, CommonJS. Types stripped, modules translated, no toolchain.</p>
+        <h3>TypeScript &amp; ESM, no toolchain</h3>
+        <p><code>burn app.ts</code> just runs. <code>.ts</code>, <code>.mts</code>, <code>.cts</code> stripped via oxc; ESM <code>import</code>/<code>export</code> transformed to CommonJS at load. No <code>tsc</code>, no bundler.</p>
       </div>
       <div class="feat reveal">
         <div class="feat__num">04</div>
-        <h3>Limits you actually set</h3>
-        <p>Fuel, memory, wall-clock. Every dimension is yours to pick. A runaway script loses its return value, not your host.</p>
+        <h3>Adaptive ignition (Flying Start)</h3>
+        <p>Native QuickJS on the first call for sub-millisecond startup; Wasmtime + Javy plugin from the second. Same script ID across both. Pin a single mode if you'd rather.</p>
       </div>
       <div class="feat reveal">
         <div class="feat__num">05</div>
-        <h3>Workers + scheduler</h3>
-        <p><code>worker_threads</code> ships. One flag turns a single instance into an N-worker pool. Bounded queues, work-stealing, graceful drain. Capability inheritance never widens.</p>
+        <h3>Limits you actually set</h3>
+        <p><code>.fuel(N)</code>, <code>.memory_bytes(N)</code>, <code>.timeout_ms(N)</code>: three independent caps, all enforceable per call. Wall-clock backstops I/O that doesn't burn fuel. Runaway scripts lose their return value, not your host.</p>
       </div>
       <div class="feat reveal">
         <div class="feat__num">06</div>
-        <h3>Pass-through for npm &amp; friends</h3>
-        <p><code>burn npm install</code>, <code>burn pnpm run dev</code>, <code>burn npx tsc</code>. Every nested <code>node</code> call routes back through the runtime.</p>
+        <h3>Workers + lock-free scheduler</h3>
+        <p><code>worker_threads</code> ships (process-per-worker, length-prefixed JSON IPC). <code>.threaded(N)</code> turns one instance into a steal-when-idle pool with token-bucket admission. Capability inheritance never widens.</p>
+      </div>
+      <div class="feat reveal">
+        <div class="feat__num">07</div>
+        <h3>Native-addon shadows</h3>
+        <p><code>require('bcrypt')</code>, <code>argon2</code>, <code>jsonwebtoken</code>, <code>sqlite3</code>, <code>sharp</code> all resolve inside the WASM sandbox to pure-Rust hosts (rusqlite + bundled SQLite C; <code>image</code> + SIMD <code>fast_image_resize</code>). Same npm API, no <code>.node</code> binary.</p>
+      </div>
+      <div class="feat reveal">
+        <div class="feat__num">08</div>
+        <h3>WebAssembly modules in JS</h3>
+        <p><code>WebAssembly.compile</code> / <code>instantiate</code> / <code>Module</code> / <code>Instance</code> / <code>Memory</code> backed by a per-host wasmtime sub-runner. SQL.js, @jsquash, libheif-js, anything that compiles to <code>wasm32-wasi</code> with no env imports.</p>
+      </div>
+      <div class="feat reveal">
+        <div class="feat__num">09</div>
+        <h3>Embed in Rust with one crate</h3>
+        <p><code>cargo add afterburner</code>. <code>Afterburner::builder()</code> → <code>.register(src)</code> → <code>.run(id, json)</code>. Pluggable <code>BurnCacheBackend</code> (Redis / S3 / SQLite); pluggable <code>StateStore</code>; <code>HostContext</code> hooks for <code>log</code> / <code>emit_row</code> / <code>get_env</code>.</p>
       </div>
     </div>
   </div>
@@ -1295,7 +1455,7 @@
     <div class="runs__head reveal">
       <span class="kicker">// What works today</span>
       <h2>The Node app you have<br/>runs on the runtime you want.</h2>
-    <p class="muted" style="max-width: 620px; margin: 12px auto 0; text-align: center; font-size: 15px;">450+ tests pass workspace-wide. Every Node 20 LTS built-in module has a real polyfill: no <code>require</code> returns a stub error.</p>
+    <p class="muted" style="max-width: 620px; margin: 12px auto 0; text-align: center; font-size: 15px;">Every Node 20 LTS built-in resolves to a real polyfill backed by Rust host functions. No <code>require</code> returns a stub error.</p>
     </div>
     <div class="runs__grid reveal">
       <div class="runs__cell">
@@ -1451,14 +1611,30 @@
 <!-- ============= CTA ============= -->
 <section class="cta">
   <div class="container">
-    <h2>Ready to <em>throttle up</em>?</h2>
-    <p>Install the binary. Drop it on your PATH. Your existing scripts and toolchains keep working, with controls you didn't have yesterday.</p>
-    <div class="cta__cmd" id="copyCmd" title="Click to copy">
-      <span style="color: rgba(255,255,255,0.4);">$</span>
-      <span><span style="color: var(--accent);">cargo install</span> afterburner --features bin</span>
-      <span class="copy" id="copyLabel">Copy</span>
+    <h2>One command to <em>go</em>.</h2>
+    <div class="installer">
+      <div class="installer__tabs" role="tablist" aria-label="Install command for OS">
+        <button class="installer__tab" data-os="macos" role="tab" aria-selected="false">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M17.523 13.013c-.013-2.31 1.91-3.42 1.999-3.474-1.094-1.601-2.793-1.819-3.405-1.844-1.45-.149-2.835.852-3.572.852-.745 0-1.881-.83-3.094-.806-1.59.024-3.061.927-3.881 2.353-1.656 2.873-.422 7.117 1.193 9.443.793 1.143 1.737 2.422 2.974 2.376 1.193-.048 1.643-.772 3.087-.772 1.443 0 1.85.772 3.111.745 1.286-.022 2.1-1.16 2.886-2.305.911-1.319 1.286-2.598 1.31-2.665-.029-.013-2.51-.965-2.534-3.83l-.073-.073zM15.092 6.16c.66-.797 1.105-1.91.984-3.018-.949.039-2.097.633-2.78 1.43-.61.706-1.143 1.832-.999 2.918 1.057.082 2.135-.537 2.795-1.33z"/></svg>
+          macOS
+        </button>
+        <button class="installer__tab" data-os="linux" role="tab" aria-selected="false">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12.504 0c-.155 0-.315.008-.48.021-4.226.333-3.105 4.807-3.17 6.298-.076 1.092-.3 1.953-1.05 3.02-.885 1.051-2.127 2.75-2.716 4.521-.278.832-.41 1.684-.287 2.489a.424.424 0 00-.11.135c-.26.268-.45.6-.663.839-.199.199-.485.267-.797.4-.313.136-.658.269-.864.68-.09.189-.136.394-.132.602 0 .199.027.4.055.536.058.399.116.728.04.97-.249.68-.28 1.145-.106 1.484.174.334.535.47.94.601.81.2 1.91.135 2.774.6.926.466 1.866.67 2.616.47.526-.116.97-.464 1.208-.946.587-.003 1.23-.269 2.26-.334.699-.058 1.574.267 2.577.2.025.134.063.198.114.333l.003.003c.391.778 1.113 1.132 1.884 1.071.771-.06 1.592-.536 2.257-1.306.631-.765 1.683-1.084 2.378-1.503.348-.199.629-.469.649-.853.023-.4-.2-.811-.714-1.376v-.097l-.003-.003c-.17-.2-.25-.535-.338-.926-.085-.401-.182-.786-.492-1.046h-.003c-.059-.054-.123-.067-.188-.135a.357.357 0 00-.19-.064c.431-1.278.264-2.55-.173-3.694-.533-1.41-1.465-2.638-2.175-3.483-.796-1.005-1.576-1.957-1.56-3.368.026-2.152.236-6.133-3.544-6.139zm.337 21.834c-.65-.025-1.226-.265-1.667-.578-.443-.318-.74-.7-.792-1.062-.041-.297.044-.564.226-.768.197-.218.464-.382.74-.515.276-.13.567-.225.78-.286a.31.31 0 00.094-.04l.029-.022c.226-.246.45-.56.7-.85.253-.296.527-.55.81-.55.282 0 .55.243.812.553.262.31.488.626.713.83l.025.018a.413.413 0 00.094.04c.214.061.504.155.78.286.276.133.543.297.74.515.182.204.267.471.226.768-.052.362-.349.744-.792 1.062-.44.313-1.018.553-1.668.578z"/></svg>
+          Linux
+        </button>
+        <button class="installer__tab" data-os="windows" role="tab" aria-selected="false">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801"/></svg>
+          Windows
+        </button>
+      </div>
+      <div class="installer__cmd" title="Click to copy" role="button" tabindex="0">
+        <span class="prompt">$</span>
+        <span class="text"></span>
+        <span class="copy">Copy</span>
+      </div>
+      <p class="installer__hint">Pin a version with <code>BURN_VERSION=vX.Y.Z</code> · custom dir with <code>BURN_INSTALL=/usr/local/bin</code></p>
     </div>
-    <div style="margin-top: 24px;">
+    <div style="margin-top: 28px;">
       <a href="docs.html" class="btn btn--outlined">Read the docs →</a>
     </div>
   </div>
@@ -1636,12 +1812,14 @@
     { p: '$', t: 'burn server.js', d: 500 },
     { o: 'listening on http://localhost:3000', c: 'var(--action-soft)', d: 350 },
     { o: '✓ ready in 3ms', c: 'var(--color-accent-green)', d: 700 },
-    { p: '$', t: 'burn npm install express', d: 500 },
-    { o: 'added 64 packages in 1.2s', c: 'var(--color-accent-green)', d: 500 },
+    { p: '$', t: 'burn npm install express pg jsonwebtoken', d: 500 },
+    { o: 'added 73 packages in 1.2s', c: 'var(--color-accent-green)', d: 500 },
     { p: '$', t: 'burn app.ts', d: 500 },
-    { o: '⟶ TypeScript stripped, ESM resolved.', c: 'var(--accent)', d: 500 },
-    { p: '$', t: 'burn --allow-net=api.example.com fetch.js', d: 500 },
-    { o: '{ status: 200, body: "..." }', c: 'var(--action-soft)', d: 500 },
+    { o: '⟶ types stripped (oxc) · ESM → CJS · ready', c: 'var(--accent)', d: 500 },
+    { p: '$', t: 'echo \'{"n":21}\' | burn thrust transform.js', d: 500 },
+    { o: '{ "doubled": 42 }', c: 'var(--action-soft)', d: 500 },
+    { p: '$', t: 'burn --sandbox --allow-net=api.example.com fetch.js', d: 500 },
+    { o: '{ status: 200 } · denied: outbound to 169.254.169.254', c: 'var(--color-accent-green)', d: 500 },
     { p: '$', t: '', cursor: true },
   ];
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -1690,11 +1868,14 @@
 
   /* ============= MARQUEE ============= */
   const M_ITEMS = [
-    'http.createServer', 'TypeScript', 'fs/promises', 'crypto', 'zlib',
-    'fetch', 'AbortController', 'streams', 'Buffer', 'EventEmitter',
-    'process.argv', 'setInterval', 'require()', 'import / export',
-    'bcrypt', 'argon2', 'jsonwebtoken', 'AsyncIterator', 'TextEncoder',
-    'URL', 'structuredClone', 'queueMicrotask', 'performance.now',
+    'http.createServer', 'net.connect', 'tls.connect', 'dns.resolve',
+    'dgram', 'worker_threads', 'fs.promises', 'fs.watch', 'crypto',
+    'zlib', 'WebAssembly', 'fetch', 'AbortController', 'streams',
+    'Buffer', 'EventEmitter', 'process.argv', 'setInterval',
+    'AsyncLocalStorage', 'TypeScript', 'ESM → CJS', 'require()',
+    'bcrypt', 'argon2', 'jsonwebtoken', 'sqlite3', 'sharp',
+    'TextEncoder', 'URL', 'structuredClone', 'queueMicrotask',
+    'performance.now', 'process.exit', 'EventTarget',
   ];
   const mTrack = document.getElementById('marquee');
   const fragHTML = M_ITEMS.map(s => `<div class="marquee__item"><span class="glow"></span>${s}</div>`).join('');
@@ -1775,17 +1956,18 @@ app.listen(3000, () => {
     },
     {
       file: 'shell', lang: 'sh',
-      output: '+ express@4.19.2 · added 64 packages',
+      output: 'every nested node call routes through burn',
       code:
-`# burn shims itself onto PATH; npm's child node calls route home.
-$ burn npm install express
+`# burn shims itself onto PATH. npm's child node calls route home.
+$ burn npm install express pg jsonwebtoken
 $ burn npx tsc --init
 $ burn pnpm run dev
 $ burn yarn build
+$ burn bun run start
 
-# Pass-through: burn node === node, but inside the burn runtime.
-$ burn node -e "console.log('hello')"
-hello`
+# Pass-through. burn node behaves like node, but inside the burn runtime.
+$ burn node -e "console.log(process.versions.node)"
+20.11.0`
     },
     {
       file: 'app.ts', lang: 'js',
@@ -1847,37 +2029,39 @@ if (isMainThread) {
     },
     {
       file: 'shell', lang: 'sh',
-      output: '✓ runs · denied: outbound to 169.254.169.254',
+      output: 'denied: outbound to 169.254.169.254 (not on allow-list)',
       code:
-`# Default-deny. Grant only the surface a script needs.
+`# Deny by default. Grant only the surface a script needs.
 $ burn --sandbox \\
-       --allow-fs-read=./data \\
-       --allow-fs=./out \\
+       --allow-fs=./data,./out \\
        --allow-net=api.example.com,*.trusted.io \\
        --allow-env=NODE_ENV,API_KEY \\
+       --fuel=1000000000 \\
+       --timeout=30000 \\
        transform.ts
 
-# Or grant everything for trusted scripts:
+# Grant everything for trusted scripts.
 $ burn -A scripts/release.ts`
     },
     {
       file: 'main.rs', lang: 'rust',
-      output: 'embedded · returns: { result: 42 }',
+      output: 'returns: { "result": 42 }',
       code:
-`// Embed the same runtime in your Rust app.
-use afterburner::{Afterburner, Manifold, FsAccess};
+`// Embed the same runtime in your Rust app. cargo add afterburner.
+use afterburner::{Afterburner, Manifold, FsAccess, NetAccess};
 use serde_json::json;
 
 fn main() -> anyhow::Result<()> {
     let ab = Afterburner::builder()
-        .fuel(your_op_budget)
-        .memory_bytes(your_memory_cap)
-        .timeout_ms(your_deadline)
+        .fuel(1_000_000_000)
+        .memory_bytes(64 << 20)
+        .timeout_ms(30_000)
         .manifold(Manifold {
             fs: FsAccess::ReadOnly(vec!["./data".into()]),
+            net: NetAccess::OutboundHttp(Some(vec!["api.example.com".into()])),
             ..Manifold::sealed()
         })
-        .threaded(your_worker_count)
+        .threaded(8)
         .build()?;
 
     let id = ab.register("module.exports = (d) => ({ result: d.n + 1 })")?;
@@ -1917,13 +2101,74 @@ fn main() -> anyhow::Result<()> {
     });
   }, 1200);
 
-  /* ============= COPY CMD ============= */
-  document.getElementById('copyCmd').addEventListener('click', () => {
-    navigator.clipboard.writeText('cargo install afterburner --features bin');
-    const lbl = document.getElementById('copyLabel');
-    lbl.textContent = 'Copied!';
-    setTimeout(() => { lbl.textContent = 'Copy'; }, 1400);
-  });
+  /* ============= OS-AWARE INSTALLER (multiple per page) ============= */
+  (function installers() {
+    const PRESETS = {
+      macos: {
+        prompt: '$',
+        html: '<span class="kw">curl</span> -fsSL https://afterburner.sh | sh',
+        plain: 'curl -fsSL https://afterburner.sh | sh',
+      },
+      linux: {
+        prompt: '$',
+        html: '<span class="kw">curl</span> -fsSL https://afterburner.sh | sh',
+        plain: 'curl -fsSL https://afterburner.sh | sh',
+      },
+      windows: {
+        prompt: '>',
+        html: '<span class="kw">iwr</span> -useb https://afterburner.sh | <span class="kw">iex</span>',
+        plain: 'iwr -useb https://afterburner.sh | iex',
+      },
+    };
+
+    /* UA → default OS, computed once */
+    const ua = (navigator.userAgent || '');
+    const detected =
+      /Win(dows|NT|64|32|98|95)/i.test(ua) ? 'windows' :
+      /Mac|Darwin|iPhone|iPad/i.test(ua)   ? 'macos'   : 'linux';
+
+    document.querySelectorAll('.installer').forEach(setup);
+
+    function setup(root) {
+      const tabs    = [...root.querySelectorAll('.installer__tab')];
+      const cmdEl   = root.querySelector('.installer__cmd');
+      const promptEl = cmdEl?.querySelector('.prompt');
+      const textEl   = cmdEl?.querySelector('.text');
+      const copyEl   = cmdEl?.querySelector('.copy');
+      if (!tabs.length || !cmdEl || !promptEl || !textEl || !copyEl) return;
+
+      function setOs(os) {
+        const preset = PRESETS[os] || PRESETS.linux;
+        tabs.forEach(t => {
+          const on = t.dataset.os === os;
+          t.classList.toggle('active', on);
+          t.setAttribute('aria-selected', on ? 'true' : 'false');
+        });
+        promptEl.textContent = preset.prompt;
+        textEl.innerHTML = preset.html;
+        cmdEl.dataset.plain = preset.plain;
+      }
+
+      tabs.forEach(t => t.addEventListener('click', () => setOs(t.dataset.os)));
+      setOs(detected);
+
+      function copy() {
+        const text = cmdEl.dataset.plain || '';
+        if (!text) return;
+        navigator.clipboard.writeText(text).then(() => {
+          copyEl.textContent = 'Copied!';
+          setTimeout(() => { copyEl.textContent = 'Copy'; }, 1400);
+        }).catch(() => {
+          copyEl.textContent = 'Copy failed';
+          setTimeout(() => { copyEl.textContent = 'Copy'; }, 1400);
+        });
+      }
+      cmdEl.addEventListener('click', copy);
+      cmdEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); copy(); }
+      });
+    }
+  })();
 
 </script>
 

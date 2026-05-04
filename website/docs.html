@@ -560,6 +560,109 @@
     .hero-card__art { display: none; }
   }
 
+  /* ============= INSTALLER (OS-aware single command) ============= */
+  .installer {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+    margin: 18px 0 28px;
+    max-width: 100%;
+  }
+  .installer__tabs {
+    display: inline-flex;
+    gap: 4px;
+    padding: 4px;
+    background: var(--bg-soft);
+    border: 1px solid var(--stroke);
+    border-radius: 999px;
+  }
+  .installer__tab {
+    padding: 7px 14px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--fg-muted);
+    background: transparent;
+    border: 0;
+    border-radius: 999px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  .installer__tab:hover { color: var(--fg); }
+  .installer__tab.active {
+    background: var(--bg);
+    color: var(--fg);
+    box-shadow: var(--shadow-sm);
+  }
+  .installer__tab svg { width: 13px; height: 13px; opacity: 0.75; }
+  .installer__cmd {
+    display: inline-flex;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 20px;
+    background: var(--code-bg);
+    color: var(--code-fg);
+    border-radius: var(--radius-button);
+    font-family: var(--font-mono);
+    font-size: 13.5px;
+    cursor: pointer;
+    box-shadow: 0 0 0 1px var(--code-stroke), 0 16px 32px -16px var(--code-glow);
+    transition: transform 0.12s ease, box-shadow 0.2s ease;
+    width: 100%;
+    max-width: 640px;
+  }
+  .installer__cmd:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 0 0 1px var(--code-stroke), 0 24px 40px -16px var(--code-glow);
+  }
+  .installer__cmd .prompt { color: rgba(255, 255, 255, 0.42); flex-shrink: 0; }
+  .installer__cmd .text {
+    flex: 1;
+    min-width: 0;
+    overflow-x: auto;
+    white-space: nowrap;
+    scrollbar-width: none;
+  }
+  .installer__cmd .text::-webkit-scrollbar { display: none; }
+  .installer__cmd .text .kw { color: var(--accent); }
+  .installer__cmd .copy {
+    font-size: 11px;
+    padding: 4px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: var(--radius-tag);
+    color: rgba(255, 255, 255, 0.78);
+    flex-shrink: 0;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  }
+  .installer__cmd:hover .copy {
+    background: var(--action);
+    color: #fff;
+    border-color: var(--action);
+  }
+  .installer__hint {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--fg-subtle);
+    margin: 0;
+    letter-spacing: 0.02em;
+  }
+  .installer__hint code {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--action);
+    background: rgba(83, 58, 253, 0.08);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  @media (max-width: 600px) {
+    .installer__tab { padding: 6px 11px; font-size: 11px; }
+    .installer__cmd { font-size: 12px; padding: 12px 14px; gap: 12px; }
+  }
+
   /* burn button — video plays on hover (matches landing page treatment) */
   .btn--burn {
     position: relative;
@@ -665,6 +768,13 @@
       <a class="sb-link" href="#state">Cross-call state</a>
     </div>
     <div class="sb-section">
+      <h4>Embedder seams</h4>
+      <a class="sb-link" href="#extend">Extension points</a>
+      <a class="sb-link" href="#extend-cache">BurnCacheBackend</a>
+      <a class="sb-link" href="#extend-host">HostContext</a>
+      <a class="sb-link" href="#extend-flow">FlowEngine</a>
+    </div>
+    <div class="sb-section">
       <h4>Reference</h4>
       <a class="sb-link" href="#cli">burn CLI</a>
       <a class="sb-link" href="#node-compat">Node compat surface</a>
@@ -732,7 +842,32 @@
       </div>
 
       <h2 id="installation"><span class="anchor">#</span>Installation</h2>
-      <p>Add the facade crate to your <code>Cargo.toml</code>:</p>
+      <p>The fastest path: <code>afterburner.sh</code> dispatches by user agent, verifies the SHA-256 sidecar, and drops <code>burn</code> into <code>~/.local/bin</code>. Pick your shell:</p>
+
+      <div class="installer">
+        <div class="installer__tabs" role="tablist" aria-label="Install command for OS">
+          <button class="installer__tab" data-os="macos" role="tab" aria-selected="false">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M17.523 13.013c-.013-2.31 1.91-3.42 1.999-3.474-1.094-1.601-2.793-1.819-3.405-1.844-1.45-.149-2.835.852-3.572.852-.745 0-1.881-.83-3.094-.806-1.59.024-3.061.927-3.881 2.353-1.656 2.873-.422 7.117 1.193 9.443.793 1.143 1.737 2.422 2.974 2.376 1.193-.048 1.643-.772 3.087-.772 1.443 0 1.85.772 3.111.745 1.286-.022 2.1-1.16 2.886-2.305.911-1.319 1.286-2.598 1.31-2.665-.029-.013-2.51-.965-2.534-3.83l-.073-.073zM15.092 6.16c.66-.797 1.105-1.91.984-3.018-.949.039-2.097.633-2.78 1.43-.61.706-1.143 1.832-.999 2.918 1.057.082 2.135-.537 2.795-1.33z"/></svg>
+            macOS
+          </button>
+          <button class="installer__tab" data-os="linux" role="tab" aria-selected="false">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12.504 0c-.155 0-.315.008-.48.021-4.226.333-3.105 4.807-3.17 6.298-.076 1.092-.3 1.953-1.05 3.02-.885 1.051-2.127 2.75-2.716 4.521-.278.832-.41 1.684-.287 2.489a.424.424 0 00-.11.135c-.26.268-.45.6-.663.839-.199.199-.485.267-.797.4-.313.136-.658.269-.864.68-.09.189-.136.394-.132.602 0 .199.027.4.055.536.058.399.116.728.04.97-.249.68-.28 1.145-.106 1.484.174.334.535.47.94.601.81.2 1.91.135 2.774.6.926.466 1.866.67 2.616.47.526-.116.97-.464 1.208-.946.587-.003 1.23-.269 2.26-.334.699-.058 1.574.267 2.577.2.025.134.063.198.114.333l.003.003c.391.778 1.113 1.132 1.884 1.071.771-.06 1.592-.536 2.257-1.306.631-.765 1.683-1.084 2.378-1.503.348-.199.629-.469.649-.853.023-.4-.2-.811-.714-1.376v-.097l-.003-.003c-.17-.2-.25-.535-.338-.926-.085-.401-.182-.786-.492-1.046h-.003c-.059-.054-.123-.067-.188-.135a.357.357 0 00-.19-.064c.431-1.278.264-2.55-.173-3.694-.533-1.41-1.465-2.638-2.175-3.483-.796-1.005-1.576-1.957-1.56-3.368.026-2.152.236-6.133-3.544-6.139zm.337 21.834c-.65-.025-1.226-.265-1.667-.578-.443-.318-.74-.7-.792-1.062-.041-.297.044-.564.226-.768.197-.218.464-.382.74-.515.276-.13.567-.225.78-.286a.31.31 0 00.094-.04l.029-.022c.226-.246.45-.56.7-.85.253-.296.527-.55.81-.55.282 0 .55.243.812.553.262.31.488.626.713.83l.025.018a.413.413 0 00.094.04c.214.061.504.155.78.286.276.133.543.297.74.515.182.204.267.471.226.768-.052.362-.349.744-.792 1.062-.44.313-1.018.553-1.668.578z"/></svg>
+            Linux
+          </button>
+          <button class="installer__tab" data-os="windows" role="tab" aria-selected="false">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801"/></svg>
+            Windows
+          </button>
+        </div>
+        <div class="installer__cmd" title="Click to copy" role="button" tabindex="0">
+          <span class="prompt">$</span>
+          <span class="text"></span>
+          <span class="copy">Copy</span>
+        </div>
+        <p class="installer__hint">Pin a version with <code>BURN_VERSION=vX.Y.Z</code> · custom install dir with <code>BURN_INSTALL=/usr/local/bin</code></p>
+      </div>
+
+      <p>Or pull the runtime as a Rust library:</p>
 
       <div class="codeblock">
         <div class="codeblock__head">
@@ -743,7 +878,7 @@
 <span class="tok-mod">afterburner</span> = <span class="tok-str">"0.1"</span></pre>
       </div>
 
-      <p>Or install the <code>burn</code> CLI:</p>
+      <p>Or build the <code>burn</code> CLI from source:</p>
 
       <div class="codeblock">
         <div class="codeblock__head">
@@ -755,7 +890,7 @@ $ <span class="tok-mod">burn</span> --version
 afterburner 0.1.0</pre>
       </div>
 
-      <p>Nothing external is needed at runtime; the runtime is fully self-contained in the binary. See <a href="#build" style="color: var(--action);">Building from source</a> if you want to compile the workspace yourself.</p>
+      <p>The prebuilt binary ships with <code>--features release-cli</code> (every backend, every L3 shadow, TypeScript loader). Nothing external is needed at runtime; SQLite, OpenSSL, libclang are all statically linked in. See <a href="#build" style="color: var(--action);">Building from source</a> if you want to compile the workspace yourself.</p>
 
       <h2 id="first-burn"><span class="anchor">#</span>Your first burn</h2>
       <p>Five lines. Register a script, hand it some JSON, get JSON back:</p>
@@ -808,12 +943,16 @@ afterburner 0.1.0</pre>
         </thead>
         <tbody>
           <tr><td>Filesystem</td><td><code>fs</code></td><td><code>None</code></td><td><code>None</code> · <code>ReadOnly(roots)</code> · <code>ReadWrite(roots)</code></td></tr>
-          <tr><td>Network (out)</td><td><code>net</code></td><td><code>None</code></td><td><code>None</code> · <code>Allow(hosts)</code> · <code>All</code></td></tr>
+          <tr><td>Network (out)</td><td><code>net</code></td><td><code>None</code></td><td><code>None</code> · <code>OutboundHttp(allow)</code> · <code>OutboundFull(allow)</code></td></tr>
+          <tr><td>Environment</td><td><code>env</code></td><td><code>None</code></td><td><code>None</code> · <code>AllowList(keys)</code> · <code>Full</code></td></tr>
           <tr><td>Crypto</td><td><code>crypto</code></td><td><code>false</code></td><td><code>bool</code></td></tr>
-          <tr><td>Subprocess</td><td><code>child_process</code></td><td><code>false</code></td><td><code>bool</code> · <em>native path only</em></td></tr>
-          <tr><td>Environment</td><td><code>env</code></td><td><code>None</code></td><td><code>None</code> · <code>Allow(keys)</code></td></tr>
+          <tr><td>Subprocess</td><td><code>child_process</code></td><td><code>false</code></td><td><code>bool</code> (native backend only; WASM rejects with <code>PermissionDenied</code>)</td></tr>
+          <tr><td>Process exit</td><td><code>allow_exit</code></td><td><code>false</code></td><td><code>bool</code> (whether <code>process.exit(n)</code> terminates the script)</td></tr>
+          <tr><td>HTTP timeout</td><td><code>http_timeout_ms</code></td><td><code>None</code></td><td><code>Option&lt;u64&gt;</code> per-call cap on outbound HTTP</td></tr>
         </tbody>
       </table>
+
+      <p>Allow-lists accept exact hostnames (<code>api.example.com</code>) and single-label wildcards (<code>*.trusted.io</code>). <code>OutboundHttp</code> covers <code>http</code> / <code>https</code> / <code>fetch</code>. <code>OutboundFull</code> additionally permits raw TCP via <code>net.connect</code> and TLS via <code>tls.connect</code>.</p>
 
       <div class="callout">
         <div class="callout__icon">!</div>
@@ -883,20 +1022,19 @@ ab.<span class="tok-fn">drain</span>().<span class="tok-fn">await</span>?;      
       </div>
 
       <h2 id="state"><span class="anchor">#</span>Cross-invocation state</h2>
-      <p>The custom <code>afterburner:state</code> module lets scripts share data across calls. The default <code>InMemoryStateStore</code> ships with the workspace; embedders can plug in their own (Redis, SQLite, …) by implementing the <code>StateStore</code> trait.</p>
+      <p>The custom <code>afterburner:state</code> module lets scripts share data across calls. The default <code>InMemoryStateStore</code> uses a lock-free <code>HopscotchMap</code> with <code>AtomicI64</code> counters. Embedders can swap their own (Redis, SQLite, anything) by implementing the <code>StateStore</code> trait.</p>
 
       <div class="codeblock">
         <div class="codeblock__head">
           <span class="lang">rust · host side</span>
           <button class="copy-btn">Copy</button>
         </div>
-<pre><span class="tok-kw">use</span> afterburner_core::InMemoryStateStore;
-<span class="tok-kw">use</span> afterburner_wasi::{WasmCombustor, WasmConfig};
+<pre><span class="tok-kw">use</span> afterburner::{Afterburner, InMemoryStateStore};
 
 <span class="tok-kw">let</span> store = InMemoryStateStore::<span class="tok-fn">shared</span>();
-<span class="tok-kw">let</span> combustor = WasmCombustor::<span class="tok-fn">new</span>(WasmConfig {
-    state_store: <span class="tok-fn">Some</span>(store.<span class="tok-fn">clone</span>()),
-})?;</pre>
+<span class="tok-kw">let</span> ab = Afterburner::<span class="tok-fn">builder</span>()
+    .<span class="tok-fn">state_store</span>(store.<span class="tok-fn">clone</span>())
+    .<span class="tok-fn">build</span>()?;</pre>
       </div>
 
       <div class="codeblock">
@@ -907,13 +1045,92 @@ ab.<span class="tok-fn">drain</span>().<span class="tok-fn">await</span>?;      
 <pre><span class="tok-kw">const</span> state = <span class="tok-fn">require</span>(<span class="tok-str">'afterburner:state'</span>);
 
 state.<span class="tok-fn">setJSON</span>(<span class="tok-str">'lastSeen'</span>, Date.<span class="tok-fn">now</span>());
-<span class="tok-kw">const</span> n = state.<span class="tok-fn">increment</span>(<span class="tok-str">'hits'</span>);
+<span class="tok-kw">const</span> hits = state.<span class="tok-fn">increment</span>(<span class="tok-str">'hits'</span>);          <span class="tok-com">// atomic i64</span>
+<span class="tok-kw">const</span> seen = state.<span class="tok-fn">get</span>(<span class="tok-str">'lastSeen'</span>);
+<span class="tok-kw">const</span> keys = state.<span class="tok-fn">listKeys</span>(<span class="tok-str">'session:'</span>);          <span class="tok-com">// prefix scan</span>
 
-module.exports = () =&gt; ({ hits: n });</pre>
+module.exports = () =&gt; ({ hits, seen });</pre>
+      </div>
+
+      <h2 id="extend"><span class="anchor">#</span>Embedder extension points</h2>
+      <p>Three pluggable seams on the Rust side, each with a sensible default. Swap your own when the default is too tight.</p>
+
+      <h3 id="extend-cache">BurnCacheBackend</h3>
+      <p>Compiled scripts are content-addressed by <code>SHA-256</code> of the source. Implement <code>BurnCacheBackend</code> to share that cache across processes or hosts (Redis, S3, SQLite, NATS). The default <code>InProcessCacheBackend</code> is a lock-free map per <code>Afterburner</code> instance.</p>
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">rust</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre><span class="tok-kw">use</span> afterburner::{Afterburner, BurnCacheBackend, Result};
+<span class="tok-kw">use</span> std::sync::Arc;
+
+<span class="tok-kw">struct</span> RedisBackend { client: redis::Client }
+<span class="tok-kw">impl</span> BurnCacheBackend <span class="tok-kw">for</span> RedisBackend {
+    <span class="tok-kw">fn</span> <span class="tok-fn">fetch</span>(&amp;self, hash: &amp;[u8; <span class="tok-num">32</span>]) -&gt; Result&lt;Option&lt;String&gt;&gt; { <span class="tok-com">/* GET */</span> }
+    <span class="tok-kw">fn</span> <span class="tok-fn">publish</span>(&amp;self, hash: &amp;[u8; <span class="tok-num">32</span>], source: &amp;str) -&gt; Result&lt;()&gt; { <span class="tok-com">/* SETEX */</span> }
+}
+
+<span class="tok-kw">let</span> ab = Afterburner::<span class="tok-fn">builder</span>()
+    .<span class="tok-fn">cache_backend</span>(Arc::<span class="tok-fn">new</span>(RedisBackend { client }))
+    .<span class="tok-fn">build</span>()?;</pre>
+      </div>
+      <p>See <a href="https://github.com/vertexclique/afterburner/tree/master/examples/cache-backend-sqlite" style="color: var(--action);"><code>examples/cache-backend-sqlite</code></a> for a working SQLite-WAL coordinator that two <code>Afterburner</code> instances share scripts through.</p>
+
+      <h3 id="extend-host">HostContext</h3>
+      <p>Custom callbacks scripts can reach via <code>require('afterburner:host')</code>. Useful for streaming UDFs (<code>emit_row</code>), structured logging (<code>log</code>), and reading host-resolved configuration (<code>get_env</code>) without granting raw <code>process.env</code> access.</p>
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">rust</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre><span class="tok-kw">use</span> afterburner::{Afterburner, HostContext, LogLevel};
+<span class="tok-kw">use</span> serde_json::Value;
+<span class="tok-kw">use</span> std::sync::Arc;
+
+<span class="tok-kw">struct</span> AppHost { config: AppConfig, sink: Sender&lt;Value&gt; }
+<span class="tok-kw">impl</span> HostContext <span class="tok-kw">for</span> AppHost {
+    <span class="tok-kw">fn</span> <span class="tok-fn">log</span>(&amp;self, level: LogLevel, msg: &amp;str) {
+        tracing::<span class="tok-fn">info</span>!(?level, msg);
+    }
+    <span class="tok-kw">fn</span> <span class="tok-fn">get_env</span>(&amp;self, key: &amp;str) -&gt; Option&lt;String&gt; {
+        self.config.<span class="tok-fn">resolve</span>(key)
+    }
+    <span class="tok-kw">fn</span> <span class="tok-fn">emit_row</span>(&amp;self, row: Value) {
+        <span class="tok-kw">let</span> _ = self.sink.<span class="tok-fn">try_send</span>(row);
+    }
+}
+
+<span class="tok-kw">let</span> ab = Afterburner::<span class="tok-fn">builder</span>()
+    .<span class="tok-fn">host_context</span>(Arc::<span class="tok-fn">new</span>(AppHost::<span class="tok-fn">new</span>(cfg, tx)))
+    .<span class="tok-fn">build</span>()?;</pre>
+      </div>
+
+      <h3 id="extend-flow">FlowEngine (multi-module bundles)</h3>
+      <p>For pipelines that span multiple ES modules. Enable the <code>flow</code> feature, then call <code>.flow()</code> on the builder and <code>register_bundle(entry, modules)</code> to compile a graph of files at once.</p>
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">rust</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre><span class="tok-kw">let</span> ab = Afterburner::<span class="tok-fn">builder</span>().<span class="tok-fn">flow</span>().<span class="tok-fn">build</span>()?;
+<span class="tok-kw">let</span> id = ab.<span class="tok-fn">register_bundle</span>(<span class="tok-str">"./pipeline.mjs"</span>, &amp;[
+    (<span class="tok-str">"./normalize.mjs"</span>.into(), normalize_src),
+    (<span class="tok-str">"./enrich.mjs"</span>.into(),    enrich_src),
+])?;
+<span class="tok-kw">let</span> out = ab.<span class="tok-fn">run</span>(&amp;id, &amp;trigger)?;</pre>
+      </div>
+
+      <div class="callout callout--note">
+        <div class="callout__icon">i</div>
+        <div>
+          <strong>StateStore is the fourth seam.</strong>
+          <p>Covered in <a href="#state" style="color: var(--action);">Cross-invocation state</a> above. The default <code>InMemoryStateStore</code> uses a lock-free <code>HopscotchMap</code> with <code>AtomicI64</code> counters; swap your own to back <code>require('afterburner:state')</code> with Redis, SQLite, or anything else.</p>
+        </div>
       </div>
 
       <h2 id="cli"><span class="anchor">#</span>The <code>burn</code> CLI</h2>
-      <p>A Deno-style command-line runtime. Deny by default, grant with <code>--allow-*</code> flags.</p>
+      <p>A Deno-style command-line runtime. CLI default is <code>Manifold::open()</code> so existing Node scripts drop in without flags. Pass <code>--sandbox</code> to flip back to deny-by-default and grant with <code>--allow-*</code>.</p>
 
       <div class="codeblock">
         <div class="codeblock__head">
@@ -922,16 +1139,43 @@ module.exports = () =&gt; ({ hits: n });</pre>
         </div>
 <pre>$ <span class="tok-mod">burn</span> ./script.js                          <span class="tok-com"># run a file</span>
 $ <span class="tok-mod">burn</span> -e <span class="tok-str">'module.exports = () =&gt; 42'</span>     <span class="tok-com"># eval inline</span>
-$ <span class="tok-fn">echo</span> <span class="tok-str">'{"n":21}'</span> | <span class="tok-mod">burn</span> thrust transform.js  <span class="tok-com"># UDF mode</span>
+$ <span class="tok-fn">echo</span> <span class="tok-str">'{"n":21}'</span> | <span class="tok-mod">burn</span> thrust transform.js  <span class="tok-com"># UDF mode (stdin JSON in, stdout JSON out)</span>
 $ <span class="tok-mod">burn</span> bench perf.js --iters 10000 --workers 8
 $ <span class="tok-mod">burn</span> repl                                   <span class="tok-com"># interactive</span>
+$ <span class="tok-mod">burn</span> check app.ts                           <span class="tok-com"># compile + parse, exit 0/1</span>
 
-<span class="tok-com"># Deno-style capability grants</span>
-$ <span class="tok-mod">burn</span> --allow-net=<span class="tok-str">api.example.com,*.trusted.io</span> script.js
-$ <span class="tok-mod">burn</span> --allow-fs=<span class="tok-str">/tmp,/var/data</span> etl.js
-$ <span class="tok-mod">burn</span> --allow-env=<span class="tok-str">HOME,PATH</span> launcher.js
+<span class="tok-com"># Pass-through to the Node ecosystem. Nested node calls route home.</span>
+$ <span class="tok-mod">burn</span> npm install express
+$ <span class="tok-mod">burn</span> pnpm run dev
+$ <span class="tok-mod">burn</span> npx tsc --init
+$ <span class="tok-mod">burn</span> yarn build
+$ <span class="tok-mod">burn</span> bun run start
+
+<span class="tok-com"># Capability grants</span>
+$ <span class="tok-mod">burn</span> --sandbox \
+       --allow-fs=<span class="tok-str">./data,/tmp/jobs</span> \
+       --allow-net=<span class="tok-str">api.example.com,*.trusted.io</span> \
+       --allow-env=<span class="tok-str">NODE_ENV,API_KEY</span> \
+       script.js
 $ <span class="tok-mod">burn</span> -A runall.js                            <span class="tok-com"># grant everything</span></pre>
       </div>
+
+      <h3 id="cli-subcommands">Subcommands</h3>
+      <table class="doc-table">
+        <thead>
+          <tr><th>Subcommand</th><th>Purpose</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>run &lt;file&gt; [args]</code></td><td>Execute a script. Args after the file populate <code>process.argv[2..]</code>. Default when the first positional looks like a path.</td></tr>
+          <tr><td><code>eval &lt;code&gt;</code> · <code>-e</code></td><td>Evaluate an inline JS snippet in script mode.</td></tr>
+          <tr><td><code>thrust &lt;file&gt;</code></td><td>UDF mode. Stdin JSON envelope, script returns JSON, written to stdout. The script body is <code>module.exports = (data) =&gt; ...</code>.</td></tr>
+          <tr><td><code>check &lt;file&gt;</code></td><td>Compile and parse without executing. Exits 0 on success, 1 on syntax error. Useful in CI.</td></tr>
+          <tr><td><code>bench &lt;file&gt;</code></td><td>Throughput + p50 / p99 latency. Configurable iters and workers.</td></tr>
+          <tr><td><code>repl</code></td><td>Interactive read-eval-print loop with line history.</td></tr>
+          <tr><td><code>node | npm | pnpm | npx | yarn | bun</code></td><td>Pass-through shim. Forwards args to the ecosystem binary on <code>$PATH</code>; child <code>node</code> processes route back through <code>burn</code>.</td></tr>
+          <tr><td><code>version</code></td><td>Print version and the cargo features built into the binary.</td></tr>
+        </tbody>
+      </table>
 
       <h3 id="cli-flags">Flag reference</h3>
       <table class="doc-table">
@@ -939,26 +1183,29 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
           <tr><th>Flag</th><th>Effect</th></tr>
         </thead>
         <tbody>
-          <tr><td><code>-e &lt;src&gt;</code></td><td>Evaluate inline source instead of loading a file.</td></tr>
-          <tr><td><code>thrust &lt;file&gt;</code></td><td>UDF mode: stdin → JSON → script → JSON → stdout, line-delimited.</td></tr>
-          <tr><td><code>bench &lt;file&gt;</code></td><td>Throughput smoke test with iteration + worker counts.</td></tr>
-          <tr><td><code>repl</code></td><td>Interactive evaluator with history and tab-complete.</td></tr>
-          <tr><td><code>--allow-net=&lt;hosts&gt;</code></td><td>Comma list, wildcards allowed (<code>*.trusted.io</code>).</td></tr>
-          <tr><td><code>--allow-fs=&lt;roots&gt;</code></td><td>Comma list of read-write roots. <code>--allow-fs-read</code> for read-only.</td></tr>
-          <tr><td><code>--allow-env=&lt;keys&gt;</code></td><td>Comma list of environment variable keys.</td></tr>
-          <tr><td><code>--sandbox</code></td><td>Flip CLI default from <code>open()</code> to <code>sealed()</code>.</td></tr>
-          <tr><td><code>-A</code></td><td>Grant everything. Useful for trusted scripts; never for untrusted input.</td></tr>
+          <tr><td><code>--mode=native|wasm|adaptive</code></td><td>Engine backend. Defaults to <code>adaptive</code> when the feature is built in.</td></tr>
+          <tr><td><code>--fuel=&lt;N&gt;</code></td><td>Operation budget (backend-specific; not portable across modes).</td></tr>
+          <tr><td><code>--memory=&lt;BYTES&gt;</code></td><td>Linear-memory cap.</td></tr>
+          <tr><td><code>--timeout=&lt;MS&gt;</code></td><td>Wall-clock cap. The portable safety knob.</td></tr>
+          <tr><td><code>--allow-fs=&lt;roots&gt;</code></td><td>Comma list of FS roots. <code>*</code> grants all paths.</td></tr>
+          <tr><td><code>--allow-net=&lt;hosts&gt;</code></td><td>Comma list of hostnames. Wildcards (<code>*.trusted.io</code>) supported. <code>*</code> grants any host.</td></tr>
+          <tr><td><code>--allow-env=&lt;keys&gt;</code></td><td>Comma list of env-var keys. <code>*</code> grants every variable.</td></tr>
+          <tr><td><code>--sandbox</code></td><td>Seal the manifold (deny everything) and combine with <code>--allow-*</code> to opt in.</td></tr>
+          <tr><td><code>-A</code> · <code>--allow-all</code></td><td>Grant every capability. Use only for trusted scripts.</td></tr>
+          <tr><td><code>-q</code> · <code>--quiet</code></td><td>Suppress banners, capability hints, and warnings on stderr.</td></tr>
+          <tr><td><code>-e &lt;code&gt;</code> · <code>--eval &lt;code&gt;</code></td><td>Run an inline snippet instead of a file.</td></tr>
         </tbody>
       </table>
 
       <h2 id="node-compat"><span class="anchor">#</span>Node compat surface</h2>
-      <p>Afterburner targets the <strong>Node.js 20.x LTS</strong> API surface. Pure-JS modules are always available; host-backed ones are gated by the <code>Manifold</code>.</p>
+      <p>Afterburner targets the <strong>Node.js 20.x LTS</strong> API surface. Pure-JS modules are always available. Host-backed ones are gated by the <code>Manifold</code>. Surface-only entries load and expose the right shapes; runtime methods either route through other modules or throw a clear error explaining the limitation.</p>
 
       <h3>Always-on (pure JS)</h3>
       <div class="compat-grid">
         <div class="compat"><span class="ck ck--ok">✓</span>path</div>
         <div class="compat"><span class="ck ck--ok">✓</span>url</div>
         <div class="compat"><span class="ck ck--ok">✓</span>querystring</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>punycode</div>
         <div class="compat"><span class="ck ck--ok">✓</span>events</div>
         <div class="compat"><span class="ck ck--ok">✓</span>assert</div>
         <div class="compat"><span class="ck ck--ok">✓</span>buffer</div>
@@ -968,19 +1215,27 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
         <div class="compat"><span class="ck ck--ok">✓</span>timers</div>
         <div class="compat"><span class="ck ck--ok">✓</span>process</div>
         <div class="compat"><span class="ck ck--ok">✓</span>console</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>module</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>os</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>zlib</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>perf_hooks</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>async_hooks</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>vm</div>
       </div>
 
       <h3>Host-backed (capability-gated)</h3>
       <div class="compat-grid">
         <div class="compat"><span class="ck ck--gated">⚿</span>fs</div>
-        <div class="compat"><span class="ck ck--gated">⚿</span>fs.promises</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>fs/promises</div>
         <div class="compat"><span class="ck ck--gated">⚿</span>crypto</div>
         <div class="compat"><span class="ck ck--gated">⚿</span>http</div>
         <div class="compat"><span class="ck ck--gated">⚿</span>https</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>net</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>tls</div>
         <div class="compat"><span class="ck ck--gated">⚿</span>dns</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>dgram</div>
         <div class="compat"><span class="ck ck--gated">⚿</span>child_process</div>
-        <div class="compat"><span class="ck ck--ok">✓</span>os</div>
-        <div class="compat"><span class="ck ck--ok">✓</span>zlib</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>worker_threads</div>
       </div>
 
       <h3>Web globals</h3>
@@ -996,13 +1251,38 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
         <div class="compat"><span class="ck ck--ok">✓</span>structuredClone</div>
         <div class="compat"><span class="ck ck--ok">✓</span>queueMicrotask</div>
         <div class="compat"><span class="ck ck--ok">✓</span>performance.now</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>EventTarget</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>WebAssembly</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>AsyncLocalStorage</div>
       </div>
+
+      <h3>Native-addon shadows (pure-Rust hosts behind the npm API)</h3>
+      <p>Each shadow lives behind its own cargo feature (<code>shadow-bcrypt</code>, <code>shadow-argon2</code>, <code>shadow-jsonwebtoken</code>, <code>shadow-sqlite3</code>, <code>shadow-sharp</code>) or the <code>all-shadows</code> aggregate. <code>require('&lt;pkg&gt;')</code> resolves to a Rust-backed implementation with the same npm API surface, no <code>.node</code> binary needed.</p>
+      <div class="compat-grid">
+        <div class="compat"><span class="ck ck--ok">✓</span>bcrypt</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>argon2</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>jsonwebtoken</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>sqlite3</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>sharp</div>
+      </div>
+
+      <h3>Surface-only (loads, throws clear errors at runtime)</h3>
+      <div class="compat-grid">
+        <div class="compat"><span class="ck ck--gated">~</span>http2</div>
+        <div class="compat"><span class="ck ck--gated">~</span>cluster</div>
+        <div class="compat"><span class="ck ck--gated">~</span>inspector</div>
+        <div class="compat"><span class="ck ck--gated">~</span>readline</div>
+        <div class="compat"><span class="ck ck--gated">~</span>repl</div>
+        <div class="compat"><span class="ck ck--gated">~</span>trace_events</div>
+        <div class="compat"><span class="ck ck--gated">~</span>wasi</div>
+      </div>
+      <p><code>http2</code> throws <code>ERR_HTTP2_NOT_IMPLEMENTED</code> on connect; HTTP/1.1 over TLS via <code>https</code> covers the canonical case. <code>cluster</code> routes through <code>worker_threads</code>. Native <code>.node</code> addons cannot load inside the WASM sandbox; for the popular ones, use the L3 shadows above.</p>
 
       <div class="callout callout--ok">
         <div class="callout__icon">✓</div>
         <div>
           <strong>Custom modules</strong>
-          <p><code>require('afterburner:state')</code> for a cross-invocation key/value store. Implicitly available; the host installs the <code>StateStore</code>.</p>
+          <p><code>require('afterburner:state')</code> for a cross-invocation key/value store with atomic <code>increment_i64</code>. <code>require('afterburner:host')</code> for the <code>HostContext</code> bridge (<code>log</code>, <code>emit_row</code>, <code>read_column</code>, <code>get_env</code>). Both implicitly available when the embedder installs the corresponding trait.</p>
         </div>
       </div>
 
@@ -1036,13 +1316,14 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
         </thead>
         <tbody>
           <tr><td><code>afterburner</code></td><td>Facade: <code>Afterburner</code> + builder, <code>burn</code> binary, one ergonomic entry point.</td></tr>
-          <tr><td><code>afterburner-core</code></td><td><code>Combustor</code> trait, <code>Manifold</code>, <code>FuelGauge</code>, <code>BurnCache</code>, level-gated logging.</td></tr>
-          <tr><td><code>afterburner-ignite</code></td><td>Fast-path engine; thread-local runtimes for sub-millisecond ignition.</td></tr>
-          <tr><td><code>afterburner-wasi</code></td><td>Sandboxed engine; pooling allocator, instance pre-init, bytecode cache.</td></tr>
-          <tr><td><code>afterburner-node-compat</code></td><td>Node API polyfill bundle + Rust-backed host implementations. Bounded HTTP &amp; DNS with per-call timeouts.</td></tr>
-          <tr><td><code>afterburner-flow</code></td><td>High-level <code>FlowEngine::load / execute / unload</code> for pipeline-style usage.</td></tr>
-          <tr><td><code>afterburner-adaptive</code></td><td>Flying Start: fast → sandboxed tier switch.</td></tr>
-          <tr><td><code>afterburner-thrust</code></td><td>Multi-threaded scheduler. Bounded queues, token-bucket admission, steal-when-idle, graceful drain.</td></tr>
+          <tr><td><code>afterburner-core</code></td><td><code>Combustor</code> trait, <code>Manifold</code>, <code>FuelGauge</code>, <code>BurnCache</code>, <code>BurnCacheBackend</code>, <code>StateStore</code>, <code>HostContext</code>, level-gated logging.</td></tr>
+          <tr><td><code>afterburner-ignite</code></td><td>Native QuickJS via <code>rquickjs</code>; thread-local runtimes for sub-millisecond ignition.</td></tr>
+          <tr><td><code>afterburner-wasi</code></td><td>Wasmtime + Javy plugin sandbox. Host-function imports, pooling allocator, <code>InstancePre</code> affinity, bytecode cache, daemon coordinators (net / tls / dgram / http).</td></tr>
+          <tr><td><code>afterburner-node-compat</code></td><td>Plenum polyfill bundle + Rust-backed host implementations. Bounded HTTP &amp; DNS with per-call timeouts. L3 shadows for <code>bcrypt</code>, <code>argon2</code>, <code>jsonwebtoken</code>, <code>sqlite3</code>, <code>sharp</code>.</td></tr>
+          <tr><td><code>afterburner-flow</code></td><td><code>FlowEngine::load / execute / unload</code> + <code>register_bundle</code> for ES-module bundles.</td></tr>
+          <tr><td><code>afterburner-adaptive</code></td><td>Flying Start: native to WASM tier switch on the second call.</td></tr>
+          <tr><td><code>afterburner-thrust</code></td><td>Multi-threaded scheduler. Bounded per-worker Chase-Lev deques, token-bucket admission, steal-when-idle, graceful drain. Lock-free <code>HopscotchMap</code> + <code>kovan-channel</code> primitives.</td></tr>
+          <tr><td><code>afterburner-plugin</code></td><td>WASM-side Javy plugin (<code>wasm32-wasip1</code>). <code>include_bytes!</code>-baked into the binary at build time; Wizer pre-initialised for fast first-call ignition.</td></tr>
         </tbody>
       </table>
 
@@ -1095,7 +1376,12 @@ $ ./target/release/<span class="tok-mod">burn</span> --version</pre>
       <li><a href="#tiers">Adaptive tiers</a></li>
       <li><a href="#scheduler">Scheduler</a></li>
       <li><a href="#state">Cross-call state</a></li>
+      <li><a href="#extend">Extension points</a></li>
+      <li class="toc-sub"><a href="#extend-cache">BurnCacheBackend</a></li>
+      <li class="toc-sub"><a href="#extend-host">HostContext</a></li>
+      <li class="toc-sub"><a href="#extend-flow">FlowEngine</a></li>
       <li><a href="#cli">burn CLI</a></li>
+      <li class="toc-sub"><a href="#cli-subcommands">Subcommands</a></li>
       <li class="toc-sub"><a href="#cli-flags">Flag reference</a></li>
       <li><a href="#node-compat">Node compat</a></li>
       <li><a href="#env">Environment vars</a></li>
@@ -1165,6 +1451,74 @@ $ ./target/release/<span class="tok-mod">burn</span> --version</pre>
       document.querySelector('.nav__search input')?.focus();
     }
   });
+
+  /* OS-aware installer (multiple per page) */
+  (function installers() {
+    const PRESETS = {
+      macos: {
+        prompt: '$',
+        html: '<span class="kw">curl</span> -fsSL https://afterburner.sh | sh',
+        plain: 'curl -fsSL https://afterburner.sh | sh',
+      },
+      linux: {
+        prompt: '$',
+        html: '<span class="kw">curl</span> -fsSL https://afterburner.sh | sh',
+        plain: 'curl -fsSL https://afterburner.sh | sh',
+      },
+      windows: {
+        prompt: '>',
+        html: '<span class="kw">iwr</span> -useb https://afterburner.sh | <span class="kw">iex</span>',
+        plain: 'iwr -useb https://afterburner.sh | iex',
+      },
+    };
+
+    const ua = (navigator.userAgent || '');
+    const detected =
+      /Win(dows|NT|64|32|98|95)/i.test(ua) ? 'windows' :
+      /Mac|Darwin|iPhone|iPad/i.test(ua)   ? 'macos'   : 'linux';
+
+    document.querySelectorAll('.installer').forEach(setup);
+
+    function setup(root) {
+      const tabs    = [...root.querySelectorAll('.installer__tab')];
+      const cmdEl   = root.querySelector('.installer__cmd');
+      const promptEl = cmdEl?.querySelector('.prompt');
+      const textEl   = cmdEl?.querySelector('.text');
+      const copyEl   = cmdEl?.querySelector('.copy');
+      if (!tabs.length || !cmdEl || !promptEl || !textEl || !copyEl) return;
+
+      function setOs(os) {
+        const preset = PRESETS[os] || PRESETS.linux;
+        tabs.forEach(t => {
+          const on = t.dataset.os === os;
+          t.classList.toggle('active', on);
+          t.setAttribute('aria-selected', on ? 'true' : 'false');
+        });
+        promptEl.textContent = preset.prompt;
+        textEl.innerHTML = preset.html;
+        cmdEl.dataset.plain = preset.plain;
+      }
+
+      tabs.forEach(t => t.addEventListener('click', () => setOs(t.dataset.os)));
+      setOs(detected);
+
+      function copy() {
+        const text = cmdEl.dataset.plain || '';
+        if (!text) return;
+        navigator.clipboard.writeText(text).then(() => {
+          copyEl.textContent = 'Copied!';
+          setTimeout(() => { copyEl.textContent = 'Copy'; }, 1400);
+        }).catch(() => {
+          copyEl.textContent = 'Copy failed';
+          setTimeout(() => { copyEl.textContent = 'Copy'; }, 1400);
+        });
+      }
+      cmdEl.addEventListener('click', copy);
+      cmdEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); copy(); }
+      });
+    }
+  })();
 </script>
 
 <!-- ============= TWEAKS PANEL ============= -->
