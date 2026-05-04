@@ -32,6 +32,15 @@ on:
 permissions:
   contents: write
 
+# Releases are tag-specific. Two parallel runs for the same tag would
+# race when uploading artifacts to the GitHub Release, so group by
+# tag/ref. `cancel-in-progress: false` so an accidental retry never
+# kills an in-flight build that's about to finish — the second run
+# just queues behind it.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0

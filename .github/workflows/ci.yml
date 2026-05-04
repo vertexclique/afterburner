@@ -7,6 +7,13 @@ on:
     branches: [master, main]
   workflow_dispatch:
 
+# A new push to the same branch (or a fresh PR commit) cancels any
+# earlier in-progress run for that branch / PR. Saves runner minutes
+# and keeps the actions tab focused on what's current.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
