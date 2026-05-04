@@ -28,7 +28,7 @@
 //!   from arbitrary JS namespaces (e.g. emscripten's `env.*`) won't
 //!   instantiate — bridging JS callbacks back through wasmtime is
 //!   non-trivial and lands in a follow-up. v1 surfaces a clear
-//!   "import not satisfied: <name>" error so callers know which
+//!   `import not satisfied: <name>` error so callers know which
 //!   piece is missing.
 //! * **Tables / Globals.** Polyfill stubs them; not exposed yet.
 //! * **`compileStreaming` / `instantiateStreaming`.** No `Response`
