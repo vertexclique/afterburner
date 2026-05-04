@@ -55,8 +55,6 @@ let ab = Afterburner::builder()
 
 ### Install (prebuilt binaries)
 
-The `afterburner.sh` host is a Cloudflare Worker (source: [`worker/`](./worker/), deployed by [`.github/workflows/deploy-website.yml`](./.github/workflows/deploy-website.yml)) with a Static Assets binding over [`website/`](./website/). It dispatches by user agent: `curl`/`wget` get the POSIX shell installer, `Invoke-WebRequest`/`PowerShell` get the `.ps1`, browsers get the landing page. Both scripts fetch the latest GitHub Release, verify the SHA-256 sidecar, and drop `burn` into the user's local bin (override with `BURN_INSTALL=...`). Append `?install=sh|ps1|html` to force a specific response when sniffing UA isn't enough.
-
 Linux / macOS:
 
 ```sh
