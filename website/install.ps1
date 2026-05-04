@@ -2,6 +2,9 @@
 #
 #   iwr -useb https://afterburner.sh | iex
 #
+# (Served by the afterburner.sh Cloudflare Worker, which dispatches
+# by user agent — PowerShell gets this; curl/wget get install.sh.)
+#
 # Honors:
 #   $env:BURN_VERSION   pinned tag (e.g. v0.1.0). Defaults to "latest".
 #   $env:BURN_INSTALL   install dir. Defaults to $env:USERPROFILE\.local\bin.

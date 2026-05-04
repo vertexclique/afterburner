@@ -5,6 +5,13 @@
 /.idea/
 /.vscode/
 *.swp
+
+# npm artifacts (used by examples/express-app — see its README for the
+# `npm install` setup step). Lockfile is also gitignored: pinning is
+# the user's choice and the example's `package.json` only declares a
+# semver range against a single dep.
+**/node_modules/
+package-lock.json
 # docs/ is generated/working notes — gitignored. We carve out only
 # the WIT manifest tree (consumed by the abi_parity drift gate test
 # in CI). Everything else under docs/ stays out of git.

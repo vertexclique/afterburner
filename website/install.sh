@@ -1,7 +1,10 @@
 #!/bin/sh
 # POSIX-sh installer for the `burn` CLI.
 #
-#   curl -fsSL https://raw.githubusercontent.com/vertexclique/afterburner/master/install.sh | sh
+#   curl -fsSL https://afterburner.sh | sh
+#
+# (Served by the afterburner.sh Cloudflare Worker, which dispatches
+# by user agent — curl/wget get this; PowerShell gets install.ps1.)
 #
 # Honors:
 #   BURN_VERSION   pinned tag (e.g. v0.1.0). Defaults to "latest".
