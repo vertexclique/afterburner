@@ -245,11 +245,7 @@ fn esm_default_export_function_preserves_name_binding() {
     )
     .unwrap();
     let entry = dir.join("main.mjs");
-    fs::write(
-        &entry,
-        "import g from './lib';\nconsole.log(g('world'));",
-    )
-    .unwrap();
+    fs::write(&entry, "import g from './lib';\nconsole.log(g('world'));").unwrap();
     let out = run_burn_file(&entry);
     let _ = fs::remove_dir_all(&dir);
     assert_ok(&out, "default export named function");
@@ -331,11 +327,7 @@ fn esm_named_export_list() {
 #[test]
 fn esm_esmodule_flag_set_on_exports() {
     let dir = scratch("es_flag");
-    fs::write(
-        dir.join("lib.mjs"),
-        "export const marker = 'yes';",
-    )
-    .unwrap();
+    fs::write(dir.join("lib.mjs"), "export const marker = 'yes';").unwrap();
     let entry = dir.join("main.mjs");
     fs::write(
         &entry,
@@ -362,11 +354,7 @@ fn esm_export_star_copies_non_default() {
         "exports.a = 1;\nexports.b = 2;\nexports.default = 99;",
     )
     .unwrap();
-    fs::write(
-        dir.join("index.mjs"),
-        "export * from './src';",
-    )
-    .unwrap();
+    fs::write(dir.join("index.mjs"), "export * from './src';").unwrap();
     let entry = dir.join("main.mjs");
     fs::write(
         &entry,
@@ -391,11 +379,7 @@ fn esm_export_star_copies_non_default() {
 #[test]
 fn esm_export_named_from_source() {
     let dir = scratch("export_from");
-    fs::write(
-        dir.join("src.js"),
-        "exports.origName = 'source-val';",
-    )
-    .unwrap();
+    fs::write(dir.join("src.js"), "exports.origName = 'source-val';").unwrap();
     fs::write(
         dir.join("reexport.mjs"),
         "export { origName as renamed } from './src';",
@@ -421,11 +405,7 @@ fn esm_export_star_as_namespace() {
         "exports.tag = 'nested';\nexports.n = 5;",
     )
     .unwrap();
-    fs::write(
-        dir.join("index.mjs"),
-        "export * as Src from './src';",
-    )
-    .unwrap();
+    fs::write(dir.join("index.mjs"), "export * as Src from './src';").unwrap();
     let entry = dir.join("main.mjs");
     fs::write(
         &entry,

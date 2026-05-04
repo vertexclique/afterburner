@@ -86,12 +86,7 @@ pub fn wrap_user_source_with_input_global(user: &str) -> String {
 /// module, so a rejecting Promise surfaces as a module-evaluation
 /// error that `invoke` returns as `Err` — exactly how we want script
 /// errors to flow back to the host as a WASM trap.
-pub fn wrap_script_source(
-    user: &str,
-    argv_json: &str,
-    env_json: &str,
-    cwd_json: &str,
-) -> String {
+pub fn wrap_script_source(user: &str, argv_json: &str, env_json: &str, cwd_json: &str) -> String {
     let user_lit = js_string_literal(user);
     // The user wrapper is an `AsyncFunction` so top-level `await`
     // inside the user's source compiles. The plain `Function`

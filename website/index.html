@@ -1,0 +1,1942 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Afterburner · A drop-in JavaScript runtime for Rust</title>
+<link rel="stylesheet" href="design-system.css?v=3" />
+<link rel="icon" type="image/png" href="art/afterburner-square.png" />
+<style>
+  /* ============= NAV ============= */
+  .nav {
+    position: sticky; top: 0; z-index: 50;
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    background: rgba(255, 255, 255, 0.82);
+    border-bottom: 1px solid var(--stroke);
+  }
+  .nav__inner {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 32px;
+    max-width: 1200px; margin: 0 auto;
+  }
+  .nav__brand {
+    display: flex; align-items: center; gap: 10px;
+    font-family: var(--font-display); font-weight: 600; font-size: 17px;
+    letter-spacing: -0.02em;
+    color: var(--fg);
+  }
+  .nav__brand img { width: 28px; height: 28px; }
+  .nav__links { display: flex; gap: 4px; align-items: center; }
+  .nav__links a {
+    padding: 8px 14px; border-radius: var(--radius-tag);
+    font-size: 14px; font-weight: 500;
+    color: var(--fg);
+    transition: color 0.15s ease;
+  }
+  .nav__links a:hover { color: var(--action); }
+  .nav__cta { display: flex; gap: 10px; align-items: center; }
+
+  /* ============= HERO ============= */
+  .hero {
+    position: relative;
+    overflow: hidden;
+    padding: calc(64px * var(--density, 1)) 0 calc(80px * var(--density, 1));
+  }
+  .hero__bg {
+    position: absolute; top: -10%; right: -10%;
+    width: 70%; height: 90%;
+    background: var(--gradient-dreamy);
+    opacity: 0.55;
+    filter: blur(60px);
+    pointer-events: none;
+    border-radius: 50%;
+  }
+  .hero__inner {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1.1fr 1fr;
+    gap: 56px;
+    align-items: center;
+  }
+  .hero__pill {
+    display: inline-flex;
+    margin-bottom: 28px;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    background: var(--bg-soft);
+    border: 1px solid var(--stroke);
+    border-radius: 999px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--fg);
+  }
+  .hero__pill .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--color-accent-green);
+    box-shadow: 0 0 0 3px rgba(129, 184, 26, 0.2);
+  }
+  .hero__title {
+    font-family: var(--font-display);
+    font-size: clamp(44px, 6vw, 72px);
+    font-weight: 300;
+    letter-spacing: -0.03em;
+    line-height: 1.05;
+    margin: 0 0 24px;
+    color: var(--fg);
+    text-wrap: balance;
+  }
+  .hero__title em,
+  .live__copy h2 em,
+  .cta h2 em,
+  .grad-text {
+    font-style: normal;
+    background: var(--gradient-sunburst);
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: burnShift 6s ease-in-out infinite;
+  }
+  @keyframes burnShift {
+    0%   { background-position: 0% 50%; }
+    50%  { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+  }
+  .hero__sub {
+    font-size: var(--text-subheading);
+    line-height: 1.55;
+    color: var(--fg-muted);
+    margin: 0 0 36px;
+    max-width: 540px;
+    font-weight: 400;
+  }
+  .hero__sub code {
+    font-family: var(--font-mono);
+    font-size: 0.88em;
+    color: var(--action);
+    background: rgba(83, 58, 253, 0.08);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+  .hero__cta { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 32px; }
+
+  /* hero burn buttons — larger size + video plays on hover */
+  .btn--burn {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    font-size: 17px;
+    padding: 20px 32px;
+    border-radius: 6px;
+    transition: transform 0.2s ease, color 0.2s ease, border-color 0.2s ease, box-shadow 0.25s ease;
+  }
+  /* small variant keeps its compact size */
+  .btn--sm.btn--burn {
+    font-size: 13px;
+    padding: 9px 16px;
+    border-radius: 4px;
+  }
+  /* make label + arrow sit above the video and stay readable */
+  .btn--burn > * {
+    position: relative;
+    z-index: 3;
+  }
+  .btn--burn .burn-bg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    z-index: 0;
+    opacity: 0;
+    transition: opacity 0.35s ease;
+    pointer-events: none;
+  }
+  /* dark scrim — guarantees contrast for white text over the video */
+  .btn--burn::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    background: linear-gradient(180deg, rgba(20, 8, 0, 0.35), rgba(40, 10, 0, 0.55));
+    opacity: 0;
+    transition: opacity 0.35s ease;
+    pointer-events: none;
+  }
+  /* warm color wash on top of the scrim — keeps the brand heat */
+  .btn--burn::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    background: linear-gradient(120deg, rgba(255, 95, 0, 0.28), rgba(255, 46, 84, 0.22) 50%, rgba(124, 77, 255, 0.25));
+    mix-blend-mode: screen;
+    opacity: 0;
+    transition: opacity 0.35s ease;
+    pointer-events: none;
+  }
+  .btn--burn:hover .burn-bg,
+  .btn--burn:focus-visible .burn-bg { opacity: 1; }
+  .btn--burn:hover::before,
+  .btn--burn:focus-visible::before { opacity: 1; }
+  .btn--burn:hover::after,
+  .btn--burn:focus-visible::after { opacity: 1; }
+  .btn--burn:hover,
+  .btn--burn:focus-visible {
+    color: #fff;
+    border-color: transparent;
+    box-shadow: 0 16px 38px rgba(255, 97, 24, 0.38), 0 0 0 0.5px rgba(255,255,255,0.45) inset;
+    transform: translateY(-1px);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55), 0 0 12px rgba(0, 0, 0, 0.35);
+  }
+  /* outlined variant fg should also flip to white on hover (overrides default) */
+  .btn--outlined.btn--burn:hover { background: transparent; }
+  .hero__meta {
+    display: flex; gap: 24px; flex-wrap: wrap;
+    font-family: var(--font-mono); font-size: 12px; color: var(--fg-muted);
+  }
+  .hero__meta b { color: var(--fg); font-weight: 600; }
+
+  /* ============= HERO VISUAL — orbital ============= */
+  .hero__visual {
+    position: relative;
+    display: grid;
+    place-items: center;
+    min-height: 540px;
+  }
+  .orbital {
+    position: relative;
+    width: 100%;
+    max-width: 540px;
+    aspect-ratio: 1;
+  }
+
+  /* aurora glow */
+  .orbital__aurora {
+    position: absolute;
+    inset: -8%;
+    pointer-events: none;
+    background:
+      radial-gradient(circle at 30% 30%, var(--aurora-a, rgba(127, 125, 252, 0.55)), transparent 45%),
+      radial-gradient(circle at 70% 35%, var(--aurora-b, rgba(244, 75, 204, 0.40)), transparent 50%),
+      radial-gradient(circle at 60% 75%, var(--aurora-c, rgba(255, 168, 96, 0.40)), transparent 50%);
+    filter: blur(var(--orb-glow-blur, 48px));
+    opacity: var(--orb-glow, 0.95);
+    animation: auroraDrift 14s ease-in-out infinite alternate;
+    z-index: 0;
+  }
+  @keyframes auroraDrift {
+    from { transform: translate(-2%, -1%) scale(1); }
+    to   { transform: translate(3%, 2%)  scale(1.06); }
+  }
+
+  /* sparks scattered in the background */
+  .orbital__sparks { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+  .orbital__sparks span {
+    position: absolute;
+    left: var(--x); top: var(--y);
+    width: 4px; height: 4px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 10px var(--accent);
+    animation: spark 4s ease-in-out infinite;
+    animation-delay: var(--d);
+    opacity: 0;
+    --max-op: var(--orb-spark-op, 1);
+  }
+  .orbital__sparks span:nth-child(2n)  { background: var(--color-vibrant-orange); box-shadow: 0 0 10px var(--color-vibrant-orange); }
+  .orbital__sparks span:nth-child(3n)  { background: var(--color-accent-green);   box-shadow: 0 0 10px var(--color-accent-green); }
+  @keyframes spark {
+    0%, 100% { opacity: 0; transform: scale(0.6); }
+    50%      { opacity: calc(0.9 * var(--max-op, 1)); transform: scale(1.1); }
+  }
+
+  /* svg orbit rings */
+  .orbital__svg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 2;
+    animation: orbitFloat 12s ease-in-out infinite alternate;
+  }
+  @keyframes orbitFloat {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(8deg); }
+  }
+
+  /* orbiting chips — positioned via JS by setting --angle */
+  .orbital__chip {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform-origin: 0 0;
+    /* angle and radius are set per chip below; the wrapper rotates,
+       then translates out by radius, then a child counter-rotates to stay upright */
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    background: rgba(255, 255, 255, 0.92);
+    border: 1px solid rgba(83, 58, 253, 0.18);
+    border-radius: 999px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--fg);
+    box-shadow:
+      0 6px 18px rgba(83, 58, 253, 0.18),
+      0 0 0 0.5px rgba(255,255,255,0.7) inset;
+    white-space: nowrap;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    z-index: 4;
+    will-change: transform;
+  }
+  .orbital__chip .d {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--action);
+    box-shadow: 0 0 8px currentColor;
+    color: var(--action);
+  }
+  .orbital__chip .d.g { background: var(--color-accent-green);   color: var(--color-accent-green); }
+  .orbital__chip .d.o { background: var(--color-vibrant-orange); color: var(--color-vibrant-orange); }
+  .orbital__chip .d.p { background: var(--accent);               color: var(--accent); }
+
+  /* language logo tiles inside chips */
+  .orbital__chip.logo-chip {
+    padding: 4px 10px 4px 4px;
+    gap: 7px;
+    font-weight: 600;
+  }
+  .logo-tile {
+    display: inline-grid;
+    place-items: center;
+    width: 18px; height: 18px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.02em;
+    color: #fff;
+    box-shadow: 0 0 0 0.5px rgba(0,0,0,0.05) inset;
+  }
+  .logo-tile.ts { background: #3178C6; }   /* TypeScript blue */
+  .logo-tile.js { background: #F7DF1E; color: #1a1a1a; }   /* JavaScript yellow */
+  .orbital__chip.logo-chip.ts { box-shadow: 0 6px 18px rgba(49, 120, 198, 0.28), 0 0 0 0.5px rgba(255,255,255,0.7) inset; }
+  .orbital__chip.logo-chip.js { box-shadow: 0 6px 18px rgba(247, 223, 30, 0.35), 0 0 0 0.5px rgba(255,255,255,0.7) inset; }
+
+  /* core */
+  .orbital__core {
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 36%;
+    aspect-ratio: 1;
+    transform: translate(-50%, -50%);
+    z-index: 5;
+  }
+  .orbital__core::before {
+    content: '';
+    position: absolute;
+    inset: -25%;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(255,255,255,0.9), rgba(255,255,255,0) 65%);
+    z-index: -1;
+  }
+  .orbital__core img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    filter: drop-shadow(0 22px 40px rgba(83, 58, 253, 0.5));
+    animation: bob 6s ease-in-out infinite;
+  }
+  @keyframes bob {
+    0%, 100% { transform: translateY(0)    rotate(-2deg); }
+    50%      { transform: translateY(-8px) rotate(2deg); }
+  }
+
+  /* sonar ping */
+  .orbital__pulse {
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 36%;
+    aspect-ratio: 1;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    border: 1.5px solid rgba(83, 58, 253, 0.5);
+    animation: ping var(--orb-pulse-dur, 3.6s) cubic-bezier(0.2, 0.8, 0.2, 1) infinite;
+    pointer-events: none;
+    z-index: 3;
+  }
+  .orbital__pulse:nth-child(2) { animation-delay: 1.2s; border-color: rgba(244, 75, 204, 0.45); }
+  .orbital__pulse:nth-child(3) { animation-delay: 2.4s; border-color: rgba(255, 168, 96, 0.45); }
+  @keyframes ping {
+    0%   { transform: translate(-50%, -50%) scale(0.55); opacity: 0; }
+    18%  { opacity: 0.9; }
+    100% { transform: translate(-50%, -50%) scale(2.6);  opacity: 0; }
+  }
+
+  /* ============= LIVE TERMINAL SECTION ============= */
+  .live { padding: calc(96px * var(--density, 1)) 0;
+    background: var(--bg);
+    position: relative;
+    overflow: hidden;
+  }
+  .live::before {
+    content: '';
+    position: absolute;
+    top: -10%; left: -5%;
+    width: 50%; height: 60%;
+    background: radial-gradient(ellipse, rgba(127, 125, 252, 0.18), transparent 65%);
+    filter: blur(60px);
+    pointer-events: none;
+  }
+  .live__inner {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1fr 1.2fr;
+    gap: 56px;
+    align-items: center;
+  }
+  .live__copy h2 {
+    font-family: var(--font-display);
+    font-size: var(--text-heading-lg);
+    font-weight: 300;
+    letter-spacing: -0.025em;
+    line-height: 1.1;
+    margin: 8px 0 18px;
+    color: var(--fg);
+  }
+  /* live__copy h2 em — styled in shared .hero__title em rule */
+  .live__copy p {
+    font-size: 16px;
+    line-height: 1.6;
+    color: var(--fg-muted);
+    margin: 0 0 16px;
+    max-width: 480px;
+  }
+  .live__copy p code {
+    font-family: var(--font-mono);
+    font-size: 0.88em;
+    color: var(--action);
+    background: rgba(83, 58, 253, 0.08);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+  .live-term {
+    background: var(--code-bg);
+    border-radius: var(--radius-card);
+    overflow: hidden;
+    box-shadow: var(--shadow-card), 0 0 0 1px var(--code-stroke), 0 32px 64px -32px var(--code-glow);
+    position: relative;
+    transition: box-shadow 0.4s ease;
+  }
+  .live-term::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--code-glow), transparent);
+    opacity: 0;
+    transition: opacity 0.4s ease;
+    pointer-events: none;
+    z-index: 2;
+  }
+  html[data-code-theme="inferno"] .live-term::before,
+  html[data-code-theme="matrix"] .live-term::before {
+    opacity: 1;
+    animation: code-ember 6s linear infinite;
+  }
+  .live-term__bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 12px 16px;
+    background: var(--code-bg-2);
+    border-bottom: 1px solid var(--code-stroke);
+  }
+  .live-term__bar .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .live-term__bar .dot:nth-child(1) { background: #ff5f56; }
+  .live-term__bar .dot:nth-child(2) { background: #ffbd2e; }
+  .live-term__bar .dot:nth-child(3) { background: #27c93f; }
+  .live-term__bar .name {
+    margin-left: 12px;
+    font-family: var(--font-mono); font-size: 12px; color: rgba(255,255,255,0.5);
+  }
+  .live-term__body {
+    padding: 22px 24px;
+    font-family: var(--font-mono); font-size: 13px; line-height: 1.7;
+    color: var(--code-fg);
+    height: 340px;
+    max-height: 340px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,0.18) transparent;
+  }
+  .live-term__body::-webkit-scrollbar { width: 8px; }
+  .live-term__body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 4px; }
+  .live-term__body::-webkit-scrollbar-track { background: transparent; }
+  .live-term__line { display: block; white-space: pre-wrap; }
+  .live-term__prompt { color: var(--action-soft); margin-right: 8px; }
+  .live-term__caret {
+    display: inline-block;
+    width: 8px; height: 14px;
+    vertical-align: -2px;
+    background: var(--accent);
+    animation: blink 1s steps(1) infinite;
+    margin-left: 2px;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* ============= MARQUEE ============= */
+  .marquee {
+    position: relative; overflow: hidden;
+    padding: 20px 0;
+    background: var(--bg-section);
+    border-top: 1px solid var(--stroke);
+    border-bottom: 1px solid var(--stroke);
+  }
+  .marquee__track {
+    display: flex; width: max-content;
+    animation: marquee 60s linear infinite; gap: 48px;
+  }
+  .marquee__item {
+    display: flex; align-items: center; gap: 10px;
+    font-family: var(--font-mono); font-size: 13px; font-weight: 500;
+    color: var(--fg-muted);
+    white-space: nowrap;
+  }
+  .marquee__item .glow {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: var(--action);
+  }
+
+  /* ============= FEATURES ============= */
+  .features { padding: calc(96px * var(--density, 1)) 0; }
+  .features__grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+  }
+  .feat {
+    padding: 28px 24px;
+    background: var(--bg-section);
+    border-radius: var(--radius-card);
+    transition: box-shadow 0.25s ease, transform 0.25s ease;
+  }
+  .feat:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-hover);
+  }
+  .feat__num {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--action);
+    margin-bottom: 16px;
+    letter-spacing: 0.02em;
+  }
+  .feat h3 {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: var(--text-heading-sm);
+    line-height: var(--leading-heading-sm);
+    letter-spacing: -0.01em;
+    margin: 0 0 8px;
+    color: var(--fg);
+  }
+  .feat p {
+    margin: 0;
+    color: var(--fg-muted);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .feat p code {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    background: rgba(255,255,255,0.6);
+    padding: 1px 5px;
+    border-radius: 4px;
+    color: var(--action);
+  }
+
+  /* ============= CODE DEMO ============= */
+  .demo { padding: calc(96px * var(--density, 1)) 0;
+    background: var(--bg-soft);
+    border-top: 1px solid var(--stroke);
+    border-bottom: 1px solid var(--stroke);
+  }
+  .demo__head {
+    display: flex; align-items: end; justify-content: space-between;
+    margin-bottom: 40px; gap: 24px; flex-wrap: wrap;
+  }
+  .demo__head h2 {
+    font-family: var(--font-display);
+    font-size: var(--text-heading-lg);
+    font-weight: 300;
+    letter-spacing: -0.025em;
+    line-height: 1.1;
+    margin: 8px 0 0;
+    max-width: 640px;
+  }
+  .demo__head p {
+    color: var(--fg-muted);
+    font-size: 16px;
+    margin: 0;
+    max-width: 380px;
+  }
+
+  .demo__layout {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    gap: 24px;
+  }
+  .demo__tabs {
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .demo__tab {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 14px;
+    border-radius: var(--radius-card);
+    font-family: var(--font-body);
+    font-size: 13px;
+    font-weight: 500;
+    text-align: left;
+    color: var(--fg-muted);
+    background: transparent;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .demo__tab:hover { background: var(--bg-section); color: var(--fg); }
+  .demo__tab.active {
+    background: var(--bg);
+    color: var(--fg);
+    box-shadow: var(--shadow-sm);
+  }
+  .demo__tab .num {
+    width: 22px; height: 22px; border-radius: 4px;
+    display: grid; place-items: center;
+    background: var(--bg-section); font-family: var(--font-mono);
+    font-size: 11px; color: var(--fg-muted);
+    flex-shrink: 0;
+  }
+  .demo__tab.active .num {
+    background: var(--action); color: white;
+  }
+  .demo__tab .sub {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--fg-subtle);
+    margin-top: 2px;
+    font-weight: 400;
+  }
+
+  .demo__panel {
+    position: relative;
+    background: var(--code-bg);
+    border-radius: var(--radius-card);
+    overflow: hidden;
+    display: flex; flex-direction: column;
+    box-shadow: var(--shadow-soft), 0 0 0 1px var(--code-stroke), 0 32px 64px -32px var(--code-glow);
+    transition: box-shadow 0.4s ease;
+  }
+  .demo__panel::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--code-glow), transparent);
+    opacity: 0;
+    transition: opacity 0.4s ease;
+    pointer-events: none;
+    z-index: 2;
+  }
+  html[data-code-theme="inferno"] .demo__panel::before,
+  html[data-code-theme="matrix"] .demo__panel::before {
+    opacity: 1;
+    animation: code-ember 6s linear infinite;
+  }
+  .demo__chrome {
+    display: flex; align-items: center; gap: 8px;
+    padding: 12px 16px;
+    background: var(--code-bg-2);
+    border-bottom: 1px solid var(--code-stroke);
+  }
+  .demo__chrome .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .demo__chrome .dot:nth-child(1) { background: #ff5f56; }
+  .demo__chrome .dot:nth-child(2) { background: #ffbd2e; }
+  .demo__chrome .dot:nth-child(3) { background: #27c93f; }
+  .demo__chrome .file {
+    margin-left: 12px; font-family: var(--font-mono); font-size: 12px;
+    color: rgba(255,255,255,0.55);
+  }
+  .demo__code {
+    padding: 22px 24px;
+    font-family: var(--font-mono); font-size: 13px; line-height: 1.7;
+    overflow-x: auto; flex: 1;
+  }
+  .demo__code pre { margin: 0; color: var(--code-fg); }
+  .demo__output {
+    border-top: 1px solid var(--code-stroke);
+    padding: 12px 24px;
+    font-family: var(--font-mono); font-size: 12.5px;
+    color: var(--color-accent-green);
+    display: flex; align-items: center; gap: 10px;
+    background: rgba(0,0,0,0.25);
+  }
+  .demo__output .arrow { color: var(--accent); }
+
+  /* ============= CONTROL ============= */
+  .control { padding: calc(96px * var(--density, 1)) 0; }
+  .control__head { margin-bottom: 56px; max-width: 720px; }
+  .control__head h2 {
+    font-family: var(--font-display);
+    font-size: var(--text-heading-lg);
+    font-weight: 300;
+    letter-spacing: -0.025em;
+    line-height: 1.1;
+    margin: 8px 0 16px;
+  }
+  .control__head p {
+    font-size: 17px;
+    color: var(--fg-muted);
+    margin: 0;
+    line-height: 1.55;
+  }
+
+  .control__grid {
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px;
+  }
+  .knob {
+    background: var(--bg-section);
+    border-radius: var(--radius-card);
+    padding: 24px;
+  }
+  .knob__row {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 14px;
+  }
+  .knob__label {
+    font-family: var(--font-mono); font-size: 11px; font-weight: 500;
+    text-transform: uppercase; letter-spacing: 0.12em; color: var(--fg-muted);
+  }
+  .knob__tag {
+    font-family: var(--font-mono); font-size: 11px;
+    color: var(--action);
+    background: rgba(83, 58, 253, 0.1);
+    padding: 2px 8px;
+    border-radius: var(--radius-tag);
+  }
+  .knob__name {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 20px;
+    letter-spacing: -0.01em;
+    color: var(--fg);
+    margin-bottom: 8px;
+  }
+  .knob__desc {
+    color: var(--fg-muted);
+    font-size: 14px;
+    line-height: 1.5;
+    margin: 0 0 16px;
+  }
+  .knob__desc code {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    background: rgba(255,255,255,0.6);
+    padding: 1px 5px;
+    border-radius: 4px;
+    color: var(--action);
+  }
+  .knob__field {
+    background: var(--code-bg);
+    color: var(--code-fg);
+    padding: 10px 14px;
+    border-radius: var(--radius-tag);
+    font-family: var(--font-mono); font-size: 12.5px;
+    display: flex; align-items: center; gap: 4px;
+    flex-wrap: wrap;
+  }
+  .knob__field .dim { color: rgba(255,255,255,0.4); }
+  .knob__field .val { color: var(--accent); }
+  .knob__field .flag { color: var(--action-soft); }
+  .knob__field .arg  { color: var(--color-accent-green); }
+
+  .knob__vis {
+    margin-top: 14px; height: 6px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: rgba(0,0,0,0.06);
+  }
+  .knob__vis__bar {
+    height: 100%;
+    background: var(--gradient-sunburst);
+    transition: width 0.8s cubic-bezier(0.2, 0.8, 0.2, 1);
+    border-radius: 999px;
+  }
+
+  /* ============= RUNS / WHAT WORKS ============= */
+  .runs { padding: calc(96px * var(--density, 1)) 0;
+    background: var(--bg-soft);
+    border-top: 1px solid var(--stroke);
+  }
+  .runs__head { margin-bottom: 48px; max-width: 700px; }
+  .runs__head h2 {
+    font-family: var(--font-display);
+    font-size: var(--text-heading-lg);
+    font-weight: 300;
+    letter-spacing: -0.025em;
+    margin: 8px 0 0;
+    line-height: 1.1;
+  }
+  .runs__grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+  }
+  .runs__cell {
+    background: var(--bg);
+    border: 1px solid var(--stroke);
+    border-radius: var(--radius-card);
+    padding: 20px;
+    display: flex; gap: 12px; align-items: flex-start;
+  }
+  .runs__check {
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--action);
+    color: white;
+    display: grid; place-items: center;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .runs__cell h4 {
+    font-family: var(--font-display);
+    font-weight: 500;
+    font-size: 15px;
+    margin: 2px 0 4px;
+    letter-spacing: -0.005em;
+    color: var(--fg);
+  }
+  .runs__cell p {
+    margin: 0;
+    color: var(--fg-muted);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .runs__cell code {
+    font-family: var(--font-mono);
+    color: var(--action);
+    background: rgba(83, 58, 253, 0.08);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+
+  /* ============= USE CASES ============= */
+  .use { padding: calc(96px * var(--density, 1)) 0; }
+  .use__grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+  }
+  .use__card {
+    padding: 28px;
+    background: var(--bg-section);
+    border-radius: var(--radius-card);
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+  }
+  .use__card:hover { transform: translateY(-2px); box-shadow: var(--shadow-hover); }
+  .use__art {
+    width: 44px; height: 44px;
+    border-radius: var(--radius-tag);
+    background: var(--bg);
+    display: grid; place-items: center;
+    margin-bottom: 16px;
+  }
+  .use__art svg { width: 22px; height: 22px; color: var(--action); }
+  .use__card h3 {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: var(--text-heading-sm);
+    letter-spacing: -0.01em;
+    margin: 0 0 8px;
+    color: var(--fg);
+  }
+  .use__card p {
+    color: var(--fg-muted);
+    margin: 0 0 14px;
+    font-size: 14px;
+    line-height: 1.55;
+  }
+  .use__card p code {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    background: rgba(255,255,255,0.6);
+    padding: 1px 5px;
+    border-radius: 4px;
+    color: var(--action);
+  }
+  .use__card .tags { display: flex; gap: 6px; flex-wrap: wrap; }
+  .use__card .tag {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--fg-muted);
+    background: var(--bg);
+    padding: 3px 8px;
+    border-radius: var(--radius-tag);
+  }
+
+  /* ============= CTA ============= */
+  .cta { padding: calc(120px * var(--density, 1)) 0;
+    text-align: center;
+    background:
+      radial-gradient(ellipse 60% 50% at 50% 50%, rgba(127, 125, 252, 0.35), transparent 65%),
+      radial-gradient(ellipse 40% 40% at 30% 80%, rgba(244, 75, 204, 0.25), transparent 65%),
+      var(--bg);
+    position: relative; overflow: hidden;
+  }
+  .cta h2 {
+    font-family: var(--font-display);
+    font-size: clamp(40px, 6vw, 64px);
+    font-weight: 300;
+    letter-spacing: -0.03em;
+    line-height: 1.05;
+    margin: 0 0 20px;
+    color: var(--fg);
+  }
+  /* cta h2 em — styled in shared .hero__title em rule */
+  .cta p {
+    font-size: var(--text-subheading);
+    color: var(--fg-muted);
+    margin: 0 auto 32px;
+    max-width: 540px;
+  }
+  .cta__cmd {
+    display: inline-flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 20px;
+    background: var(--code-bg);
+    color: var(--code-fg);
+    border-radius: var(--radius-button);
+    font-family: var(--font-mono);
+    font-size: 14px;
+    cursor: pointer;
+    transition: transform 0.12s ease, box-shadow 0.2s ease;
+  }
+  .cta__cmd:hover { transform: translateY(-1px); box-shadow: var(--shadow-card); }
+  .cta__cmd .copy {
+    font-size: 11px;
+    padding: 3px 8px;
+    border: 1px solid rgba(255,255,255,0.18);
+    border-radius: var(--radius-tag);
+    color: rgba(255,255,255,0.7);
+  }
+
+  /* ============= FOOTER ============= */
+  .site-footer__inner { max-width: 1200px; margin: 0 auto; padding: 0 32px; }
+  .footer__top {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr 1fr;
+    gap: 48px;
+    padding-bottom: 40px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+  .footer__brand img { width: 36px; height: 36px; margin-bottom: 14px; }
+  .footer__brand p {
+    color: rgba(255,255,255,0.65);
+    font-size: 13px;
+    line-height: 1.6;
+    max-width: 320px;
+    margin: 0;
+  }
+  .footer__col h4 {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: rgba(255,255,255,0.5);
+    margin: 0 0 14px;
+    font-weight: 500;
+  }
+  .footer__col ul { list-style: none; padding: 0; margin: 0; }
+  .footer__col li { margin-bottom: 8px; font-size: 13px; }
+  .footer__col li a { color: var(--color-platinum-white); transition: color 0.15s ease; }
+  .footer__bottom {
+    padding-top: 24px;
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 12px;
+    color: rgba(255,255,255,0.5);
+  }
+
+  /* ============= RESPONSIVE ============= */
+  @media (max-width: 980px) {
+    .hero__inner, .features__grid, .use__grid, .control__grid, .runs__grid {
+      grid-template-columns: 1fr;
+    }
+    .runs__grid { grid-template-columns: repeat(2, 1fr); }
+    .demo__layout { grid-template-columns: 1fr; }
+    .demo__tabs {
+      flex-direction: row; overflow-x: auto;
+      padding-bottom: 8px;
+    }
+    .footer__top { grid-template-columns: 1fr 1fr; }
+    .nav__links { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============= NAV ============= -->
+<nav class="nav">
+  <div class="nav__inner">
+    <a href="index.html" class="nav__brand">
+      <img src="art/afterburner-square.png" alt="Afterburner" />
+      <span>afterburner</span>
+    </a>
+    <div class="nav__links">
+      <a href="#features">Features</a>
+      <a href="#demo">Try it</a>
+      <a href="#control">Configure</a>
+      <a href="#runs">What works</a>
+      <a href="docs.html">Docs</a>
+    </div>
+    <div class="nav__cta">
+      <a href="https://github.com/vertexclique/afterburner" class="btn btn--ghost btn--sm">GitHub</a>
+      <a href="docs.html" class="btn btn--primary btn--sm btn--burn">
+        <video class="burn-bg" src="art/burning.mp4" muted loop playsinline preload="metadata"></video>
+        <span class="btn-label">Get started →</span>
+      </a>
+    </div>
+  </div>
+</nav>
+
+<!-- ============= HERO ============= -->
+<section class="hero">
+  <div class="hero__bg"></div>
+  <div class="container hero__inner">
+    <div class="hero__copy">
+      <h1 class="hero__title">
+        Run real Node apps. On your terms. At <em>full burn</em>.
+      </h1>
+      <p class="hero__sub">
+        Afterburner is a JavaScript runtime built in Rust. <code>burn server.js</code> stands up Express, Postgres clients, Redis pubsub. <code>burn npm install</code> works. TypeScript works. Worker threads, raw TCP, TLS with SNI, WebAssembly modules, native-addon shadows for <code>bcrypt</code>, <code>sqlite3</code>, <code>sharp</code>: all in. Every capability (files, network, env, processes) is yours to grant or deny, per script.
+      </p>
+      <div class="hero__cta">
+        <a href="docs.html" class="btn btn--primary btn--burn">
+          <video class="burn-bg" src="art/burning.mp4" muted loop playsinline preload="metadata"></video>
+          <span class="btn-label">Get started</span>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+        </a>
+        <a href="#demo" class="btn btn--outlined btn--burn">
+          <video class="burn-bg" src="art/burning.mp4" muted loop playsinline preload="metadata"></video>
+          <span class="btn-label">See it in action</span>
+        </a>
+      </div>
+      <div class="hero__meta">
+        <span><b>node · npm · pnpm · yarn · bun</b> all pass through</span>
+        <span><b>TypeScript</b> built in</span>
+        <span><b>Apache-2.0</b></span>
+      </div>
+    </div>
+
+    <div class="hero__visual">
+      <div class="orbital" aria-hidden="true">
+        <!-- aurora glow -->
+        <div class="orbital__aurora"></div>
+
+        <!-- spark dots scattered behind -->
+        <div class="orbital__sparks">
+          <span style="--x: 12%; --y: 18%; --d: 0s;"></span>
+          <span style="--x: 88%; --y: 24%; --d: 1.1s;"></span>
+          <span style="--x: 78%; --y: 82%; --d: 2.3s;"></span>
+          <span style="--x: 18%; --y: 76%; --d: 3.4s;"></span>
+          <span style="--x: 50%; --y: 8%;  --d: 0.7s;"></span>
+          <span style="--x: 92%; --y: 56%; --d: 2.0s;"></span>
+          <span style="--x: 8%;  --y: 48%; --d: 1.6s;"></span>
+        </div>
+
+        <!-- orbits drawn as SVG so geometry is exact -->
+        <svg class="orbital__svg" viewBox="0 0 540 540" fill="none">
+          <defs>
+            <radialGradient id="orbFade" cx="50%" cy="50%" r="50%">
+              <stop offset="60%" stop-color="rgba(83, 58, 253, 0.0)"/>
+              <stop offset="100%" stop-color="rgba(83, 58, 253, 0.18)"/>
+            </radialGradient>
+          </defs>
+          <!-- outer ring -->
+          <circle cx="270" cy="270" r="240" stroke="rgba(83, 58, 253, 0.16)" stroke-width="1"/>
+          <!-- mid ring (dashed) -->
+          <circle cx="270" cy="270" r="180" stroke="rgba(83, 58, 253, 0.22)" stroke-width="1" stroke-dasharray="2 6"/>
+          <!-- inner ring -->
+          <circle cx="270" cy="270" r="120" stroke="rgba(244, 75, 204, 0.22)" stroke-width="1"/>
+          <!-- soft glow ring at the edge -->
+          <circle cx="270" cy="270" r="240" stroke="url(#orbFade)" stroke-width="40" opacity="0.6"/>
+        </svg>
+
+        <!-- orbiting chips (outer) -->
+        <div class="orbital__chip outer c1"><span class="d"></span>burn server.js</div>
+        <div class="orbital__chip outer c2"><span class="d g"></span>npm install</div>
+        <div class="orbital__chip outer c3 logo-chip ts"><span class="logo-tile ts">TS</span>TypeScript</div>
+        <div class="orbital__chip outer c4"><span class="d p"></span>--allow-net</div>
+        <div class="orbital__chip outer c5"><span class="d o"></span>app.ts</div>
+        <div class="orbital__chip outer c6 logo-chip js"><span class="logo-tile js">JS</span>JavaScript</div>
+
+        <!-- orbiting chips (inner, reversed) -->
+        <div class="orbital__chip inner c1"><span class="d g"></span>fetch()</div>
+        <div class="orbital__chip inner c2"><span class="d o"></span>fs.promises</div>
+        <div class="orbital__chip inner c3"><span class="d"></span>crypto</div>
+
+        <!-- sonar pulses -->
+        <div class="orbital__pulse"></div>
+        <div class="orbital__pulse"></div>
+        <div class="orbital__pulse"></div>
+
+        <!-- core logo -->
+        <div class="orbital__core">
+          <img src="art/afterburner-square.png" alt="" />
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============= LIVE TERMINAL ============= -->
+<section class="live">
+  <div class="container">
+    <div class="live__inner reveal">
+      <div class="live__copy">
+        <span class="kicker">// Live demo</span>
+        <h2>Watch <em>burn</em> stand up<br/>a real Node app.</h2>
+        <p>Same commands you already know. <code>burn server.js</code>, <code>burn npm install</code>, <code>burn app.ts</code>. They run through the Rust runtime. Real ports, real sockets, TypeScript stripped on the way in.</p>
+        <p>And when you need isolation: <code>--allow-net</code>, <code>--allow-fs</code>, <code>--sandbox</code>. Default-deny, opt-in surface.</p>
+      </div>
+      <div class="live-term">
+        <div class="live-term__bar">
+          <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          <span class="name">~/my-app · zsh</span>
+        </div>
+        <div class="live-term__body" id="liveTerm"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============= MARQUEE ============= -->
+<div class="marquee" aria-hidden="true">
+  <div class="marquee__track" id="marquee"></div>
+</div>
+
+<!-- ============= FEATURES ============= -->
+<section class="features" id="features">
+  <div class="container">
+    <div class="section-head reveal">
+      <div>
+        <span class="kicker">// What's in the box</span>
+        <h2>Everything you reach for in Node.<br/>None of the surprises.</h2>
+      </div>
+      <p class="muted" style="max-width: 360px; margin: 0; font-size: 15px;">
+        Built to drop into your existing JavaScript workflow, and then give you the controls Node never offered.
+      </p>
+    </div>
+
+    <div class="features__grid">
+      <div class="feat reveal">
+        <div class="feat__num">01</div>
+        <h3>Real Node apps, unmodified</h3>
+        <p>Express servers, Postgres clients, Redis pubsub. <code>burn server.js</code> binds ports, opens raw TCP / TLS, drives the event loop, handles SIGINT cleanly.</p>
+      </div>
+      <div class="feat reveal">
+        <div class="feat__num">02</div>
+        <h3>Capability-gated everything</h3>
+        <p>Files, network, environment, subprocesses. Every host capability is gated. Pass <code>--allow-fs=./out</code> and that's all the script gets.</p>
+      </div>
+      <div class="feat reveal">
+        <div class="feat__num">03</div>
+        <h3>TypeScript, no toolchain</h3>
+        <p><code>burn app.ts</code> just runs. <code>.mts</code>, <code>.cts</code>, ESM, CommonJS. Types stripped, modules translated, no toolchain.</p>
+      </div>
+      <div class="feat reveal">
+        <div class="feat__num">04</div>
+        <h3>Limits you actually set</h3>
+        <p>Fuel, memory, wall-clock. Every dimension is yours to pick. A runaway script loses its return value, not your host.</p>
+      </div>
+      <div class="feat reveal">
+        <div class="feat__num">05</div>
+        <h3>Workers + scheduler</h3>
+        <p><code>worker_threads</code> ships. One flag turns a single instance into an N-worker pool. Bounded queues, work-stealing, graceful drain. Capability inheritance never widens.</p>
+      </div>
+      <div class="feat reveal">
+        <div class="feat__num">06</div>
+        <h3>Pass-through for npm &amp; friends</h3>
+        <p><code>burn npm install</code>, <code>burn pnpm run dev</code>, <code>burn npx tsc</code>. Every nested <code>node</code> call routes back through the runtime.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============= CODE DEMO ============= -->
+<section class="demo" id="demo">
+  <div class="container">
+    <div class="demo__head reveal">
+      <div>
+        <span class="kicker">// One binary. Five workflows.</span>
+        <h2>Whatever you'd run in Node, you can run with <em class="grad-text">burn</em>.</h2>
+      </div>
+      <p>Drop the <code style="font-family: var(--font-mono); color: var(--action); background: rgba(83,58,253,0.08); padding: 1px 6px; border-radius: 4px;">burn</code> binary on your PATH and your existing scripts and toolchains keep working, with controls Node doesn't have.</p>
+    </div>
+
+    <div class="demo__layout reveal">
+      <div class="demo__tabs" role="tablist">
+        <button class="demo__tab active" data-tab="0"><span class="num">1</span><span>HTTP server<span class="sub">burn server.js</span></span></button>
+        <button class="demo__tab" data-tab="1"><span class="num">2</span><span>npm pass-through<span class="sub">burn npm install</span></span></button>
+        <button class="demo__tab" data-tab="2"><span class="num">3</span><span>TypeScript<span class="sub">burn app.ts</span></span></button>
+        <button class="demo__tab" data-tab="3"><span class="num">4</span><span>Postgres + TLS<span class="sub">net &middot; tls &middot; pg</span></span></button>
+        <button class="demo__tab" data-tab="4"><span class="num">5</span><span>Workers<span class="sub">worker_threads</span></span></button>
+        <button class="demo__tab" data-tab="5"><span class="num">6</span><span>Sandboxed<span class="sub">--allow-fs / --allow-net</span></span></button>
+        <button class="demo__tab" data-tab="6"><span class="num">7</span><span>Embedded in Rust<span class="sub">use afterburner</span></span></button>
+      </div>
+
+      <div class="demo__panel">
+        <div class="demo__chrome">
+          <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          <span class="file" id="demoFile">server.js</span>
+        </div>
+        <div class="demo__code"><pre id="demoCode"></pre></div>
+        <div class="demo__output">
+          <span class="arrow">⟶</span>
+          <span id="demoOutput"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============= CONTROL ============= -->
+<section class="control" id="control">
+  <div class="container">
+    <div class="control__head reveal">
+      <span class="kicker">// You're in control</span>
+      <h2>Every limit, every gate,<br/>configurable.</h2>
+      <p>Nothing is hardcoded. Set the budgets that match your workload. Default-deny capabilities; grant exactly the surface a script needs. Every knob is exposed on the CLI <em>and</em> the embedded API.</p>
+    </div>
+
+    <div class="control__grid reveal">
+      <div class="knob">
+        <div class="knob__row">
+          <span class="knob__label">Fuel</span>
+          <span class="knob__tag">configurable</span>
+        </div>
+        <div class="knob__name">Operations budget</div>
+        <p class="knob__desc">A deterministic op counter. Tight loops trip the gauge regardless of host speed. Set it to whatever bounds your workload, or disable it entirely.</p>
+        <div class="knob__field"><span class="dim">.fuel(</span><span class="val">your_budget</span><span class="dim">)</span></div>
+        <div class="knob__vis"><div class="knob__vis__bar" id="fuelBar" style="width: 60%;"></div></div>
+      </div>
+
+      <div class="knob">
+        <div class="knob__row">
+          <span class="knob__label">Memory</span>
+          <span class="knob__tag">configurable</span>
+        </div>
+        <div class="knob__name">Per-script memory cap</div>
+        <p class="knob__desc">Hard cap enforced by the sandbox allocator. Over-budget allocations surface as JS-side <code>OutOfMemory</code>. Your host never gets OOM-killed.</p>
+        <div class="knob__field"><span class="dim">.memory_bytes(</span><span class="val">your_cap</span><span class="dim">)</span></div>
+        <div class="knob__vis"><div class="knob__vis__bar" id="memBar" style="width: 40%;"></div></div>
+      </div>
+
+      <div class="knob">
+        <div class="knob__row">
+          <span class="knob__label">Timeout</span>
+          <span class="knob__tag">configurable</span>
+        </div>
+        <div class="knob__name">Wall-clock kill switch</div>
+        <p class="knob__desc">Backstop for I/O that doesn't burn fuel. Independent of fuel and memory. Set it in milliseconds, seconds, minutes, whatever fits.</p>
+        <div class="knob__field"><span class="dim">.timeout_ms(</span><span class="val">your_deadline</span><span class="dim">)</span></div>
+        <div class="knob__vis"><div class="knob__vis__bar" id="timeBar" style="width: 75%;"></div></div>
+      </div>
+
+      <div class="knob">
+        <div class="knob__row">
+          <span class="knob__label">Workers</span>
+          <span class="knob__tag">configurable</span>
+        </div>
+        <div class="knob__name">Scheduler width</div>
+        <p class="knob__desc">From single-threaded to as many workers as your machine has cores. Bounded queues and work-stealing keep cores busy without thrashing locality.</p>
+        <div class="knob__field"><span class="dim">.threaded(</span><span class="val">N</span><span class="dim">)</span></div>
+        <div class="knob__vis"><div class="knob__vis__bar" id="wkBar" style="width: 50%;"></div></div>
+      </div>
+
+      <div class="knob">
+        <div class="knob__row">
+          <span class="knob__label">Filesystem</span>
+          <span class="knob__tag">scoped</span>
+        </div>
+        <div class="knob__name">Read &amp; write roots</div>
+        <p class="knob__desc">Whitelist exact paths. <code>FsAccess::None</code>, <code>ReadOnly(roots)</code>, or <code>ReadWrite(roots)</code>. Nothing you don't grant.</p>
+        <div class="knob__field"><span class="flag">--allow-fs</span><span class="dim">=</span><span class="arg">./data,/tmp/jobs</span></div>
+      </div>
+
+      <div class="knob">
+        <div class="knob__row">
+          <span class="knob__label">Network</span>
+          <span class="knob__tag">scoped</span>
+        </div>
+        <div class="knob__name">Hostname allow-list</div>
+        <p class="knob__desc">Outbound HTTP and DNS gated by hostname. Wildcards supported. The script can reach exactly the services on your list, and nothing else.</p>
+        <div class="knob__field"><span class="flag">--allow-net</span><span class="dim">=</span><span class="arg">api.example.com,*.trusted.io</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============= RUNS / WHAT WORKS ============= -->
+<section class="runs" id="runs">
+  <div class="container">
+    <div class="runs__head reveal">
+      <span class="kicker">// What works today</span>
+      <h2>The Node app you have<br/>runs on the runtime you want.</h2>
+    <p class="muted" style="max-width: 620px; margin: 12px auto 0; text-align: center; font-size: 15px;">450+ tests pass workspace-wide. Every Node 20 LTS built-in module has a real polyfill: no <code>require</code> returns a stub error.</p>
+    </div>
+    <div class="runs__grid reveal">
+      <div class="runs__cell">
+        <div class="runs__check">✓</div>
+        <div>
+          <h4>HTTP servers</h4>
+          <p><code>http.createServer().listen(...)</code>. Express. Real ports. Real sockets. Clean shutdown on SIGINT.</p>
+        </div>
+      </div>
+      <div class="runs__cell">
+        <div class="runs__check">✓</div>
+        <div>
+          <h4>TypeScript</h4>
+          <p><code>.ts</code>, <code>.mts</code>, <code>.cts</code>. Strip types, run. No <code>tsc</code> required for plain TypeScript.</p>
+        </div>
+      </div>
+      <div class="runs__cell">
+        <div class="runs__check">✓</div>
+        <div>
+          <h4>ES modules</h4>
+          <p><code>import</code>, <code>export</code>, named exports, re-exports. Translated transparently.</p>
+        </div>
+      </div>
+      <div class="runs__cell">
+        <div class="runs__check">✓</div>
+        <div>
+          <h4>node_modules</h4>
+          <p>CommonJS <code>require('pkg')</code> walks <code>node_modules</code>. <code>package.json</code> resolution. Auto JSON parsing.</p>
+        </div>
+      </div>
+      <div class="runs__cell">
+        <div class="runs__check">✓</div>
+        <div>
+          <h4>npm install</h4>
+          <p><code>burn npm install</code>, <code>burn pnpm run dev</code>, <code>burn yarn</code>, <code>burn bun</code>. Every nested <code>node</code> routes home.</p>
+        </div>
+      </div>
+      <div class="runs__cell">
+        <div class="runs__check">✓</div>
+        <div>
+          <h4>Process control</h4>
+          <p><code>process.argv</code>, <code>process.env</code>, <code>process.exit</code>, <code>setInterval</code>, <code>.unref()</code>. The whole shape, intact.</p>
+        </div>
+      </div>
+      <div class="runs__cell">
+        <div class="runs__check">✓</div>
+        <div>
+          <h4>Raw TCP &amp; TLS sockets</h4>
+          <p><code>net.connect</code>, <code>net.createServer</code>, <code>tls.connect</code>, <code>tls.createServer</code>. SNI multi-cert routing, ALPN, custom CA roots. Database drivers like <code>pg</code>, <code>redis</code>, <code>mongodb</code> just connect.</p>
+        </div>
+      </div>
+      <div class="runs__cell">
+        <div class="runs__check">✓</div>
+        <div>
+          <h4>DNS resolvers</h4>
+          <p><code>resolve4</code>, <code>resolve6</code>, <code>resolveMx</code>, <code>resolveTxt</code>, <code>resolveCname</code>, <code>resolveNs</code>, <code>reverse</code>. Callback and <code>dns/promises</code> shapes both ship.</p>
+        </div>
+      </div>
+      <div class="runs__cell">
+        <div class="runs__check">✓</div>
+        <div>
+          <h4>Worker threads</h4>
+          <p><code>new Worker('./bg.js', { workerData })</code> with <code>postMessage</code> round-trips. Capability inheritance never widens. Lock-free runtime.</p>
+        </div>
+      </div>
+      <div class="runs__cell">
+        <div class="runs__check">✓</div>
+        <div>
+          <h4>Native-addon shadows</h4>
+          <p><code>bcrypt</code>, <code>argon2</code>, <code>jsonwebtoken</code>, <code>sqlite3</code>, <code>sharp</code>. Pure-Rust under the hood, same npm API. SQLite statically linked. Sharp via SIMD-accelerated <code>image</code>+<code>fast_image_resize</code>.</p>
+        </div>
+      </div>
+      <div class="runs__cell">
+        <div class="runs__check">✓</div>
+        <div>
+          <h4>WebAssembly modules</h4>
+          <p><code>WebAssembly.compile</code> / <code>instantiate</code> / <code>Module</code> / <code>Instance</code> / <code>Memory</code>. SQL.js, @jsquash, libheif-js, pure-Rust → wasm32-wasi modules load directly.</p>
+        </div>
+      </div>
+      <div class="runs__cell">
+        <div class="runs__check">✓</div>
+        <div>
+          <h4>Crypto, zlib, streams</h4>
+          <p>SHA-1/256/384/512, HMAC, AES-GCM/CBC, PBKDF2, scrypt, RSA + ECDSA sign/verify. Streaming hashes. The whole shape, intact.</p>
+        </div>
+      </div>
+      <div class="runs__cell">
+        <div class="runs__check">✓</div>
+        <div>
+          <h4>Embedded in Rust</h4>
+          <p><code>cargo add afterburner</code>. One builder. <code>register</code>, <code>run</code>, done. Or wrap an N-worker scheduler around it.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============= USE CASES ============= -->
+<section class="use">
+  <div class="container">
+    <div class="section-head reveal">
+      <div>
+        <span class="kicker">// Built for</span>
+        <h2>Wherever JavaScript meets<br/>code you can't fully trust.</h2>
+      </div>
+    </div>
+    <div class="use__grid">
+      <div class="use__card reveal">
+        <div class="use__art">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2"/>
+            <path d="M8 21h8M12 17v4M2 12h20"/>
+          </svg>
+        </div>
+        <h3>Multi-tenant extensions</h3>
+        <p>Let customers ship JavaScript that augments your product. Capability gates pin tenant N's <code>fs</code> reads to <code>/tmp/tenant-N</code>. Limits keep their bugs out of your CPU graphs.</p>
+        <div class="tags"><span class="tag">customer scripting</span><span class="tag">isolation</span></div>
+      </div>
+      <div class="use__card reveal">
+        <div class="use__art">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+          </svg>
+        </div>
+        <h3>Per-row UDFs in your data plane</h3>
+        <p>Ship a streaming transform as a JS file. Pipe rows in via <code>burn thrust transform.js</code>; let the scheduler hash-route by key and steal under skew.</p>
+        <div class="tags"><span class="tag">streaming</span><span class="tag">transforms</span></div>
+      </div>
+      <div class="use__card reveal">
+        <div class="use__art">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M16 16h.01M9 12V8a3 3 0 0 1 6 0v4M5 12h14v8H5z"/>
+          </svg>
+        </div>
+        <h3>Locked-down edge handlers</h3>
+        <p>Each request gets a sealed manifold by default. Outbound HTTP needs an allow-list; <code>fs</code> stays off until you grant it. Production-shaped isolation, locally testable.</p>
+        <div class="tags"><span class="tag">edge compute</span><span class="tag">handlers</span></div>
+      </div>
+      <div class="use__card reveal">
+        <div class="use__art">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 20h9M16 4l4 4-12 12H4v-4z"/>
+          </svg>
+        </div>
+        <h3>Scriptable build steps</h3>
+        <p>Replace ad-hoc shell with version-pinned JS that has only the capabilities the step needs. <code>burn --allow-fs=./out --allow-env=CI build.ts</code> beats a 200-line Bash file.</p>
+        <div class="tags"><span class="tag">automation</span><span class="tag">CI</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============= CTA ============= -->
+<section class="cta">
+  <div class="container">
+    <h2>Ready to <em>throttle up</em>?</h2>
+    <p>Install the binary. Drop it on your PATH. Your existing scripts and toolchains keep working, with controls you didn't have yesterday.</p>
+    <div class="cta__cmd" id="copyCmd" title="Click to copy">
+      <span style="color: rgba(255,255,255,0.4);">$</span>
+      <span><span style="color: var(--accent);">cargo install</span> afterburner --features bin</span>
+      <span class="copy" id="copyLabel">Copy</span>
+    </div>
+    <div style="margin-top: 24px;">
+      <a href="docs.html" class="btn btn--outlined">Read the docs →</a>
+    </div>
+  </div>
+</section>
+
+<!-- ============= FOOTER ============= -->
+<footer class="site-footer">
+  <div class="site-footer__inner">
+    <div class="footer__top">
+      <div class="footer__brand">
+        <img src="art/afterburner-square.png" alt="Afterburner" />
+        <p>A JavaScript runtime built in Rust. Run real Node apps with the limits and capabilities you choose. Embed in Rust with one crate.</p>
+      </div>
+      <div class="footer__col">
+        <h4>Product</h4>
+        <ul>
+          <li><a href="#features">Features</a></li>
+          <li><a href="#demo">Try it</a></li>
+          <li><a href="#control">Configuration</a></li>
+          <li><a href="#runs">What works</a></li>
+        </ul>
+      </div>
+      <div class="footer__col">
+        <h4>Docs</h4>
+        <ul>
+          <li><a href="docs.html">Get started</a></li>
+          <li><a href="docs.html#cli">burn CLI</a></li>
+          <li><a href="docs.html#manifold">Capabilities</a></li>
+          <li><a href="docs.html#node-compat">Node compat</a></li>
+        </ul>
+      </div>
+      <div class="footer__col">
+        <h4>Community</h4>
+        <ul>
+          <li><a href="https://github.com/vertexclique/afterburner">GitHub</a></li>
+          <li><a href="https://crates.io/crates/afterburner">crates.io</a></li>
+          <li><a href="https://docs.rs/afterburner">docs.rs</a></li>
+          <li><a href="#">Issues</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="footer__bottom">
+      <span>© 2026 vertexclique · Afterburner · Apache-2.0</span>
+      <span class="mono">vertexclique/afterburner</span>
+    </div>
+  </div>
+</footer>
+
+<!-- ============= TWEAKS PANEL ============= -->
+<aside class="tweaks" id="tweaks" aria-label="Tweaks">
+  <div class="tweaks__head">
+    <span class="tweaks__title">Tweaks</span>
+    <button class="tweaks__close" id="tw-close" aria-label="Close">×</button>
+  </div>
+  <div class="tweaks__body">
+    <div class="tweaks__group">
+      <div class="tweaks__label"><span>Mood</span></div>
+      <div class="tweaks__seg" role="radiogroup" aria-label="Mood">
+        <button data-tw-key="mood" data-tw-val="violet">Violet</button>
+        <button data-tw-key="mood" data-tw-val="inferno">Inferno</button>
+        <button data-tw-key="mood" data-tw-val="cyber">Cyber</button>
+      </div>
+      <p class="tweaks__hint">Reshapes accent, gradient, and aurora colors across the page.</p>
+    </div>
+
+    <div class="tweaks__group">
+      <div class="tweaks__label"><span>Density</span></div>
+      <div class="tweaks__seg" role="radiogroup" aria-label="Density">
+        <button data-tw-key="density" data-tw-val="airy">Airy</button>
+        <button data-tw-key="density" data-tw-val="standard">Standard</button>
+        <button data-tw-key="density" data-tw-val="compressed">Compressed</button>
+      </div>
+      <p class="tweaks__hint">Scales the vertical rhythm of every section.</p>
+    </div>
+
+    <div class="tweaks__group">
+      <div class="tweaks__label"><span>Code theme</span></div>
+      <div class="tweaks__seg" role="radiogroup" aria-label="Code theme">
+        <button data-tw-key="codeTheme" data-tw-val="auto">Auto</button>
+        <button data-tw-key="codeTheme" data-tw-val="midnight">Midnight</button>
+        <button data-tw-key="codeTheme" data-tw-val="inferno">Inferno</button>
+        <button data-tw-key="codeTheme" data-tw-val="matrix">Matrix</button>
+      </div>
+      <p class="tweaks__hint">Recolors syntax tokens, code panels, and the live terminal. Auto follows the mood.</p>
+    </div>
+
+    <div class="tweaks__group">
+      <div class="tweaks__label"><span>Orbital intensity</span><span class="v" id="tw-intensity-val">70</span></div>
+      <input type="range" id="tw-intensity" class="tweaks__slider" min="0" max="100" step="5" value="70" oninput="this.style.setProperty('--p', this.value)" />
+      <p class="tweaks__hint">Glow strength, sonar speed, and how many chips orbit the logo.</p>
+    </div>
+  </div>
+</aside>
+
+<script>
+  /* ============= REVEAL ON SCROLL ============= */
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        e.target.classList.add('in');
+        io.unobserve(e.target);
+      }
+    });
+  }, { threshold: 0.1, rootMargin: '0px 0px -10% 0px' });
+  document.querySelectorAll('.reveal').forEach(el => io.observe(el));
+
+  /* ============= BURN BUTTONS — play video on hover ============= */
+  document.querySelectorAll('.btn--burn').forEach(btn => {
+    const vid = btn.querySelector('.burn-bg');
+    if (!vid) return;
+    const play = () => {
+      try { vid.currentTime = 0; } catch(e){}
+      vid.play().catch(() => {});
+    };
+    const pause = () => { vid.pause(); };
+    btn.addEventListener('mouseenter', play);
+    btn.addEventListener('focus', play);
+    btn.addEventListener('mouseleave', pause);
+    btn.addEventListener('blur', pause);
+  });
+
+  /* ============= ORBITAL CHIPS ============= */
+  (function orbital() {
+    const orb = document.querySelector('.orbital');
+    if (!orb) return;
+    const outer = [...orb.querySelectorAll('.orbital__chip.outer')];
+    const inner = [...orb.querySelectorAll('.orbital__chip.inner')];
+    if (!outer.length && !inner.length) return;
+
+    // radii are % of orbital container; CSS box is square so % is fine
+    // outer ring r=240 of viewBox 540 → 44.4%; inner ring r=180 → 33.3%
+    const OUTER_R_PCT = 44.4;
+    const INNER_R_PCT = 33.3;
+
+    let raf = null;
+    let running = true;
+    const t0 = performance.now();
+
+    function place(chips, radiusPct, periodMs, dir) {
+      const visible = chips.filter(c => c.style.display !== 'none');
+      const n = visible.length;
+      if (!n) return;
+      visible.forEach((chip, i) => {
+        const phase = (i / n) * 360;
+        const angle = phase + dir * ((performance.now() - t0) / periodMs) * 360;
+        const rad = angle * Math.PI / 180;
+        const x = Math.cos(rad) * radiusPct;
+        const y = Math.sin(rad) * radiusPct;
+        const cw = orb.clientWidth;
+        chip.style.transform =
+          `translate(-50%, -50%) translate(${x * cw / 100}px, ${y * cw / 100}px)`;
+      });
+    }
+
+    function tick() {
+      if (!running) return;
+      place(outer, OUTER_R_PCT, 32000, +1);
+      place(inner, INNER_R_PCT, 22000, -1);
+      raf = requestAnimationFrame(tick);
+    }
+
+    // pause when offscreen to save battery
+    const orbIo = new IntersectionObserver(([entry]) => {
+      running = entry.isIntersecting;
+      if (running) tick();
+      else if (raf) cancelAnimationFrame(raf);
+    }, { threshold: 0 });
+    orbIo.observe(orb);
+
+    tick();
+  })();
+
+  /* ============= TERMINAL TYPING ============= */
+  const TERM_LINES = [
+    { p: '$', t: 'burn server.js', d: 500 },
+    { o: 'listening on http://localhost:3000', c: 'var(--action-soft)', d: 350 },
+    { o: '✓ ready in 3ms', c: 'var(--color-accent-green)', d: 700 },
+    { p: '$', t: 'burn npm install express', d: 500 },
+    { o: 'added 64 packages in 1.2s', c: 'var(--color-accent-green)', d: 500 },
+    { p: '$', t: 'burn app.ts', d: 500 },
+    { o: '⟶ TypeScript stripped, ESM resolved.', c: 'var(--accent)', d: 500 },
+    { p: '$', t: 'burn --allow-net=api.example.com fetch.js', d: 500 },
+    { o: '{ status: 200, body: "..." }', c: 'var(--action-soft)', d: 500 },
+    { p: '$', t: '', cursor: true },
+  ];
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+  async function runTerm(termEl) {
+    termEl.innerHTML = '';
+    for (const ln of TERM_LINES) {
+      const line = document.createElement('span');
+      line.className = 'live-term__line';
+      if (ln.p) {
+        const pr = document.createElement('span');
+        pr.className = 'live-term__prompt';
+        pr.textContent = ln.p;
+        line.appendChild(pr);
+        const typed = document.createElement('span');
+        line.appendChild(typed);
+        termEl.appendChild(line);
+        for (const ch of ln.t) {
+          typed.textContent += ch;
+          await sleep(28);
+        }
+      } else if (ln.o) {
+        line.style.color = ln.c || 'var(--code-fg)';
+        line.textContent = '  ' + ln.o;
+        termEl.appendChild(line);
+      }
+      if (ln.cursor) {
+        const car = document.createElement('span');
+        car.className = 'live-term__caret';
+        line.appendChild(car);
+      }
+      termEl.appendChild(document.createElement('br'));
+      // keep latest line in view as the buffer fills
+      termEl.scrollTop = termEl.scrollHeight;
+      await sleep(ln.d || 200);
+    }
+  }
+  const liveTerm = document.getElementById('liveTerm');
+  if (liveTerm) {
+    const tio = new IntersectionObserver((es, obs) => {
+      es.forEach(e => {
+        if (e.isIntersecting) { runTerm(liveTerm); obs.disconnect(); }
+      });
+    }, { threshold: 0.3 });
+    tio.observe(liveTerm);
+  }
+
+  /* ============= MARQUEE ============= */
+  const M_ITEMS = [
+    'http.createServer', 'TypeScript', 'fs/promises', 'crypto', 'zlib',
+    'fetch', 'AbortController', 'streams', 'Buffer', 'EventEmitter',
+    'process.argv', 'setInterval', 'require()', 'import / export',
+    'bcrypt', 'argon2', 'jsonwebtoken', 'AsyncIterator', 'TextEncoder',
+    'URL', 'structuredClone', 'queueMicrotask', 'performance.now',
+  ];
+  const mTrack = document.getElementById('marquee');
+  const fragHTML = M_ITEMS.map(s => `<div class="marquee__item"><span class="glow"></span>${s}</div>`).join('');
+  mTrack.innerHTML = fragHTML + fragHTML;
+
+  /* ============= CODE DEMO TABS ============= */
+  const escapeHtml = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const JS_KW = /\b(const|let|var|function|return|if|else|for|while|new|class|extends|export|import|from|default|async|await|require|module|throw|try|catch|finally|of|in|break|continue|null|true|false|undefined|this|interface|type)\b/g;
+  const RUST_KW = /\b(use|fn|let|mut|pub|struct|enum|impl|trait|for|while|loop|if|else|match|return|crate|mod|self|Self|as|where|move|ref|in|async|await|dyn|box|true|false)\b/g;
+  const SH_KW = /\b(burn|node|npm|pnpm|yarn|npx|bun|cd|echo|cargo|cat|git)\b/g;
+
+  function tokenize(src, rules) {
+    const out = [];
+    let i = 0;
+    while (i < src.length) {
+      let bestStart = -1, bestEnd = -1, bestKind = null, bestText = null;
+      for (const [re, kind] of rules) {
+        re.lastIndex = i;
+        const m = re.exec(src);
+        if (!m) continue;
+        if (bestStart === -1 || m.index < bestStart) {
+          bestStart = m.index; bestEnd = m.index + m[0].length;
+          bestKind = kind; bestText = m[0];
+          if (m.index === i) break;
+        }
+      }
+      if (bestStart === -1) { out.push(escapeHtml(src.slice(i))); break; }
+      if (bestStart > i) out.push(escapeHtml(src.slice(i, bestStart)));
+      out.push('<span class="' + bestKind + '">' + escapeHtml(bestText) + '</span>');
+      i = bestEnd;
+    }
+    return out.join('');
+  }
+  function highlightJS(src) {
+    return tokenize(src, [
+      [/\/\/[^\n]*/g, 'tok-com'],
+      [/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g, 'tok-str'],
+      [JS_KW, 'tok-kw'],
+      [/\b\d[\d_]*\b/g, 'tok-num'],
+      [/\b[a-zA-Z_][\w]*(?=\s*\()/g, 'tok-fn'],
+    ]);
+  }
+  function highlightRust(src) {
+    return tokenize(src, [
+      [/\/\/[^\n]*/g, 'tok-com'],
+      [/"(?:[^"\\\n]|\\.)*"/g, 'tok-str'],
+      [RUST_KW, 'tok-kw'],
+      [/\b[A-Z][A-Za-z0-9_]*\b/g, 'tok-type'],
+      [/\b\d[\d_]*(?:_[a-z0-9]+)?\b/g, 'tok-num'],
+      [/\b[a-z_][a-z0-9_]*!?(?=\s*[\(!])/g, 'tok-fn'],
+    ]);
+  }
+  function highlightShell(src) {
+    return tokenize(src, [
+      [/#[^\n]*/g, 'tok-com'],
+      [/'[^'\n]*'|"[^"\n]*"/g, 'tok-str'],
+      [SH_KW, 'tok-mod'],
+      [/--[a-z][a-z0-9-]*/g, 'tok-kw'],
+    ]);
+  }
+
+  const SAMPLES = [
+    {
+      file: 'server.js', lang: 'js',
+      output: 'listening on http://localhost:3000',
+      code:
+`// A real Express server. Real port. Real sockets.
+const express = require('express');
+const app = express();
+
+app.get('/', (req, res) => {
+  res.json({ hello: 'from burn', uptime: process.uptime() });
+});
+
+app.listen(3000, () => {
+  console.log('listening on http://localhost:3000');
+});`
+    },
+    {
+      file: 'shell', lang: 'sh',
+      output: '+ express@4.19.2 · added 64 packages',
+      code:
+`# burn shims itself onto PATH; npm's child node calls route home.
+$ burn npm install express
+$ burn npx tsc --init
+$ burn pnpm run dev
+$ burn yarn build
+
+# Pass-through: burn node === node, but inside the burn runtime.
+$ burn node -e "console.log('hello')"
+hello`
+    },
+    {
+      file: 'app.ts', lang: 'js',
+      output: 'TypeScript stripped, modules resolved.',
+      code:
+`// .ts, .mts, .cts. Strip types, resolve modules, run.
+import { readFile } from 'node:fs/promises';
+
+interface User { name: string; tier: 'free' | 'pro'; }
+
+const main = async (): Promise<void> => {
+  const raw = await readFile('./users.json', 'utf8');
+  const users: User[] = JSON.parse(raw);
+  for (const u of users) console.log(\`\${u.name} (\${u.tier})\`);
+};
+
+main();`
+    },
+    {
+      file: 'db.js', lang: 'js',
+      output: 'connected · TLS1.3 · SELECT now() → 2026-05-03',
+      code:
+`// Real Postgres over TLS. SNI, ALPN, custom CA all work.
+const { Client } = require('pg');
+const { readFileSync } = require('node:fs');
+
+const client = new Client({
+  host: 'db.example.com',
+  port: 5432,
+  ssl: { ca: readFileSync('./root.crt'), rejectUnauthorized: true },
+});
+
+await client.connect();
+const { rows } = await client.query('SELECT now()');
+console.log(rows[0].now);
+await client.end();`
+    },
+    {
+      file: 'pool.js', lang: 'js',
+      output: 'spawned 4 workers · hashed 1000 rows in 84ms',
+      code:
+`// worker_threads. Capability inheritance never widens.
+const { Worker, isMainThread, parentPort, workerData } = require('node:worker_threads');
+
+if (isMainThread) {
+  const workers = Array.from({ length: 4 }, (_, i) =>
+    new Worker(__filename, { workerData: { id: i } }));
+
+  for (const w of workers) {
+    w.on('message', (m) => console.log('row', m.id, '→', m.hash));
+  }
+} else {
+  const { createHash } = require('node:crypto');
+  parentPort.postMessage({
+    id: workerData.id,
+    hash: createHash('sha256').update(String(workerData.id)).digest('hex'),
+  });
+}`
+    },
+    {
+      file: 'shell', lang: 'sh',
+      output: '✓ runs · denied: outbound to 169.254.169.254',
+      code:
+`# Default-deny. Grant only the surface a script needs.
+$ burn --sandbox \\
+       --allow-fs-read=./data \\
+       --allow-fs=./out \\
+       --allow-net=api.example.com,*.trusted.io \\
+       --allow-env=NODE_ENV,API_KEY \\
+       transform.ts
+
+# Or grant everything for trusted scripts:
+$ burn -A scripts/release.ts`
+    },
+    {
+      file: 'main.rs', lang: 'rust',
+      output: 'embedded · returns: { result: 42 }',
+      code:
+`// Embed the same runtime in your Rust app.
+use afterburner::{Afterburner, Manifold, FsAccess};
+use serde_json::json;
+
+fn main() -> anyhow::Result<()> {
+    let ab = Afterburner::builder()
+        .fuel(your_op_budget)
+        .memory_bytes(your_memory_cap)
+        .timeout_ms(your_deadline)
+        .manifold(Manifold {
+            fs: FsAccess::ReadOnly(vec!["./data".into()]),
+            ..Manifold::sealed()
+        })
+        .threaded(your_worker_count)
+        .build()?;
+
+    let id = ab.register("module.exports = (d) => ({ result: d.n + 1 })")?;
+    let out = ab.run(&id, &json!({ "n": 41 }))?;
+    println!("{}", out);
+    Ok(())
+}`
+    },
+  ];
+  function highlight(s) {
+    if (s.lang === 'rust') return highlightRust(s.code);
+    if (s.lang === 'sh')   return highlightShell(s.code);
+    return highlightJS(s.code);
+  }
+  const demoCode = document.getElementById('demoCode');
+  const demoFile = document.getElementById('demoFile');
+  const demoOutput = document.getElementById('demoOutput');
+  const tabs = document.querySelectorAll('.demo__tab');
+  function setTab(i) {
+    tabs.forEach(t => t.classList.toggle('active', +t.dataset.tab === i));
+    demoCode.innerHTML = highlight(SAMPLES[i]);
+    demoFile.textContent = SAMPLES[i].file;
+    demoOutput.textContent = SAMPLES[i].output;
+  }
+  tabs.forEach(t => t.addEventListener('click', () => setTab(+t.dataset.tab)));
+  setTab(0);
+
+  /* ============= KNOB IDLE ANIMATION ============= */
+  const knobBars = ['fuelBar','memBar','timeBar','wkBar'].map(id => document.getElementById(id));
+  let knobTick = 0;
+  setInterval(() => {
+    knobTick++;
+    knobBars.forEach((b, i) => {
+      const phase = (knobTick / 30) + i * 0.7;
+      const w = 35 + Math.abs(Math.sin(phase) * 50);
+      b.style.width = w.toFixed(1) + '%';
+    });
+  }, 1200);
+
+  /* ============= COPY CMD ============= */
+  document.getElementById('copyCmd').addEventListener('click', () => {
+    navigator.clipboard.writeText('cargo install afterburner --features bin');
+    const lbl = document.getElementById('copyLabel');
+    lbl.textContent = 'Copied!';
+    setTimeout(() => { lbl.textContent = 'Copy'; }, 1400);
+  });
+
+</script>
+
+<script>
+  /* TWEAKS — defaults declared inline so the host can rewrite them on disk. */
+  window.TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+    "mood": "inferno",
+    "density": "standard",
+    "intensity": 100,
+    "codeTheme": "midnight"
+  }/*EDITMODE-END*/;
+</script>
+<script src="tweaks.js"></script>
+
+</body>
+</html>

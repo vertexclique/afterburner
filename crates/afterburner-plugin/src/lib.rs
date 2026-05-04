@@ -10,15 +10,15 @@
 //! and calls the exported `_start` function. `_start`:
 //!
 //! 1. Reads a JSON envelope from stdin.
-//! 2. Dispatches by envelope `mode` field — see [`modes`].
+//! 2. Dispatches by envelope `mode` field via the `modes` module.
 //!
 //! ### Module layout
 //!
-//! - [`host_api`]    — `afterburner:host` extern declarations.
-//! - [`stdio`]       — WASI preview1 `fd_read` / `fd_write` helpers.
-//! - [`envelope`]    — JS source wrappers (input-inlined + input-via-global).
-//! - [`globals`]     — `modify_runtime`-time JS global installers.
-//! - [`modes`]       — per-mode dispatchers (`compile`, `invoke`, `legacy`).
+//! - `host_api` — `afterburner:host` extern declarations.
+//! - `stdio` — WASI preview1 `fd_read` / `fd_write` helpers.
+//! - `envelope` — JS source wrappers (input-inlined + input-via-global).
+//! - `globals` — `modify_runtime`-time JS global installers.
+//! - `modes` — per-mode dispatchers (`compile`, `invoke`, `legacy`).
 //!
 //! ### Error reporting
 //!

@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: clippy
           targets: wasm32-wasip1
@@ -38,9 +38,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
       - uses: Swatinem/rust-cache@v2
       - name: clippy (workspace, default features)
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: clippy (workspace, all features)
-        run: cargo clippy --workspace --all-targets --features release-cli -p afterburner -- -D warnings
+        # Exclude afterburner-plugin: it targets wasm32-wasip1 only and
+        # can't compile on the host triple (no_std, no panic_handler).
+        run: cargo clippy --workspace --exclude afterburner-plugin --all-targets -- -D warnings
+      - name: clippy (afterburner with release-cli features)
+        run: cargo clippy -p afterburner --all-targets --features release-cli -- -D warnings
 
   test:
     name: cargo test (${{ matrix.os }})
@@ -51,7 +53,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           targets: wasm32-wasip1
       - name: Install libclang (Linux)
@@ -71,7 +73,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install libclang
         run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
       - uses: Swatinem/rust-cache@v2
@@ -85,16 +87,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           targets: wasm32-wasip1
       - name: Install libclang
         run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
       - name: Install Binaryen (wasm-opt)
+        # 129 ships the `--llvm-memory-copy-fill-lowering` and
+        # `--llvm-nontrapping-fptoint-lowering` flags that the plugin
+        # build needs to lower modern WASM features for javy 8.1.1's
+        # bundled validator. 119 was too old.
         run: |
-          curl -sSL https://github.com/WebAssembly/binaryen/releases/download/version_119/binaryen-version_119-x86_64-linux.tar.gz \
+          curl -sSL https://github.com/WebAssembly/binaryen/releases/download/version_129/binaryen-version_129-x86_64-linux.tar.gz \
             | tar xz -C /tmp
-          echo "/tmp/binaryen-version_119/bin" >> "$GITHUB_PATH"
+          echo "/tmp/binaryen-version_129/bin" >> "$GITHUB_PATH"
       - name: Install javy
         run: |
           curl -sSL https://github.com/bytecodealliance/javy/releases/download/v8.1.1/javy-x86_64-linux-v8.1.1.gz \

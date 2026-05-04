@@ -1,3 +1,4 @@
+#![allow(non_snake_case)]
 //! Round-2 Node 20 built-in coverage — every module added to plug
 //! the gap between "stubbed" and "actually loadable".
 //!
@@ -23,10 +24,7 @@ fn run_inline(source: &str) -> std::process::Output {
 fn assert_ok(out: &std::process::Output, marker: &str) {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains(marker),
         "missing `{marker}`. stdout:\n{stdout}\nstderr:\n{stderr}"

@@ -20,9 +20,9 @@
 //! `BURN_SHIM_DEPTH`. Hitting 8 surfaces a typed error instead of
 //! fork-bombing.
 
-use anyhow::Result;
 #[cfg(not(unix))]
 use anyhow::Context;
+use anyhow::Result;
 use std::env;
 use std::path::{Path, PathBuf};
 

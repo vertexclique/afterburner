@@ -1,3 +1,4 @@
+#![allow(non_snake_case)]
 //! L3 shadow for `sharp` — end-to-end integration coverage.
 //!
 //! Each test runs a small JS program through `burn` that exercises
@@ -87,10 +88,7 @@ fn run_inline(source: &str) -> std::process::Output {
 fn assert_ok(out: &std::process::Output, marker: &str) {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains(marker),
         "missing `{marker}`. stdout:\n{stdout}\nstderr:\n{stderr}"

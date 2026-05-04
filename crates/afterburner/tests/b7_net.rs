@@ -114,10 +114,7 @@ fn round_trip_echo() {
         .expect("spawn burn");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("ROUND_TRIP_OK"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -160,10 +157,7 @@ fn connect_to_closed_port_emits_error() {
         .expect("spawn burn");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("REFUSED_OK") || stdout.contains("OTHER_ERR=ECONNREFUSED"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -200,10 +194,7 @@ fn end_half_closes_writes_through() {
         .expect("spawn burn");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("END_OK"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -235,10 +226,7 @@ fn destroy_kills_connection() {
         .expect("spawn burn");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("CLOSED_OK destroyed=true"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -289,10 +277,7 @@ fn set_no_delay_and_keep_alive_no_throw() {
         .expect("spawn burn");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("OPTS_OK"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -496,10 +481,7 @@ fn multiple_concurrent_connections() {
         .expect("spawn burn");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("CONCURRENT_OK"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"

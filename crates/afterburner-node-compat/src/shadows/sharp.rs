@@ -118,12 +118,12 @@ enum Op {
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Some fields are placeholders for upstream-image-crate
-                    // knobs we don't honor yet (PNG compression level
-                    // isn't exposed by image 0.25's PngEncoder; WebP
-                    // quality + lossless are accepted but the encoder
-                    // is lossless-only). Keep the parse path so a
-                    // future swap to image-webp's lossy path is purely
-                    // additive.
+// knobs we don't honor yet (PNG compression level
+// isn't exposed by image 0.25's PngEncoder; WebP
+// quality + lossless are accepted but the encoder
+// is lossless-only). Keep the parse path so a
+// future swap to image-webp's lossy path is purely
+// additive.
 enum Output {
     /// `quality` 1–100; defaults to 80.
     Jpeg { quality: u8 },
@@ -171,17 +171,16 @@ pub fn metadata(source_json: &str) -> Result<String, String> {
 // ----- pipeline parsing --------------------------------------------------
 
 fn parse_pipeline(json: &str) -> Result<Pipeline, String> {
-    let v: serde_json::Value = serde_json::from_str(json)
-        .map_err(|e| format!("sharp: pipeline JSON: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("sharp: pipeline JSON: {e}"))?;
     let source = parse_source(
         v.get("source")
             .ok_or_else(|| "sharp: pipeline missing `source`".to_string())?,
     )?;
     let ops = match v.get("ops") {
-        Some(serde_json::Value::Array(arr)) => arr
-            .iter()
-            .map(parse_op)
-            .collect::<Result<Vec<_>, _>>()?,
+        Some(serde_json::Value::Array(arr)) => {
+            arr.iter().map(parse_op).collect::<Result<Vec<_>, _>>()?
+        }
         Some(_) => return Err("sharp: `ops` must be an array".into()),
         None => Vec::new(),
     };
@@ -189,7 +188,11 @@ fn parse_pipeline(json: &str) -> Result<Pipeline, String> {
         v.get("output")
             .ok_or_else(|| "sharp: pipeline missing `output`".to_string())?,
     )?;
-    Ok(Pipeline { source, ops, output })
+    Ok(Pipeline {
+        source,
+        ops,
+        output,
+    })
 }
 
 fn parse_source(v: &serde_json::Value) -> Result<Source, String> {
@@ -242,7 +245,11 @@ fn parse_op(v: &serde_json::Value) -> Result<Op, String> {
                 "outside" => ResizeFit::Outside,
                 other => return Err(format!("sharp.resize: unknown fit {other}")),
             };
-            let kernel = match v.get("kernel").and_then(|x| x.as_str()).unwrap_or("lanczos3") {
+            let kernel = match v
+                .get("kernel")
+                .and_then(|x| x.as_str())
+                .unwrap_or("lanczos3")
+            {
                 "nearest" => ResizeKernel::Nearest,
                 "linear" => ResizeKernel::Linear,
                 "cubic" => ResizeKernel::Cubic,
@@ -250,7 +257,12 @@ fn parse_op(v: &serde_json::Value) -> Result<Op, String> {
                 "lanczos3" => ResizeKernel::Lanczos3,
                 other => return Err(format!("sharp.resize: unknown kernel {other}")),
             };
-            Ok(Op::Resize(ResizeOpts { width, height, fit, kernel }))
+            Ok(Op::Resize(ResizeOpts {
+                width,
+                height,
+                fit,
+                kernel,
+            }))
         }
         "rotate" => {
             let deg = v
@@ -259,7 +271,7 @@ fn parse_op(v: &serde_json::Value) -> Result<Op, String> {
                 .ok_or_else(|| "sharp.rotate: `degrees` required".to_string())?;
             if deg.rem_euclid(90) != 0 {
                 return Err(
-                    "sharp.rotate: only 0/90/180/270 degree multiples are supported".into()
+                    "sharp.rotate: only 0/90/180/270 degree multiples are supported".into(),
                 );
             }
             Ok(Op::Rotate(deg as i32))
@@ -272,23 +284,32 @@ fn parse_op(v: &serde_json::Value) -> Result<Op, String> {
             let left = v
                 .get("left")
                 .and_then(|x| x.as_u64())
-                .ok_or_else(|| "sharp.extract: `left` required".to_string())? as u32;
+                .ok_or_else(|| "sharp.extract: `left` required".to_string())?
+                as u32;
             let top = v
                 .get("top")
                 .and_then(|x| x.as_u64())
-                .ok_or_else(|| "sharp.extract: `top` required".to_string())? as u32;
+                .ok_or_else(|| "sharp.extract: `top` required".to_string())?
+                as u32;
             let width = v
                 .get("width")
                 .and_then(|x| x.as_u64())
-                .ok_or_else(|| "sharp.extract: `width` required".to_string())? as u32;
+                .ok_or_else(|| "sharp.extract: `width` required".to_string())?
+                as u32;
             let height = v
                 .get("height")
                 .and_then(|x| x.as_u64())
-                .ok_or_else(|| "sharp.extract: `height` required".to_string())? as u32;
+                .ok_or_else(|| "sharp.extract: `height` required".to_string())?
+                as u32;
             if width == 0 || height == 0 {
                 return Err("sharp.extract: width/height must be > 0".into());
             }
-            Ok(Op::Extract(Extract { left, top, width, height }))
+            Ok(Op::Extract(Extract {
+                left,
+                top,
+                width,
+                height,
+            }))
         }
         "blur" => {
             let sigma = v
@@ -333,7 +354,10 @@ fn parse_output(v: &serde_json::Value) -> Result<Output, String> {
                 .map(|n| n.clamp(0, 100) as u8)
                 .unwrap_or(80);
             let lossless = v.get("lossless").and_then(|x| x.as_bool()).unwrap_or(false);
-            Ok(Output::Webp { quality: q, lossless })
+            Ok(Output::Webp {
+                quality: q,
+                lossless,
+            })
         }
         "metadata" => Ok(Output::Metadata),
         other => Err(format!("sharp: unsupported output format `{other}`")),
@@ -345,8 +369,7 @@ fn parse_output(v: &serde_json::Value) -> Result<Output, String> {
 fn decode_source(source: &Source) -> Result<DynamicImage, String> {
     let bytes = match source {
         Source::Buffer(b) => b.clone(),
-        Source::File(p) => std::fs::read(p)
-            .map_err(|e| format!("sharp: read {p}: {e}"))?,
+        Source::File(p) => std::fs::read(p).map_err(|e| format!("sharp: read {p}: {e}"))?,
     };
     let reader = ImageReader::new(Cursor::new(&bytes))
         .with_guessed_format()
@@ -357,8 +380,7 @@ fn decode_source(source: &Source) -> Result<DynamicImage, String> {
 fn metadata_for_source(source: &Source) -> Result<String, String> {
     let bytes = match source {
         Source::Buffer(b) => b.clone(),
-        Source::File(p) => std::fs::read(p)
-            .map_err(|e| format!("sharp: read {p}: {e}"))?,
+        Source::File(p) => std::fs::read(p).map_err(|e| format!("sharp: read {p}: {e}"))?,
     };
     let reader = ImageReader::new(Cursor::new(&bytes))
         .with_guessed_format()
@@ -386,7 +408,10 @@ fn metadata_for_source(source: &Source) -> Result<String, String> {
             | image::ColorType::Rgba32F
     );
     let space = match color {
-        image::ColorType::L8 | image::ColorType::L16 | image::ColorType::La8 | image::ColorType::La16 => "b-w",
+        image::ColorType::L8
+        | image::ColorType::L16
+        | image::ColorType::La8
+        | image::ColorType::La16 => "b-w",
         _ => "srgb",
     };
     let v = serde_json::json!({
@@ -491,12 +516,9 @@ fn apply_resize(img: DynamicImage, opts: &ResizeOpts) -> Result<DynamicImage, St
         resizer
             .resize(&src_image, &mut dst, &opts_local)
             .map_err(|e| format!("sharp.resize: {e}"))?;
-        let buf = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
-            resize_w,
-            resize_h,
-            dst.into_vec(),
-        )
-        .ok_or_else(|| "sharp.resize: rgba output build".to_string())?;
+        let buf =
+            image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(resize_w, resize_h, dst.into_vec())
+                .ok_or_else(|| "sharp.resize: rgba output build".to_string())?;
         (DynamicImage::ImageRgba8(buf), true)
     } else {
         let src = img.into_rgb8();
@@ -509,12 +531,9 @@ fn apply_resize(img: DynamicImage, opts: &ResizeOpts) -> Result<DynamicImage, St
         resizer
             .resize(&src_image, &mut dst, &opts_local)
             .map_err(|e| format!("sharp.resize: {e}"))?;
-        let buf = image::ImageBuffer::<image::Rgb<u8>, _>::from_raw(
-            resize_w,
-            resize_h,
-            dst.into_vec(),
-        )
-        .ok_or_else(|| "sharp.resize: rgb output build".to_string())?;
+        let buf =
+            image::ImageBuffer::<image::Rgb<u8>, _>::from_raw(resize_w, resize_h, dst.into_vec())
+                .ok_or_else(|| "sharp.resize: rgb output build".to_string())?;
         (DynamicImage::ImageRgb8(buf), false)
     };
 
@@ -613,7 +632,10 @@ fn encode_output(img: &DynamicImage, output: &Output) -> Result<Vec<u8>, String>
                 .map_err(|e| format!("sharp.png: encode: {e}"))?;
             Ok(buf)
         }
-        Output::Webp { quality: _, lossless: _ } => {
+        Output::Webp {
+            quality: _,
+            lossless: _,
+        } => {
             // image 0.25's WebPEncoder is lossless-only; we accept
             // both knobs in the API for parity but always emit
             // lossless WebP. A future swap to image-webp's lossy
@@ -839,11 +861,8 @@ mod tests {
 
     #[test]
     fn rotate_90_swaps_dimensions() {
-        let bytes = run_pipeline_rgb(
-            vec![Op::Rotate(90)],
-            Output::Png { compression: 6 },
-        )
-        .expect("pipeline");
+        let bytes = run_pipeline_rgb(vec![Op::Rotate(90)], Output::Png { compression: 6 })
+            .expect("pipeline");
         let img = image::load_from_memory(&bytes).expect("decode");
         // 32x24 → 24x32 after 90° rotation.
         assert_eq!(img.dimensions(), (24, 32));
@@ -851,11 +870,8 @@ mod tests {
 
     #[test]
     fn rotate_180_keeps_dimensions() {
-        let bytes = run_pipeline_rgb(
-            vec![Op::Rotate(180)],
-            Output::Png { compression: 6 },
-        )
-        .expect("pipeline");
+        let bytes = run_pipeline_rgb(vec![Op::Rotate(180)], Output::Png { compression: 6 })
+            .expect("pipeline");
         let img = image::load_from_memory(&bytes).expect("decode");
         assert_eq!(img.dimensions(), (32, 24));
     }
@@ -863,22 +879,16 @@ mod tests {
     #[test]
     fn rotate_negative_degrees_normalized() {
         // -90° == 270° → swap dimensions.
-        let bytes = run_pipeline_rgb(
-            vec![Op::Rotate(-90)],
-            Output::Png { compression: 6 },
-        )
-        .expect("pipeline");
+        let bytes = run_pipeline_rgb(vec![Op::Rotate(-90)], Output::Png { compression: 6 })
+            .expect("pipeline");
         let img = image::load_from_memory(&bytes).expect("decode");
         assert_eq!(img.dimensions(), (24, 32));
     }
 
     #[test]
     fn grayscale_drops_color() {
-        let bytes = run_pipeline_rgb(
-            vec![Op::Grayscale],
-            Output::Png { compression: 6 },
-        )
-        .expect("pipeline");
+        let bytes = run_pipeline_rgb(vec![Op::Grayscale], Output::Png { compression: 6 })
+            .expect("pipeline");
         let img = image::load_from_memory(&bytes).expect("decode");
         // Grayscale image → 1-channel.
         assert_eq!(img.color().channel_count(), 1);
@@ -886,16 +896,16 @@ mod tests {
 
     #[test]
     fn flip_preserves_dimensions() {
-        let bytes = run_pipeline_rgb(vec![Op::Flip], Output::Png { compression: 6 })
-            .expect("pipeline");
+        let bytes =
+            run_pipeline_rgb(vec![Op::Flip], Output::Png { compression: 6 }).expect("pipeline");
         let img = image::load_from_memory(&bytes).expect("decode");
         assert_eq!(img.dimensions(), (32, 24));
     }
 
     #[test]
     fn flop_preserves_dimensions() {
-        let bytes = run_pipeline_rgb(vec![Op::Flop], Output::Png { compression: 6 })
-            .expect("pipeline");
+        let bytes =
+            run_pipeline_rgb(vec![Op::Flop], Output::Png { compression: 6 }).expect("pipeline");
         let img = image::load_from_memory(&bytes).expect("decode");
         assert_eq!(img.dimensions(), (32, 24));
     }
@@ -903,13 +913,16 @@ mod tests {
     #[test]
     fn negate_inverts_pixels() {
         let original = run_pipeline_rgb(vec![], Output::Png { compression: 6 }).expect("orig");
-        let negated = run_pipeline_rgb(vec![Op::Negate], Output::Png { compression: 6 })
-            .expect("negated");
+        let negated =
+            run_pipeline_rgb(vec![Op::Negate], Output::Png { compression: 6 }).expect("negated");
         // Same dimensions, different bytes.
         let orig_img = image::load_from_memory(&original).expect("orig");
         let neg_img = image::load_from_memory(&negated).expect("neg");
         assert_eq!(orig_img.dimensions(), neg_img.dimensions());
-        assert_ne!(orig_img.into_rgb8().into_raw(), neg_img.into_rgb8().into_raw());
+        assert_ne!(
+            orig_img.into_rgb8().into_raw(),
+            neg_img.into_rgb8().into_raw()
+        );
     }
 
     #[test]
@@ -944,11 +957,8 @@ mod tests {
 
     #[test]
     fn blur_keeps_dimensions() {
-        let bytes = run_pipeline_rgb(
-            vec![Op::Blur(2.0)],
-            Output::Png { compression: 6 },
-        )
-        .expect("pipeline");
+        let bytes = run_pipeline_rgb(vec![Op::Blur(2.0)], Output::Png { compression: 6 })
+            .expect("pipeline");
         let img = image::load_from_memory(&bytes).expect("decode");
         assert_eq!(img.dimensions(), (32, 24));
     }
@@ -957,8 +967,7 @@ mod tests {
 
     #[test]
     fn png_to_jpeg_round_trip() {
-        let bytes = run_pipeline_rgb(vec![], Output::Jpeg { quality: 80 })
-            .expect("pipeline");
+        let bytes = run_pipeline_rgb(vec![], Output::Jpeg { quality: 80 }).expect("pipeline");
         // JPEG magic.
         assert_eq!(&bytes[..3], b"\xff\xd8\xff");
         let img = image::load_from_memory(&bytes).expect("decode");
@@ -967,8 +976,14 @@ mod tests {
 
     #[test]
     fn png_to_webp_round_trip() {
-        let bytes = run_pipeline_rgb(vec![], Output::Webp { quality: 80, lossless: true })
-            .expect("pipeline");
+        let bytes = run_pipeline_rgb(
+            vec![],
+            Output::Webp {
+                quality: 80,
+                lossless: true,
+            },
+        )
+        .expect("pipeline");
         // RIFF magic at the start, WEBP at offset 8.
         assert_eq!(&bytes[..4], b"RIFF");
         assert_eq!(&bytes[8..12], b"WEBP");
@@ -996,7 +1011,12 @@ mod tests {
         let low = run_pipeline_rgb(vec![], Output::Jpeg { quality: 10 }).expect("lo");
         // Lower quality should produce a smaller (or equal) file. We
         // assert strictly smaller to catch a no-op encoder.
-        assert!(low.len() < high.len(), "low={} high={}", low.len(), high.len());
+        assert!(
+            low.len() < high.len(),
+            "low={} high={}",
+            low.len(),
+            high.len()
+        );
     }
 
     // ----- chained pipelines --------------------------------------

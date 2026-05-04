@@ -212,10 +212,9 @@ impl WasmLoader {
     /// (currently nothing) will fail to instantiate with a clear
     /// "import not satisfied" message.
     pub fn instantiate(&self, module_id: ModuleId) -> Result<InstanceId> {
-        let module_entry = self
-            .modules
-            .get(&module_id)
-            .ok_or_else(|| AfterburnerError::Host(format!("WebAssembly: unknown module {module_id}")))?;
+        let module_entry = self.modules.get(&module_id).ok_or_else(|| {
+            AfterburnerError::Host(format!("WebAssembly: unknown module {module_id}"))
+        })?;
         let mut store = Store::new(&self.engine, ());
 
         // v1: no user imports, no auto-supplied imports. Modules
@@ -223,15 +222,14 @@ impl WasmLoader {
         // error. Adding WASI / user imports is straightforward
         // future work — this is the seam.
         let imports: Vec<wasmtime::Extern> = Vec::new();
-        let instance = Instance::new(&mut store, &module_entry.module, &imports)
-            .map_err(|e| {
-                AfterburnerError::Host(format!(
-                    "WebAssembly.instantiate: {e}. \
+        let instance = Instance::new(&mut store, &module_entry.module, &imports).map_err(|e| {
+            AfterburnerError::Host(format!(
+                "WebAssembly.instantiate: {e}. \
                      Burn's WASM loader v1 doesn't supply user-defined imports yet \
                      — modules with `(import \"x\" \"y\")` need to be re-built \
                      without imports, or wait for the next loader release."
-                ))
-            })?;
+            ))
+        })?;
 
         let id = self.next_instance_id.fetch_add(1, Ordering::Relaxed);
         let loaded = Arc::new(LoadedInstance {
@@ -255,10 +253,9 @@ impl WasmLoader {
         export_name: &str,
         args: Vec<WasmValue>,
     ) -> Result<Vec<WasmValue>> {
-        let inst = self
-            .instances
-            .get(&instance_id)
-            .ok_or_else(|| AfterburnerError::Host(format!("WebAssembly: unknown instance {instance_id}")))?;
+        let inst = self.instances.get(&instance_id).ok_or_else(|| {
+            AfterburnerError::Host(format!("WebAssembly: unknown instance {instance_id}"))
+        })?;
         let mut state = inst.store.lock();
         let func = inst
             .instance
@@ -312,9 +309,7 @@ impl WasmLoader {
             .instance
             .get_memory(&mut state.store, "memory")
             .ok_or_else(|| {
-                AfterburnerError::Host(
-                    "WebAssembly: instance does not export `memory`".into(),
-                )
+                AfterburnerError::Host("WebAssembly: instance does not export `memory`".into())
             })?;
         let data = mem.data(&state.store);
         let start = offset as usize;
@@ -339,9 +334,7 @@ impl WasmLoader {
             .instance
             .get_memory(&mut state.store, "memory")
             .ok_or_else(|| {
-                AfterburnerError::Host(
-                    "WebAssembly: instance does not export `memory`".into(),
-                )
+                AfterburnerError::Host("WebAssembly: instance does not export `memory`".into())
             })?;
         let data = mem.data_mut(&mut state.store);
         let start = offset as usize;
@@ -367,9 +360,7 @@ impl WasmLoader {
             .instance
             .get_memory(&mut state.store, "memory")
             .ok_or_else(|| {
-                AfterburnerError::Host(
-                    "WebAssembly: instance does not export `memory`".into(),
-                )
+                AfterburnerError::Host("WebAssembly: instance does not export `memory`".into())
             })?;
         Ok(mem.data(&state.store).len() as u64)
     }
@@ -462,9 +453,9 @@ impl WasmValue {
                 .map(|n| WasmValue::I32(n as i32))
                 .ok_or_else(|| AfterburnerError::Host("WasmValue.i32: not a number".into())),
             "i64" => {
-                let s = val.as_str().ok_or_else(|| {
-                    AfterburnerError::Host("WasmValue.i64: not a string".into())
-                })?;
+                let s = val
+                    .as_str()
+                    .ok_or_else(|| AfterburnerError::Host("WasmValue.i64: not a string".into()))?;
                 s.parse::<i64>()
                     .map(WasmValue::I64)
                     .map_err(|e| AfterburnerError::Host(format!("WasmValue.i64 parse: {e}")))
@@ -729,9 +720,7 @@ mod tests {
 
     #[test]
     fn module_with_imports_reports_them() {
-        let bytes = compile_wat(
-            r#"(module (import "env" "log" (func (param i32))))"#,
-        );
+        let bytes = compile_wat(r#"(module (import "env" "log" (func (param i32))))"#);
         let loader = WasmLoader::new();
         let mid = loader.compile(&bytes).expect("compile");
         let imports = loader.module_imports(mid).expect("imports");
@@ -743,9 +732,7 @@ mod tests {
 
     #[test]
     fn module_with_unsatisfied_imports_fails_to_instantiate() {
-        let bytes = compile_wat(
-            r#"(module (import "env" "log" (func (param i32))))"#,
-        );
+        let bytes = compile_wat(r#"(module (import "env" "log" (func (param i32))))"#);
         let loader = WasmLoader::new();
         let mid = loader.compile(&bytes).expect("compile");
         let r = loader.instantiate(mid);
@@ -771,8 +758,8 @@ mod tests {
         for v in [
             WasmValue::I32(42),
             WasmValue::I64(i64::MAX),
-            WasmValue::F32(3.14),
-            WasmValue::F64(2.71828),
+            WasmValue::F32(1.5),
+            WasmValue::F64(2.5),
         ] {
             let json = v.to_json();
             let back = WasmValue::from_json(&json).unwrap();

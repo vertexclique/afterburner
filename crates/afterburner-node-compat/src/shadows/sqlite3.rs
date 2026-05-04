@@ -46,9 +46,7 @@
 //! handles `Buffer` → blob conversion.
 
 use afterburner_core::{AfterburnerError, Result};
-use kovan_channel::flavors::bounded::{
-    Sender as BoundedTx, channel as bounded_channel,
-};
+use kovan_channel::flavors::bounded::{Sender as BoundedTx, channel as bounded_channel};
 use kovan_channel::flavors::unbounded::{
     Receiver as UnboundedRx, Sender as UnboundedTx, channel as unbounded_channel,
 };
@@ -110,8 +108,7 @@ impl Default for SqliteShadow {
 
 impl std::fmt::Debug for SqliteShadow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SqliteShadow")
-            .finish_non_exhaustive()
+        f.debug_struct("SqliteShadow").finish_non_exhaustive()
     }
 }
 
@@ -241,8 +238,7 @@ fn run_worker(path: String, rx: UnboundedRx<DbCommand>) {
             // permissions changed. Drain commands with an error
             // until the user gives up and closes.
             while let Some(cmd) = rx.recv() {
-                let err =
-                    || AfterburnerError::Host(format!("sqlite3 worker: cannot open {path}"));
+                let err = || AfterburnerError::Host(format!("sqlite3 worker: cannot open {path}"));
                 match cmd {
                     DbCommand::Run { reply, .. } => {
                         reply.send(Err(err()));
@@ -374,15 +370,11 @@ fn bind_params(params: Vec<JsonValue>) -> Result<Vec<SqlValue>> {
                     .get("$blob_b64")
                     .and_then(|x| x.as_str())
                     .ok_or_else(|| {
-                        AfterburnerError::Host(
-                            "sqlite3: $blob_b64 requires a string value".into(),
-                        )
+                        AfterburnerError::Host("sqlite3: $blob_b64 requires a string value".into())
                     })?;
                 let bytes = base64::engine::general_purpose::STANDARD
                     .decode(s)
-                    .map_err(|e| {
-                        AfterburnerError::Host(format!("sqlite3: blob base64: {e}"))
-                    })?;
+                    .map_err(|e| AfterburnerError::Host(format!("sqlite3: blob base64: {e}")))?;
                 SqlValue::Blob(bytes)
             }
             other => {
@@ -515,7 +507,9 @@ mod tests {
             .run(id, "DELETE FROM t WHERE n > ?", vec![json!(2)])
             .expect("delete");
         assert_eq!(r.changes, 2);
-        let rows = s.all(id, "SELECT n FROM t ORDER BY n", vec![]).expect("all");
+        let rows = s
+            .all(id, "SELECT n FROM t ORDER BY n", vec![])
+            .expect("all");
         assert_eq!(rows.len(), 2);
         s.close(id).expect("close");
     }
@@ -547,8 +541,14 @@ mod tests {
              INSERT INTO b VALUES (2);",
         )
         .expect("multi-exec");
-        let a_row = s.get(id, "SELECT n FROM a", vec![]).expect("a").expect("row");
-        let b_row = s.get(id, "SELECT n FROM b", vec![]).expect("b").expect("row");
+        let a_row = s
+            .get(id, "SELECT n FROM a", vec![])
+            .expect("a")
+            .expect("row");
+        let b_row = s
+            .get(id, "SELECT n FROM b", vec![])
+            .expect("b")
+            .expect("row");
         assert_eq!(a_row["n"], json!(1));
         assert_eq!(b_row["n"], json!(2));
         s.close(id).expect("close");
@@ -713,8 +713,11 @@ mod tests {
     #[test]
     fn unique_constraint_violation_surfaces_as_host_error() {
         let (s, id) = open_mem();
-        s.exec(id, "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER UNIQUE)")
-            .expect("create");
+        s.exec(
+            id,
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER UNIQUE)",
+        )
+        .expect("create");
         s.run(id, "INSERT INTO t (n) VALUES (?)", vec![json!(1)])
             .expect("first");
         let r = s.run(id, "INSERT INTO t (n) VALUES (?)", vec![json!(1)]);
@@ -767,8 +770,14 @@ mod tests {
             .expect("a insert");
         s.run(b, "INSERT INTO t VALUES (?)", vec![json!(2)])
             .expect("b insert");
-        let row_a = s.get(a, "SELECT n FROM t", vec![]).expect("a get").expect("row");
-        let row_b = s.get(b, "SELECT n FROM t", vec![]).expect("b get").expect("row");
+        let row_a = s
+            .get(a, "SELECT n FROM t", vec![])
+            .expect("a get")
+            .expect("row");
+        let row_b = s
+            .get(b, "SELECT n FROM t", vec![])
+            .expect("b get")
+            .expect("row");
         assert_eq!(row_a["n"], json!(1));
         assert_eq!(row_b["n"], json!(2));
         s.close(a).expect("close a");
@@ -846,7 +855,10 @@ mod tests {
         s.run(id, "INSERT INTO t VALUES (?)", vec![json!(1)])
             .expect("insert");
         s.exec(id, "COMMIT").expect("commit");
-        let row = s.get(id, "SELECT n FROM t", vec![]).expect("get").expect("row");
+        let row = s
+            .get(id, "SELECT n FROM t", vec![])
+            .expect("get")
+            .expect("row");
         assert_eq!(row["n"], json!(1));
         s.close(id).expect("close");
     }

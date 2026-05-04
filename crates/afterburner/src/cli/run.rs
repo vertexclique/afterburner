@@ -66,7 +66,10 @@ fn maybe_transpile_ts(source: &str, path: &std::path::Path) -> Result<String> {
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase);
-    if matches!(ext.as_deref(), Some("ts") | Some("mts") | Some("cts") | Some("tsx")) {
+    if matches!(
+        ext.as_deref(),
+        Some("ts") | Some("mts") | Some("cts") | Some("tsx")
+    ) {
         anyhow::bail!(
             "burn: TypeScript support requires the `ts` cargo feature (rebuild with `cargo install afterburner --features ts`). \
              File: {}",

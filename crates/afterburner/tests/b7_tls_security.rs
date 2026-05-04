@@ -63,10 +63,7 @@ fn sandbox_without_allow_net_blocks_tls_connect() {
         .expect("spawn burn");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("SEALED_OK"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -102,21 +99,12 @@ fn allow_list_blocks_unlisted_host_for_tls() {
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
-        .args([
-            "--sandbox",
-            "--allow-net",
-            "127.0.0.2",
-            "-e",
-            &parent,
-        ])
+        .args(["--sandbox", "--allow-net", "127.0.0.2", "-e", &parent])
         .output()
         .expect("spawn burn");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("FILTER_OK"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -147,14 +135,9 @@ fn library_mode_rejects_tls_listen() {
         )
         .expect("run_script");
     let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("LISTEN_DENIED"), "stdout = {stdout}");
     assert!(
-        stdout.contains("LISTEN_DENIED"),
-        "stdout = {stdout}"
-    );
-    assert!(
-        stdout.contains("ENO_DAEMON")
-            || stdout.contains("EACCES")
-            || stdout.contains("THREW"),
+        stdout.contains("ENO_DAEMON") || stdout.contains("EACCES") || stdout.contains("THREW"),
         "stdout = {stdout}"
     );
 }
@@ -178,10 +161,7 @@ fn library_mode_rejects_tls_connect() {
     );
     let out = ab.run_script(&src).expect("run_script");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("CONNECT_DENIED"),
-        "stdout = {stdout}"
-    );
+    assert!(stdout.contains("CONNECT_DENIED"), "stdout = {stdout}");
     assert!(
         stdout.contains("ENO_DAEMON") || stdout.contains("EACCES"),
         "stdout = {stdout}"

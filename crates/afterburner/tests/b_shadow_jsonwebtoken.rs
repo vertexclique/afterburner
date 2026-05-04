@@ -291,10 +291,7 @@ fn callback_shape_for_sign_and_verify() {
 
 #[test]
 fn shadow_wins_over_node_modules_jsonwebtoken() {
-    let dir = std::env::temp_dir().join(format!(
-        "burn_jwt_precedence_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("burn_jwt_precedence_{}", std::process::id()));
     std::fs::create_dir_all(dir.join("node_modules/jsonwebtoken")).unwrap();
     std::fs::write(
         dir.join("node_modules/jsonwebtoken/package.json"),

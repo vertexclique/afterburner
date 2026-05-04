@@ -50,13 +50,13 @@
 #![warn(missing_debug_implementations)]
 
 mod builder;
-#[cfg(feature = "ts")]
-pub mod esm;
-#[cfg(feature = "ts")]
-pub mod ts;
 #[cfg(feature = "bin")]
 pub mod cli;
+#[cfg(feature = "ts")]
+pub mod esm;
 pub mod prelude;
+#[cfg(feature = "ts")]
+pub mod ts;
 
 // ---- Top-level re-exports of the most-used types -------------------
 //

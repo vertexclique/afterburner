@@ -186,9 +186,8 @@ fn run_child_event_loop(
                     if let AfterburnerError::ProcessExit(code) = &e {
                         std::process::exit(*code);
                     }
-                    let _ = std::io::stderr().write_all(
-                        format!("burn worker: dispatch error: {e}\n").as_bytes(),
-                    );
+                    let _ = std::io::stderr()
+                        .write_all(format!("burn worker: dispatch error: {e}\n").as_bytes());
                 }
             }
         }
@@ -424,9 +423,9 @@ fn tls_event_to_envelope(evt: &TlsEvent) -> (serde_json::Value, Option<i32>) {
             use base64::Engine as _;
             let chain: Vec<serde_json::Value> = peer_cert_chain_der
                 .iter()
-                .map(|d| serde_json::Value::String(
-                    base64::engine::general_purpose::STANDARD.encode(d),
-                ))
+                .map(|d| {
+                    serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(d))
+                })
                 .collect();
             (
                 serde_json::json!({
@@ -456,9 +455,9 @@ fn tls_event_to_envelope(evt: &TlsEvent) -> (serde_json::Value, Option<i32>) {
             use base64::Engine as _;
             let chain: Vec<serde_json::Value> = peer_cert_chain_der
                 .iter()
-                .map(|d| serde_json::Value::String(
-                    base64::engine::general_purpose::STANDARD.encode(d),
-                ))
+                .map(|d| {
+                    serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(d))
+                })
                 .collect();
             (
                 serde_json::json!({
@@ -475,7 +474,10 @@ fn tls_event_to_envelope(evt: &TlsEvent) -> (serde_json::Value, Option<i32>) {
                 None,
             )
         }
-        TlsEvent::Data { conn_id, payload_b64 } => (
+        TlsEvent::Data {
+            conn_id,
+            payload_b64,
+        } => (
             serde_json::json!({
                 "kind": "tls-data",
                 "conn_id": conn_id,
@@ -499,7 +501,11 @@ fn tls_event_to_envelope(evt: &TlsEvent) -> (serde_json::Value, Option<i32>) {
             }),
             Some(*conn_id),
         ),
-        TlsEvent::Error { conn_id, message, code } => (
+        TlsEvent::Error {
+            conn_id,
+            message,
+            code,
+        } => (
             serde_json::json!({
                 "kind": "tls-error",
                 "conn_id": conn_id,
@@ -624,4 +630,3 @@ fn dgram_event_to_envelope(evt: &DgramEvent) -> serde_json::Value {
         }),
     }
 }
-

@@ -79,10 +79,8 @@ pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
                 let src_name = decl.source.value.as_str();
                 let start = decl.span.start as usize;
                 let end = decl.span.end as usize;
-                let replacement = rewrite_import(
-                    src_name,
-                    decl.specifiers.as_ref().map(|v| v.as_slice()),
-                );
+                let replacement =
+                    rewrite_import(src_name, decl.specifiers.as_ref().map(|v| v.as_slice()));
                 edits.push((start, end, replacement));
             }
             Statement::ExportDefaultDeclaration(decl) => {
@@ -110,7 +108,11 @@ pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
                 let end = decl.span.end as usize;
                 let src_name = decl.source.value.as_str();
                 let exported_as = decl.exported.as_ref().map(mod_export_name);
-                edits.push((start, end, rewrite_export_all(src_name, exported_as.as_deref())));
+                edits.push((
+                    start,
+                    end,
+                    rewrite_export_all(src_name, exported_as.as_deref()),
+                ));
             }
             _ => {}
         }
@@ -311,16 +313,16 @@ fn decl_span_and_names(decl: &Declaration) -> (oxc::span::Span, Vec<String>) {
             }
             names
         }
-        Declaration::FunctionDeclaration(f) => f
-            .id
-            .as_ref()
-            .map(|id| vec![id.name.to_string()])
-            .unwrap_or_default(),
-        Declaration::ClassDeclaration(c) => c
-            .id
-            .as_ref()
-            .map(|id| vec![id.name.to_string()])
-            .unwrap_or_default(),
+        Declaration::FunctionDeclaration(f) => {
+            f.id.as_ref()
+                .map(|id| vec![id.name.to_string()])
+                .unwrap_or_default()
+        }
+        Declaration::ClassDeclaration(c) => {
+            c.id.as_ref()
+                .map(|id| vec![id.name.to_string()])
+                .unwrap_or_default()
+        }
         // Type-only declarations are stripped by the oxc TS
         // transformer before we see them; defensive fallthrough.
         _ => vec![],

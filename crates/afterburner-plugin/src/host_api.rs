@@ -489,11 +489,7 @@ unsafe extern "C" {
         hash_ptr: *const u8,
         hash_len: u32,
     ) -> i32;
-    pub fn host_shadow_bcrypt_gen_salt(
-        rounds: i32,
-        out_ptr: *mut u8,
-        out_cap: u32,
-    ) -> i32;
+    pub fn host_shadow_bcrypt_gen_salt(rounds: i32, out_ptr: *mut u8, out_cap: u32) -> i32;
 
     // argon2 shadow — Argon2d/i/id variants. `ty`: 0=Argon2d,
     // 1=Argon2i, 2=Argon2id (default). time/memory/parallelism at 0
@@ -596,26 +592,14 @@ unsafe extern "C" {
     // Payloads cross the boundary as base64-encoded strings — keeps
     // the i32 ABI uniform with the rest of the host_api surface and
     // avoids JSON / UTF-8 issues with arbitrary binary data.
-    pub fn host_net_connect(
-        host_ptr: *const u8,
-        host_len: u32,
-        port: i32,
-    ) -> i32;
-    pub fn host_net_write(
-        conn_id: i32,
-        payload_ptr: *const u8,
-        payload_len: u32,
-    ) -> i32;
+    pub fn host_net_connect(host_ptr: *const u8, host_len: u32, port: i32) -> i32;
+    pub fn host_net_write(conn_id: i32, payload_ptr: *const u8, payload_len: u32) -> i32;
     pub fn host_net_end(conn_id: i32) -> i32;
     pub fn host_net_destroy(conn_id: i32) -> i32;
     pub fn host_net_pending(conn_id: i32) -> i32;
     pub fn host_net_set_no_delay(conn_id: i32, enable: i32) -> i32;
     pub fn host_net_set_keep_alive(conn_id: i32, enable: i32, delay_ms: i32) -> i32;
-    pub fn host_net_listen(
-        host_ptr: *const u8,
-        host_len: u32,
-        port: i32,
-    ) -> i32;
+    pub fn host_net_listen(host_ptr: *const u8, host_len: u32, port: i32) -> i32;
     pub fn host_net_close_server(server_id: i32) -> i32;
 
     // ---- tls ---------------------------------------------------
@@ -633,11 +617,7 @@ unsafe extern "C" {
         opts_ptr: *const u8,
         opts_len: u32,
     ) -> i32;
-    pub fn host_tls_write(
-        conn_id: i32,
-        payload_ptr: *const u8,
-        payload_len: u32,
-    ) -> i32;
+    pub fn host_tls_write(conn_id: i32, payload_ptr: *const u8, payload_len: u32) -> i32;
     pub fn host_tls_end(conn_id: i32) -> i32;
     pub fn host_tls_destroy(conn_id: i32) -> i32;
     pub fn host_tls_pending(conn_id: i32) -> i32;
@@ -655,11 +635,7 @@ unsafe extern "C" {
     pub fn host_tls_close_server(server_id: i32) -> i32;
 
     // ---- dgram (UDP) ------------------------------------------------
-    pub fn host_dgram_bind(
-        host_ptr: *const u8,
-        host_len: u32,
-        port: i32,
-    ) -> i32;
+    pub fn host_dgram_bind(host_ptr: *const u8, host_len: u32, port: i32) -> i32;
     pub fn host_dgram_send(
         socket_id: i32,
         host_ptr: *const u8,
@@ -669,11 +645,7 @@ unsafe extern "C" {
         payload_b64_len: u32,
     ) -> i32;
     pub fn host_dgram_close(socket_id: i32) -> i32;
-    pub fn host_dgram_address(
-        socket_id: i32,
-        out_ptr: *mut u8,
-        out_cap: u32,
-    ) -> i32;
+    pub fn host_dgram_address(socket_id: i32, out_ptr: *mut u8, out_cap: u32) -> i32;
 
     // ---- child_process (sync) ---------------------------------------
     pub fn host_child_process_exec_sync(
@@ -752,16 +724,8 @@ unsafe extern "C" {
     // integer up to 2^53 without precision loss.
     pub fn host_wasm_compile(bytes_b64_ptr: *const u8, bytes_b64_len: u32) -> i64;
     pub fn host_wasm_drop_module(module_id: i64) -> i32;
-    pub fn host_wasm_module_exports(
-        module_id: i64,
-        out_ptr: *mut u8,
-        out_cap: u32,
-    ) -> i32;
-    pub fn host_wasm_module_imports(
-        module_id: i64,
-        out_ptr: *mut u8,
-        out_cap: u32,
-    ) -> i32;
+    pub fn host_wasm_module_exports(module_id: i64, out_ptr: *mut u8, out_cap: u32) -> i32;
+    pub fn host_wasm_module_imports(module_id: i64, out_ptr: *mut u8, out_cap: u32) -> i32;
     pub fn host_wasm_instantiate(module_id: i64) -> i64;
     pub fn host_wasm_drop_instance(instance_id: i64) -> i32;
     pub fn host_wasm_call_export(

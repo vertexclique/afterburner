@@ -167,7 +167,10 @@ enum WriteCmd {
     /// `socket.setKeepAlive(enable[, initialDelayMs])`. `delay_ms` is
     /// the idle interval before the first keep-alive probe; ignored
     /// when `enable` is false.
-    SetKeepAlive { enable: bool, delay_ms: i32 },
+    SetKeepAlive {
+        enable: bool,
+        delay_ms: i32,
+    },
 }
 
 pub struct DaemonNet {
@@ -372,7 +375,12 @@ impl DaemonNet {
     // ----- internals --------------------------------------------------
 
     /// Spawn the per-connection task for a client-side `connect`.
-    fn spawn_client_socket(self: &Arc<Self>, conn_id: ConnId, host: String, port: u16) -> ConnHandle {
+    fn spawn_client_socket(
+        self: &Arc<Self>,
+        conn_id: ConnId,
+        host: String,
+        port: u16,
+    ) -> ConnHandle {
         let (write_tx, write_rx) = unbounded_channel::<WriteCmd>();
         let pending = Arc::new(AtomicUsize::new(0));
         let half_closed = Arc::new(AtomicBool::new(false));
@@ -406,7 +414,10 @@ impl DaemonNet {
     /// Spawn the per-connection task for a server-accepted socket.
     /// Inserts the handle into `conns` so `__host_net_write` /
     /// `__host_net_end` from JS can find this connection.
-    fn register_accepted(self: &Arc<Self>, stream: TcpStream) -> (ConnId, Option<SocketAddr>, Option<SocketAddr>) {
+    fn register_accepted(
+        self: &Arc<Self>,
+        stream: TcpStream,
+    ) -> (ConnId, Option<SocketAddr>, Option<SocketAddr>) {
         let conn_id = self.next_conn_id.fetch_add(1, Ordering::Relaxed);
         let (write_tx, write_rx) = unbounded_channel::<WriteCmd>();
         let pending = Arc::new(AtomicUsize::new(0));

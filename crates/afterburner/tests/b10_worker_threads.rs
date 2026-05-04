@@ -1,3 +1,4 @@
+#![allow(non_snake_case)]
 //! B10 — `worker_threads` round-trip integration.
 //!
 //! Spawns `burn` with an inline parent script that creates a `Worker`
@@ -136,10 +137,7 @@ fn isMainThread_and_threadId() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(stdout.contains("PARENT_MAIN=true"), "stdout: {stdout}");
     assert!(stdout.contains("PARENT_TID=0"), "stdout: {stdout}");
     assert!(stdout.contains("CHILD_MAIN=false"), "stdout: {stdout}");
@@ -183,10 +181,7 @@ fn exit_event_fires() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(stdout.contains("EXIT_CODE=7"), "stdout: {stdout}");
 }
 
@@ -238,10 +233,7 @@ fn workerData_integrity() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(stdout.contains("DATA_OK"), "stdout: {stdout}");
 }
 
@@ -303,9 +295,6 @@ fn ordered_messages_both_directions() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(stdout.contains("ORDER_OK"), "stdout: {stdout}");
 }

@@ -24,8 +24,8 @@ use serde_json::Value;
 /// that the npm API accepts (algorithm, expiresIn, issuer, audience,
 /// subject); we parse only the subset listed above.
 pub fn sign(payload_json: &str, secret: &[u8], options_json: &str) -> Result<String, String> {
-    let mut payload: Value = serde_json::from_str(payload_json)
-        .map_err(|e| format!("sign: parse payload: {e}"))?;
+    let mut payload: Value =
+        serde_json::from_str(payload_json).map_err(|e| format!("sign: parse payload: {e}"))?;
     let opts: Value = serde_json::from_str(options_json).unwrap_or(Value::Null);
 
     let algorithm = parse_algorithm(&opts).unwrap_or(Algorithm::HS256);
@@ -62,10 +62,10 @@ pub fn sign(payload_json: &str, secret: &[u8], options_json: &str) -> Result<Str
             ("aud", "audience"),
             ("jti", "jwtid"),
         ] {
-            if !obj.contains_key(field) {
-                if let Some(v) = opts.get(opt_key) {
-                    obj.insert(field.into(), v.clone());
-                }
+            if !obj.contains_key(field)
+                && let Some(v) = opts.get(opt_key)
+            {
+                obj.insert(field.into(), v.clone());
             }
         }
     }
@@ -126,8 +126,12 @@ pub fn decode_unverified(token: &str) -> Result<String, String> {
     // decode path since it requires a key. The JWT format is three
     // base64url-encoded segments joined by '.'.
     let mut parts = token.split('.');
-    let header_b64 = parts.next().ok_or_else(|| "decode: missing header".to_string())?;
-    let payload_b64 = parts.next().ok_or_else(|| "decode: missing payload".to_string())?;
+    let header_b64 = parts
+        .next()
+        .ok_or_else(|| "decode: missing header".to_string())?;
+    let payload_b64 = parts
+        .next()
+        .ok_or_else(|| "decode: missing payload".to_string())?;
     if parts.next().is_none() {
         return Err("decode: missing signature segment".into());
     }
@@ -135,8 +139,8 @@ pub fn decode_unverified(token: &str) -> Result<String, String> {
     let payload_bytes = b64url_decode(payload_b64).map_err(|e| format!("decode: payload: {e}"))?;
     let header: Value =
         serde_json::from_slice(&header_bytes).map_err(|e| format!("decode: header json: {e}"))?;
-    let payload: Value = serde_json::from_slice(&payload_bytes)
-        .map_err(|e| format!("decode: payload json: {e}"))?;
+    let payload: Value =
+        serde_json::from_slice(&payload_bytes).map_err(|e| format!("decode: payload json: {e}"))?;
     serde_json::to_string(&serde_json::json!({
         "header": header,
         "payload": payload,
@@ -170,16 +174,18 @@ fn encoding_key(alg: Algorithm, secret: &[u8]) -> Result<EncodingKey, String> {
         Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => {
             Ok(EncodingKey::from_secret(secret))
         }
-        Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512 | Algorithm::PS256
-        | Algorithm::PS384 | Algorithm::PS512 => {
+        Algorithm::RS256
+        | Algorithm::RS384
+        | Algorithm::RS512
+        | Algorithm::PS256
+        | Algorithm::PS384
+        | Algorithm::PS512 => {
             EncodingKey::from_rsa_pem(secret).map_err(|e| format!("rsa key: {e}"))
         }
         Algorithm::ES256 | Algorithm::ES384 => {
             EncodingKey::from_ec_pem(secret).map_err(|e| format!("ec key: {e}"))
         }
-        Algorithm::EdDSA => {
-            EncodingKey::from_ed_pem(secret).map_err(|e| format!("ed key: {e}"))
-        }
+        Algorithm::EdDSA => EncodingKey::from_ed_pem(secret).map_err(|e| format!("ed key: {e}")),
     }
 }
 
@@ -188,16 +194,18 @@ fn decoding_key(alg: Algorithm, secret: &[u8]) -> Result<DecodingKey, String> {
         Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => {
             Ok(DecodingKey::from_secret(secret))
         }
-        Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512 | Algorithm::PS256
-        | Algorithm::PS384 | Algorithm::PS512 => {
+        Algorithm::RS256
+        | Algorithm::RS384
+        | Algorithm::RS512
+        | Algorithm::PS256
+        | Algorithm::PS384
+        | Algorithm::PS512 => {
             DecodingKey::from_rsa_pem(secret).map_err(|e| format!("rsa key: {e}"))
         }
         Algorithm::ES256 | Algorithm::ES384 => {
             DecodingKey::from_ec_pem(secret).map_err(|e| format!("ec key: {e}"))
         }
-        Algorithm::EdDSA => {
-            DecodingKey::from_ed_pem(secret).map_err(|e| format!("ed key: {e}"))
-        }
+        Algorithm::EdDSA => DecodingKey::from_ed_pem(secret).map_err(|e| format!("ed key: {e}")),
     }
 }
 

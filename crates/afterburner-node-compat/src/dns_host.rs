@@ -87,9 +87,7 @@ where
 /// keeps the code simpler and the `Resolver` constructor is cheap
 /// (~microseconds; no I/O until a lookup runs).
 fn make_resolver(servers: &[String]) -> Result<Resolver> {
-    use hickory_resolver::config::{
-        NameServerConfig, Protocol, ResolverConfig, ResolverOpts,
-    };
+    use hickory_resolver::config::{NameServerConfig, Protocol, ResolverConfig, ResolverOpts};
     if !servers.is_empty() {
         let mut config = ResolverConfig::new();
         for s in servers {
@@ -267,9 +265,9 @@ pub fn resolve_ns(hostname: &str, servers: &[String], m: &Manifold) -> Result<Ve
 
 pub fn reverse(ip: &str, servers: &[String], m: &Manifold) -> Result<Vec<String>> {
     check_net(m, &format!("dns.reverse({ip})"))?;
-    let parsed: IpAddr = ip
-        .parse()
-        .map_err(|_| AfterburnerError::Host(format!("dns.reverse({ip}): not a valid IP address")))?;
+    let parsed: IpAddr = ip.parse().map_err(|_| {
+        AfterburnerError::Host(format!("dns.reverse({ip}): not a valid IP address"))
+    })?;
     let s = servers.to_vec();
     with_timeout(m, format!("dns.reverse({ip})"), move || {
         let resolver = make_resolver(&s)?;

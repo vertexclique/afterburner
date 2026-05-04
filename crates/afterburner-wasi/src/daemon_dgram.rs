@@ -136,12 +136,7 @@ impl DaemonDgram {
     /// Bind a UDP socket to `host:port`. `port == 0` lets the OS pick.
     /// Returns the new `socket_id` (≥1) on success or one of [`errors`]
     /// on Manifold rejection / bind failure.
-    pub fn bind(
-        self: &Arc<Self>,
-        host: &str,
-        port: u16,
-        last_error: &mut String,
-    ) -> i32 {
+    pub fn bind(self: &Arc<Self>, host: &str, port: u16, last_error: &mut String) -> i32 {
         if !udp_allowed(&self.manifold) {
             *last_error = "dgram.bind: not granted by manifold".into();
             return errors::E_PERMISSION;
@@ -191,7 +186,7 @@ impl DaemonDgram {
 
         // Emit the listening event asynchronously so the JS-side bind
         // callback fires through the standard handler dispatcher.
-        let _ = self.events_tx.send(DgramEvent::Listening {
+        self.events_tx.send(DgramEvent::Listening {
             socket_id,
             port: bound_addr.port(),
         });
@@ -214,14 +209,14 @@ impl DaemonDgram {
                             // is best-effort, so we accept that
                             // backpressure here — the daemon event
                             // pump drains the channel each tick.
-                            let _ = events_tx.send(DgramEvent::Message {
+                            events_tx.send(DgramEvent::Message {
                                 socket_id,
                                 from,
                                 payload_b64,
                             });
                         }
                         Err(e) => {
-                            let _ = events_tx.send(DgramEvent::Error {
+                            events_tx.send(DgramEvent::Error {
                                 socket_id,
                                 message: format!("dgram.recv: {e}"),
                                 code: io_error_code(&e).into(),
@@ -294,7 +289,7 @@ impl DaemonDgram {
         // closes the underlying fd when the last Arc goes away.
         drop(handle);
         self.alive.fetch_sub(1, Ordering::Release);
-        let _ = self.events_tx.send(DgramEvent::Close { socket_id });
+        self.events_tx.send(DgramEvent::Close { socket_id });
     }
 }
 

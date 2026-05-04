@@ -197,9 +197,9 @@ pub fn opendir_sync(path: &str, m: &Manifold) -> Result<Vec<DirEntry>> {
     let mut out = Vec::new();
     for entry in iter {
         let e = entry.map_err(|e| AfterburnerError::Host(format!("fs.opendir({path}): {e}")))?;
-        let ft = e.file_type().map_err(|e| {
-            AfterburnerError::Host(format!("fs.opendir({path}): file_type {e}"))
-        })?;
+        let ft = e
+            .file_type()
+            .map_err(|e| AfterburnerError::Host(format!("fs.opendir({path}): file_type {e}")))?;
         out.push(DirEntry {
             name: e.file_name().to_string_lossy().into_owned(),
             is_file: ft.is_file(),
@@ -251,11 +251,7 @@ impl WatchKind {
 /// Returns `Vec<WatchEvent>` so a single host call can surface both
 /// 'rename' (mtime jump on the directory itself) and 'change' (mtime
 /// jump on a child) deltas in one envelope.
-pub fn watch_poll(
-    path: &str,
-    interval_ms: u32,
-    m: &Manifold,
-) -> Result<Vec<WatchEvent>> {
+pub fn watch_poll(path: &str, interval_ms: u32, m: &Manifold) -> Result<Vec<WatchEvent>> {
     let resolved = validate_read(path, &m.fs)?;
     let snap_a = snapshot_dir(&resolved);
     std::thread::sleep(std::time::Duration::from_millis(interval_ms as u64));
@@ -271,23 +267,23 @@ struct DirSnapshot {
 
 fn snapshot_dir(p: &Path) -> DirSnapshot {
     let mut snap = DirSnapshot::default();
-    if let Ok(meta) = std::fs::metadata(p) {
-        if meta.is_file() {
-            // Single-file watch: record the file itself with its
-            // basename so diff still produces 'change' deltas.
-            let name = p
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            snap.entries.push((name, mtime, meta.len(), 'F'));
-            return snap;
-        }
+    if let Ok(meta) = std::fs::metadata(p)
+        && meta.is_file()
+    {
+        // Single-file watch: record the file itself with its
+        // basename so diff still produces 'change' deltas.
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        snap.entries.push((name, mtime, meta.len(), 'F'));
+        return snap;
     }
     if let Ok(iter) = std::fs::read_dir(p) {
         for e in iter.flatten() {
@@ -344,13 +340,13 @@ fn diff_snapshots(a: &DirSnapshot, b: &DirSnapshot) -> Vec<WatchEvent> {
     }
     // Mtime/size deltas on persisted entries surface as 'change'.
     for (name, a_entry) in &map_a {
-        if let Some(b_entry) = map_b.get(name) {
-            if a_entry.1 != b_entry.1 || a_entry.2 != b_entry.2 {
-                out.push(WatchEvent {
-                    kind: WatchKind::Change,
-                    filename: (*name).to_string(),
-                });
-            }
+        if let Some(b_entry) = map_b.get(name)
+            && (a_entry.1 != b_entry.1 || a_entry.2 != b_entry.2)
+        {
+            out.push(WatchEvent {
+                kind: WatchKind::Change,
+                filename: (*name).to_string(),
+            });
         }
     }
     out

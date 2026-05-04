@@ -359,13 +359,9 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
         Function::new(
             ctx.clone(),
             |ctx: Ctx<'_>, command: String, argv_json: String| {
-                let argv_owned: Vec<String> = serde_json::from_str(&argv_json)
-                    .map_err(|e| {
-                        Exception::throw_message(
-                            &ctx,
-                            &format!("child_process: argv parse: {e}"),
-                        )
-                    })?;
+                let argv_owned: Vec<String> = serde_json::from_str(&argv_json).map_err(|e| {
+                    Exception::throw_message(&ctx, &format!("child_process: argv parse: {e}"))
+                })?;
                 let argv: Vec<&str> = argv_owned.iter().map(String::as_str).collect();
                 let result =
                     active_manifold::with(|m| child_process_host::exec_sync(&command, &argv, m))
@@ -980,7 +976,10 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
                     .into_iter()
                     .map(|fragments| {
                         serde_json::Value::Array(
-                            fragments.into_iter().map(serde_json::Value::String).collect(),
+                            fragments
+                                .into_iter()
+                                .map(serde_json::Value::String)
+                                .collect(),
                         )
                     })
                     .collect();

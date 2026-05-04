@@ -142,12 +142,12 @@ fn wasm_streaming_hash_matches_one_shot() {
     let mut m = Manifold::sealed();
     m.crypto = true;
     let out = run(src, m);
-    assert_eq!(out["sha1"],   json!({ "equal": true, "digestLen": 40 }));
+    assert_eq!(out["sha1"], json!({ "equal": true, "digestLen": 40 }));
     assert_eq!(out["sha224"], json!({ "equal": true, "digestLen": 56 }));
     assert_eq!(out["sha256"], json!({ "equal": true, "digestLen": 64 }));
     assert_eq!(out["sha384"], json!({ "equal": true, "digestLen": 96 }));
     assert_eq!(out["sha512"], json!({ "equal": true, "digestLen": 128 }));
-    assert_eq!(out["md5"],    json!({ "equal": true, "digestLen": 32 }));
+    assert_eq!(out["md5"], json!({ "equal": true, "digestLen": 32 }));
 }
 
 #[test]
@@ -178,12 +178,12 @@ fn wasm_streaming_hmac_matches_one_shot() {
     let mut m = Manifold::sealed();
     m.crypto = true;
     let out = run(src, m);
-    assert_eq!(out["sha1"],   json!({ "equal": true }));
+    assert_eq!(out["sha1"], json!({ "equal": true }));
     assert_eq!(out["sha224"], json!({ "equal": true }));
     assert_eq!(out["sha256"], json!({ "equal": true }));
     assert_eq!(out["sha384"], json!({ "equal": true }));
     assert_eq!(out["sha512"], json!({ "equal": true }));
-    assert_eq!(out["md5"],    json!({ "equal": true }));
+    assert_eq!(out["md5"], json!({ "equal": true }));
 }
 
 #[test]

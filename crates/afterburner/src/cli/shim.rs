@@ -49,8 +49,7 @@ fn write_node_shim(dir: &Path, burn_exe: &Path) -> Result<()> {
     fs::write(&shim_path, body).with_context(|| format!("writing {shim_path:?}"))?;
     let mut perms = fs::metadata(&shim_path)?.permissions();
     perms.set_mode(0o755);
-    fs::set_permissions(&shim_path, perms)
-        .with_context(|| format!("chmod +x {shim_path:?}"))?;
+    fs::set_permissions(&shim_path, perms).with_context(|| format!("chmod +x {shim_path:?}"))?;
     Ok(())
 }
 

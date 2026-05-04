@@ -118,7 +118,10 @@ fn one_row_throw_aborts_batch() {
     ]);
     let err = ab.run_batch(&id, &inputs).expect_err("bad row must error");
     let msg = format!("{err:?}");
-    assert!(msg.contains("bad row") || msg.contains("Error"), "msg: {msg}");
+    assert!(
+        msg.contains("bad row") || msg.contains("Error"),
+        "msg: {msg}"
+    );
 }
 
 #[test]
@@ -130,7 +133,10 @@ fn primitive_outputs_supported() {
         .register("module.exports = (row) => row.n * row.n")
         .expect("register");
     let out = ab
-        .run_batch(&id, &json!([{ "n": 1 }, { "n": 2 }, { "n": 3 }, { "n": 4 }]))
+        .run_batch(
+            &id,
+            &json!([{ "n": 1 }, { "n": 2 }, { "n": 3 }, { "n": 4 }]),
+        )
         .expect("run_batch");
     assert_eq!(out, json!([1, 4, 9, 16]));
 }
@@ -184,9 +190,7 @@ fn run_then_run_batch_share_compiled_script() {
     // Single-call path
     assert_eq!(ab.run(&id, &json!({ "n": 1 })).unwrap(), json!(101));
     // Batched path against the same id
-    let out = ab
-        .run_batch(&id, &json!([{ "n": 2 }, { "n": 3 }]))
-        .unwrap();
+    let out = ab.run_batch(&id, &json!([{ "n": 2 }, { "n": 3 }])).unwrap();
     assert_eq!(out, json!([102, 103]));
     // And once more in single-call mode — verifies the cache slot is
     // still hot and didn't get invalidated by the batch path.
@@ -200,9 +204,7 @@ fn non_array_input_rejected_with_clear_error() {
         .register("module.exports = (row) => row")
         .expect("register");
     for bad in [json!({ "k": "v" }), json!(42), json!("string"), json!(null)] {
-        let err = ab
-            .run_batch(&id, &bad)
-            .expect_err("non-array must error");
+        let err = ab.run_batch(&id, &bad).expect_err("non-array must error");
         let msg = format!("{err:?}").to_lowercase();
         assert!(
             msg.contains("array") || msg.contains("input"),

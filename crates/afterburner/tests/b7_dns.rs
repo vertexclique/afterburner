@@ -1,3 +1,4 @@
+#![allow(non_snake_case)]
 //! B7 — `dns` record-type-aware resolution.
 //!
 //! Hits real public resolvers via the system `/etc/resolv.conf`,

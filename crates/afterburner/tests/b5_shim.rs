@@ -207,11 +207,7 @@ fn arbitrary_path_binary_passes_through() {
         // `#!/bin/sh` bypasses PATH for the shebang resolution; the
         // restricted PATH we hand to burn would otherwise leave
         // `/usr/bin/env sh` unable to locate `sh`.
-        fs::write(
-            &bin_path,
-            "#!/bin/sh\necho passthrough-marker-$1\n",
-        )
-        .unwrap();
+        fs::write(&bin_path, "#!/bin/sh\necho passthrough-marker-$1\n").unwrap();
         let mut p = fs::metadata(&bin_path).unwrap().permissions();
         p.set_mode(0o755);
         fs::set_permissions(&bin_path, p).unwrap();

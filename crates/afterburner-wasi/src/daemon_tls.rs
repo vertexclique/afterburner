@@ -213,6 +213,17 @@ impl std::fmt::Debug for DaemonTls {
     }
 }
 
+/// Tuple returned by `register_accepted`: the new conn id plus the
+/// post-handshake metadata pulled off the rustls connection (alpn,
+/// protocol version, cipher suite name, peer cert chain DER bytes).
+type AcceptedConn = (
+    TlsConnId,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Vec<Vec<u8>>,
+);
+
 impl DaemonTls {
     pub fn new(runtime: Handle, manifold: Manifold) -> Arc<Self> {
         let (tx, rx) = bounded_channel::<TlsEvent>(4096);
@@ -336,11 +347,10 @@ impl DaemonTls {
             *last_error = "tls.listen: empty host".into();
             return errors::E_BAD_HOST;
         }
-        let server_config =
-            match build_server_config(cert_pem, key_pem, sni_map_json, last_error) {
-                Some(c) => c,
-                None => return errors::E_BAD_CERT,
-            };
+        let server_config = match build_server_config(cert_pem, key_pem, sni_map_json, last_error) {
+            Some(c) => c,
+            None => return errors::E_BAD_CERT,
+        };
         let server_id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
         let bind = format!("{host}:{port}");
         let evt_tx = self.events_tx.clone();
@@ -413,7 +423,7 @@ impl DaemonTls {
         stream: tokio_rustls::server::TlsStream<TcpStream>,
         local: Option<SocketAddr>,
         remote: Option<SocketAddr>,
-    ) -> (TlsConnId, Option<String>, Option<String>, Option<String>, Vec<Vec<u8>>) {
+    ) -> AcceptedConn {
         let conn_id = self.next_conn_id.fetch_add(1, Ordering::Relaxed);
         let (write_tx, write_rx) = unbounded_channel::<WriteCmd>();
         let pending = Arc::new(AtomicUsize::new(0));
@@ -432,7 +442,12 @@ impl DaemonTls {
             .map(normalize_cipher_name);
         let peer_certs = conn_state
             .peer_certificates()
-            .map(|chain| chain.iter().map(|c| c.as_ref().to_vec()).collect::<Vec<_>>())
+            .map(|chain| {
+                chain
+                    .iter()
+                    .map(|c| c.as_ref().to_vec())
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
 
         let abort = self
@@ -493,7 +508,10 @@ fn host_allowed(host: &str, allow: &[String]) -> bool {
 // rustls config builders
 // ---------------------------------------------------------------------
 
-fn build_client_config(opts: &ConnectOptions, last_error: &mut String) -> Option<Arc<ClientConfig>> {
+fn build_client_config(
+    opts: &ConnectOptions,
+    last_error: &mut String,
+) -> Option<Arc<ClientConfig>> {
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     if !opts.ca_pem.is_empty() {
@@ -558,21 +576,18 @@ fn build_server_config(
         let entries = match parsed {
             serde_json::Value::Array(arr) => arr,
             _ => {
-                *last_error = "tls.listen: SNI map must be a JSON array of {servername,cert,key}".into();
+                *last_error =
+                    "tls.listen: SNI map must be a JSON array of {servername,cert,key}".into();
                 return None;
             }
         };
         let mut out = Vec::with_capacity(entries.len());
         for ent in entries {
-            let server_name = ent
-                .get("servername")
-                .and_then(|x| x.as_str())
-                .ok_or("");
+            let server_name = ent.get("servername").and_then(|x| x.as_str()).ok_or("");
             let cert = ent.get("cert").and_then(|x| x.as_str()).unwrap_or("");
             let key = ent.get("key").and_then(|x| x.as_str()).unwrap_or("");
             if server_name.is_err() || cert.is_empty() || key.is_empty() {
-                *last_error =
-                    "tls.listen: each SNI entry needs servername+cert+key".into();
+                *last_error = "tls.listen: each SNI entry needs servername+cert+key".into();
                 return None;
             }
             let server_name = server_name.unwrap().to_lowercase();
@@ -624,7 +639,10 @@ struct CertifiedPair {
     key: PrivateKeyDer<'static>,
 }
 
-fn parse_certified_key(cert_pem: &str, key_pem: &str) -> std::result::Result<CertifiedPair, String> {
+fn parse_certified_key(
+    cert_pem: &str,
+    key_pem: &str,
+) -> std::result::Result<CertifiedPair, String> {
     let mut cert_cursor = std::io::Cursor::new(cert_pem.as_bytes());
     let cert_chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_cursor)
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -864,7 +882,12 @@ async fn client_task(
             .map(normalize_cipher_name);
         peer_cert_chain_der = conn_state
             .peer_certificates()
-            .map(|chain| chain.iter().map(|c| c.as_ref().to_vec()).collect::<Vec<_>>())
+            .map(|chain| {
+                chain
+                    .iter()
+                    .map(|c| c.as_ref().to_vec())
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
     }
     evt_tx.send(TlsEvent::Connect {
@@ -961,7 +984,10 @@ async fn drive_client_socket(
     evt_tx: BoundedTx<TlsEvent>,
 ) {
     let (read_half, write_half) = tokio::io::split(stream);
-    drive_split(conn_id, read_half, write_half, write_rx, wake, pending, evt_tx).await;
+    drive_split(
+        conn_id, read_half, write_half, write_rx, wake, pending, evt_tx,
+    )
+    .await;
 }
 
 /// Drive both halves of an established TLS server-accepted stream.
@@ -974,7 +1000,10 @@ async fn drive_server_socket(
     evt_tx: BoundedTx<TlsEvent>,
 ) {
     let (read_half, write_half) = tokio::io::split(stream);
-    drive_split(conn_id, read_half, write_half, write_rx, wake, pending, evt_tx).await;
+    drive_split(
+        conn_id, read_half, write_half, write_rx, wake, pending, evt_tx,
+    )
+    .await;
 }
 
 /// Generic split-stream driver. Identical to `daemon_net::drive_socket`
@@ -1168,8 +1197,10 @@ mod tests {
     #[test]
     fn build_server_config_with_sni_map() {
         // Generate three certs: a default + two SNI-keyed.
-        let default = rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("default");
-        let alpha = rcgen::generate_simple_self_signed(vec!["alpha.example".into()]).expect("alpha");
+        let default =
+            rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("default");
+        let alpha =
+            rcgen::generate_simple_self_signed(vec!["alpha.example".into()]).expect("alpha");
         let beta = rcgen::generate_simple_self_signed(vec!["beta.example".into()]).expect("beta");
         let sni_json = serde_json::json!([
             {
@@ -1212,11 +1243,8 @@ mod tests {
     fn wildcard_match_resolves_first_label() {
         use std::sync::Arc;
         let cert = rcgen::generate_simple_self_signed(vec!["*.example.com".into()]).expect("cert");
-        let pair = parse_certified_key(
-            &cert.cert.pem(),
-            &cert.key_pair.serialize_pem(),
-        )
-        .expect("pair");
+        let pair =
+            parse_certified_key(&cert.cert.pem(), &cert.key_pair.serialize_pem()).expect("pair");
         let mut map = std::collections::HashMap::new();
         map.insert("*.example.com".to_string(), Arc::new(pair));
         // Single-label wildcard match.

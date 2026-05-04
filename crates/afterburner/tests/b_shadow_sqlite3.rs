@@ -68,7 +68,10 @@ fn round_trip_create_insert_select_close() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(stdout.contains("ROUND_TRIP_OK"), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("ROUND_TRIP_OK"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
 }
 
 #[test]
@@ -617,7 +620,11 @@ fn file_database_persists_across_reopens() {
         path = path_str
     );
     let out1 = run_inline(&parent1);
-    assert!(out1.status.success(), "stdout1: {}", String::from_utf8_lossy(&out1.stdout));
+    assert!(
+        out1.status.success(),
+        "stdout1: {}",
+        String::from_utf8_lossy(&out1.stdout)
+    );
     assert!(String::from_utf8_lossy(&out1.stdout).contains("WRITTEN"));
 
     // Pass 2: re-open + read back.

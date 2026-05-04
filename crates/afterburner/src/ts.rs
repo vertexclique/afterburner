@@ -87,11 +87,10 @@ pub fn transpile(source: &str, path: &Path) -> Result<String, TsError> {
     // CJS so `import` / `export` in TS files runs under our existing
     // CommonJS runtime. Plain CJS code contains no ESM declarations
     // and passes through unchanged.
-    crate::esm::rewrite_esm_to_cjs(&codegen.code, path)
-        .map_err(|e| TsError::Parse {
-            path: path.display().to_string(),
-            errors: e,
-        })
+    crate::esm::rewrite_esm_to_cjs(&codegen.code, path).map_err(|e| TsError::Parse {
+        path: path.display().to_string(),
+        errors: e,
+    })
 }
 
 /// Public helper for the CLI run path so `.js` / `.mjs` files with
@@ -113,7 +112,9 @@ pub fn lower_esm_js(source: &str, path: &Path) -> Result<String, TsError> {
 /// [`AfterburnerError`]: crate::AfterburnerError
 #[derive(Debug, thiserror::Error)]
 pub enum TsError {
-    #[error(".tsx (JSX) is not supported by the strip-types transpiler; enable a JSX-aware feature or pre-transpile with an external tool")]
+    #[error(
+        ".tsx (JSX) is not supported by the strip-types transpiler; enable a JSX-aware feature or pre-transpile with an external tool"
+    )]
     JsxNotSupported,
 
     #[error("{path}: TypeScript parse error:\n{errors}")]
@@ -128,13 +129,11 @@ pub enum TsError {
 /// it with [`TsError::JsxNotSupported`] — callers don't need to
 /// filter that out themselves.
 pub fn is_typescript(path: &Path) -> bool {
-    match path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("ts") | Some("mts") | Some("cts") | Some("tsx") => true,
-        _ => false,
-    }
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("ts" | "mts" | "cts" | "tsx")
+    )
 }

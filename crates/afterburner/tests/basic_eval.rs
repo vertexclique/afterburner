@@ -19,8 +19,8 @@
 //!  * sealed manifold rejects fs / net / crypto / env access.
 //!  * builder fluent API survives chained mutation.
 
-use afterburner::{Afterburner, AfterburnerError, EngineMode, FsAccess, FuelGauge, Manifold};
 use afterburner::core::ScriptId;
+use afterburner::{Afterburner, AfterburnerError, EngineMode, FsAccess, FuelGauge, Manifold};
 use serde_json::json;
 
 #[test]
@@ -49,7 +49,9 @@ fn register_is_content_addressed() {
 #[test]
 fn distinct_sources_yield_distinct_ids() {
     let ab = Afterburner::new().expect("Afterburner::new");
-    let a = ab.register("module.exports = (d) => d.n").expect("register a");
+    let a = ab
+        .register("module.exports = (d) => d.n")
+        .expect("register a");
     let b = ab
         .register("module.exports = (d) => -d.n")
         .expect("register b");
@@ -177,8 +179,7 @@ fn fuel_exhaustion_surfaces_typed_error() {
     // Either FuelExhausted or Timeout is acceptable — both indicate
     // the limiter caught the runaway script.
     assert!(
-        matches!(err, AfterburnerError::FuelExhausted)
-            || matches!(err, AfterburnerError::Timeout),
+        matches!(err, AfterburnerError::FuelExhausted) || matches!(err, AfterburnerError::Timeout),
         "expected FuelExhausted or Timeout, got: {err:?}"
     );
 }
@@ -218,9 +219,7 @@ fn null_input_is_passed_through() {
 #[test]
 fn deeply_nested_input_round_trips() {
     let ab = Afterburner::new().expect("Afterburner::new");
-    let id = ab
-        .register("module.exports = (d) => d")
-        .expect("register");
+    let id = ab.register("module.exports = (d) => d").expect("register");
     let input = json!({
         "users": [
             { "id": 1, "name": "alice", "tags": ["admin", "ops"] },
@@ -228,7 +227,7 @@ fn deeply_nested_input_round_trips() {
         ],
         "count": 2,
         "nullable": null,
-        "negatives": [-1, -2, -3.14],
+        "negatives": [-1, -2, -3.5],
     });
     let out = ab.run(&id, &input).expect("identity transform");
     assert_eq!(out, input);

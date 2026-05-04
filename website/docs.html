@@ -1,0 +1,1228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Docs · Afterburner</title>
+<link rel="stylesheet" href="design-system.css?v=3" />
+<link rel="icon" type="image/png" href="art/afterburner-square.png" />
+<style>
+  body { background: var(--bg); }
+
+  /* ============= NAV ============= */
+  .nav {
+    position: sticky; top: 0; z-index: 50;
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    background: rgba(255,255,255,0.85);
+    border-bottom: 1px solid var(--stroke);
+  }
+  .nav__inner {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 32px;
+    max-width: 1480px; margin: 0 auto;
+  }
+  .nav__brand {
+    display: flex; align-items: center; gap: 10px;
+    font-family: var(--font-display); font-weight: 600; font-size: 17px;
+    letter-spacing: -0.02em;
+  }
+  .nav__brand img { width: 28px; height: 28px; }
+  .nav__brand .badge {
+    margin-left: 8px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    background: rgba(83, 58, 253, 0.1);
+    color: var(--action);
+    padding: 2px 8px;
+    border-radius: var(--radius-tag);
+    letter-spacing: 0;
+  }
+  .nav__search {
+    flex: 0 1 360px;
+    margin: 0 auto 0 48px;
+    position: relative;
+  }
+  .nav__search input {
+    width: 100%;
+    border: 1px solid var(--stroke);
+    background: var(--bg-soft);
+    padding: 9px 14px 9px 38px;
+    border-radius: var(--radius-input);
+    font: inherit;
+    font-size: 13px;
+    color: var(--fg);
+    outline: none;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .nav__search input:focus { border-color: var(--action); background: var(--bg); }
+  .nav__search svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--fg-subtle); }
+  .nav__search kbd {
+    position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+    font-family: var(--font-mono); font-size: 10px;
+    padding: 2px 6px;
+    background: var(--bg);
+    border: 1px solid var(--stroke);
+    border-radius: var(--radius-tag);
+    color: var(--fg-muted);
+  }
+  .nav__cta { display: flex; gap: 8px; align-items: center; }
+
+  /* ============= LAYOUT ============= */
+  .layout {
+    display: grid;
+    grid-template-columns: 260px minmax(0, 1fr) 220px;
+    gap: 56px;
+    max-width: 1380px;
+    margin: 0 auto;
+    padding: 40px 32px;
+    align-items: start;
+  }
+
+  /* ============= SIDEBAR ============= */
+  .sidebar {
+    position: sticky;
+    top: 80px;
+    max-height: calc(100vh - 100px);
+    overflow-y: auto;
+    padding-right: 8px;
+    font-size: 13px;
+  }
+  .sidebar::-webkit-scrollbar { width: 6px; }
+  .sidebar::-webkit-scrollbar-thumb { background: var(--stroke-strong); border-radius: 3px; }
+
+  .sb-section { margin-bottom: 28px; }
+  .sb-section h4 {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--fg-subtle);
+    margin: 0 0 8px;
+    padding-left: 12px;
+  }
+  .sb-link {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 12px;
+    border-radius: var(--radius-tag);
+    color: var(--fg);
+    font-weight: 400;
+    font-size: 13.5px;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .sb-link:hover { background: var(--bg-section); }
+  .sb-link.active {
+    color: var(--action);
+    background: rgba(83, 58, 253, 0.08);
+    font-weight: 500;
+  }
+  .sb-link .tag {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--fg-subtle);
+    background: var(--bg-section);
+    padding: 1px 6px;
+    border-radius: 999px;
+  }
+
+  /* ============= MAIN ============= */
+  .main { min-width: 0; }
+
+  .crumb {
+    display: flex; align-items: center; gap: 8px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--fg-subtle);
+    margin-bottom: 16px;
+  }
+  .crumb a { color: var(--fg-muted); transition: color 0.12s ease; }
+  .crumb a:hover { color: var(--action); }
+  .crumb span.cur { color: var(--action); }
+  .crumb span.sep { color: var(--stroke-strong); }
+
+  .doc-title {
+    font-family: var(--font-display);
+    font-weight: 300;
+    font-size: 64px;
+    letter-spacing: -0.035em;
+    line-height: 1.0;
+    margin: 0 0 20px;
+    color: var(--fg);
+  }
+  .doc-lede {
+    font-size: 19px;
+    color: var(--fg-muted);
+    margin: 0 0 32px;
+    max-width: 680px;
+    line-height: 1.5;
+    font-weight: 400;
+  }
+  .doc-meta {
+    display: flex; gap: 8px; flex-wrap: wrap;
+    margin-bottom: 56px;
+  }
+
+  /* hero card */
+  .hero-card {
+    position: relative;
+    background: var(--color-midnight-ink);
+    color: var(--color-porcelain-white);
+    border-radius: var(--radius-card);
+    padding: 44px;
+    margin-bottom: 80px;
+    overflow: hidden;
+    box-shadow: var(--shadow-soft);
+  }
+  .hero-card::before {
+    content: '';
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(ellipse 50% 80% at 100% 50%, rgba(127, 125, 252, 0.4), transparent),
+      radial-gradient(ellipse 40% 60% at 0% 100%, rgba(244, 75, 204, 0.18), transparent);
+  }
+  .hero-card__inner {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 32px;
+    align-items: center;
+  }
+  .hero-card h2 {
+    font-family: var(--font-display);
+    font-size: 32px;
+    margin: 0 0 14px;
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+    font-weight: 300;
+  }
+  .hero-card h2 em {
+    font-style: normal;
+    background: var(--gradient-sunburst);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    font-weight: 400;
+  }
+  .hero-card p {
+    margin: 0; color: rgba(255,255,255,0.72);
+    line-height: 1.55;
+    font-size: 15px;
+  }
+  .hero-card p code {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+    color: var(--accent);
+    background: rgba(255,255,255,0.06);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+  .hero-card .install {
+    background: rgba(0,0,0,0.35);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: var(--radius-tag);
+    padding: 14px 18px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    margin-top: 24px;
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    cursor: pointer;
+    transition: border-color 0.15s ease;
+  }
+  .hero-card .install:hover { border-color: rgba(255,255,255,0.25); }
+  .hero-card .install .dollar { color: rgba(255,255,255,0.4); }
+  .hero-card__art {
+    width: 140px;
+    animation: hover 6s ease-in-out infinite;
+    filter: drop-shadow(0 16px 36px rgba(127, 125, 252, 0.5));
+  }
+  @keyframes hover {
+    0%, 100% { transform: translateY(0) rotate(-2deg); }
+    50% { transform: translateY(-12px) rotate(2deg); }
+  }
+
+  /* ============= DOC CONTENT ============= */
+  .doc h2 {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 32px;
+    letter-spacing: -0.02em;
+    line-height: 1.15;
+    margin: 64px 0 18px;
+    padding-top: 8px;
+    scroll-margin-top: 96px;
+    color: var(--fg);
+  }
+  .doc h2 .anchor {
+    color: var(--action);
+    margin-right: 10px;
+    font-family: var(--font-mono);
+    font-size: 0.65em;
+    font-weight: 500;
+    opacity: 0.7;
+  }
+  .doc h3 {
+    font-family: var(--font-display);
+    font-weight: 500;
+    font-size: 20px;
+    letter-spacing: -0.01em;
+    margin: 36px 0 12px;
+    scroll-margin-top: 96px;
+    color: var(--fg);
+  }
+  .doc p {
+    font-size: 15.5px;
+    line-height: 1.65;
+    color: var(--fg);
+    margin: 0 0 16px;
+  }
+  .doc p code, .doc li code, .doc td code {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+    background: var(--bg-section);
+    padding: 1px 6px;
+    border-radius: 4px;
+    color: var(--action);
+    white-space: nowrap;
+  }
+  .doc ul {
+    margin: 0 0 16px;
+    padding-left: 22px;
+  }
+  .doc ul li {
+    margin-bottom: 8px;
+    line-height: 1.6;
+    color: var(--fg);
+  }
+  .doc strong { color: var(--fg); font-weight: 600; }
+
+  /* code blocks */
+  .codeblock {
+    position: relative;
+    margin: 22px 0 28px;
+    box-shadow: 0 0 0 1px var(--code-stroke), 0 24px 48px -24px var(--code-glow);
+    transition: box-shadow 0.4s ease;
+    border-radius: var(--radius-card);
+    overflow: hidden;
+    background: var(--code-bg);
+  }
+  /* ember strip on inferno/matrix code themes */
+  .codeblock::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--code-glow), transparent);
+    opacity: 0;
+    transition: opacity 0.4s ease;
+    pointer-events: none;
+    z-index: 2;
+  }
+  html[data-code-theme="inferno"] .codeblock::before,
+  html[data-code-theme="matrix"] .codeblock::before {
+    opacity: 1;
+    animation: code-ember 6s linear infinite;
+  }
+  .codeblock__head {
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--code-bg-2);
+    padding: 10px 16px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+  .codeblock__head .lang {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: rgba(255,255,255,0.55);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  .codeblock__head .copy-btn {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: rgba(255,255,255,0.7);
+    padding: 3px 10px;
+    border: 1px solid rgba(255,255,255,0.18);
+    border-radius: var(--radius-tag);
+    transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+  }
+  .codeblock__head .copy-btn:hover { background: var(--action); color: white; border-color: var(--action); }
+  .codeblock pre {
+    margin: 0;
+    padding: 22px 24px;
+    color: var(--code-fg);
+    font-family: var(--font-mono);
+    font-size: 13.5px;
+    line-height: 1.7;
+    overflow-x: auto;
+  }
+
+  /* callouts */
+  .callout {
+    border-left: 3px solid var(--action);
+    background: linear-gradient(90deg, rgba(83, 58, 253, 0.06), transparent 65%);
+    padding: 20px 22px;
+    border-radius: 0 var(--radius-card) var(--radius-card) 0;
+    margin: 24px 0;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 14px;
+    align-items: start;
+  }
+  .callout__icon {
+    width: 28px; height: 28px;
+    border-radius: var(--radius-tag);
+    display: grid; place-items: center;
+    background: var(--action); color: white;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 14px;
+  }
+  .callout--note { border-color: var(--accent); background: linear-gradient(90deg, rgba(128, 135, 255, 0.08), transparent 65%); }
+  .callout--note .callout__icon { background: var(--accent); }
+  .callout--ok { border-color: var(--color-accent-green); background: linear-gradient(90deg, rgba(129, 184, 26, 0.08), transparent 65%); }
+  .callout--ok .callout__icon { background: var(--color-accent-green); }
+  .callout p { margin: 0; }
+  .callout strong { display: block; margin-bottom: 4px; }
+
+  /* tables */
+  .doc-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    border: 1px solid var(--stroke);
+    border-radius: var(--radius-card);
+    overflow: hidden;
+    margin: 20px 0 28px;
+    background: var(--bg);
+    font-size: 14px;
+  }
+  .doc-table th {
+    background: var(--bg-soft);
+    text-align: left;
+    padding: 12px 16px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--fg-muted);
+    border-bottom: 1px solid var(--stroke);
+  }
+  .doc-table td {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--stroke);
+    vertical-align: top;
+    line-height: 1.5;
+    color: var(--fg);
+  }
+  .doc-table tr:last-child td { border-bottom: 0; }
+  .doc-table td code {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--action);
+    background: var(--bg-section);
+    padding: 1px 6px;
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+
+  /* compat grid */
+  .compat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 8px;
+    margin: 16px 0 32px;
+  }
+  .compat-grid .compat {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px;
+    background: var(--bg-section);
+    border-radius: var(--radius-tag);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--fg);
+  }
+  .compat .ck {
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    display: grid; place-items: center;
+    color: white; font-size: 9px;
+    flex-shrink: 0;
+  }
+  .compat .ck--ok    { background: var(--color-accent-green); }
+  .compat .ck--gated { background: var(--action); }
+
+  /* TOC right rail */
+  .toc {
+    position: sticky;
+    top: 80px;
+    max-height: calc(100vh - 100px);
+    overflow-y: auto;
+    font-size: 13px;
+  }
+  .toc h4 {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--fg-subtle);
+    margin: 0 0 12px;
+  }
+  .toc ul { list-style: none; padding: 0; margin: 0; }
+  .toc li { margin-bottom: 4px; }
+  .toc a {
+    display: block;
+    padding: 4px 0 4px 12px;
+    color: var(--fg-muted);
+    border-left: 2px solid var(--stroke);
+    transition: color 0.12s ease, border-color 0.12s ease;
+    font-size: 12.5px;
+  }
+  .toc a:hover { color: var(--fg); }
+  .toc a.active { color: var(--action); border-left-color: var(--action); font-weight: 500; }
+  .toc .toc-sub { padding-left: 12px; }
+  .toc .toc-sub a { font-size: 12px; }
+
+  /* arch list */
+  .arch-mini {
+    display: flex; flex-direction: column; gap: 8px;
+    margin: 24px 0;
+  }
+  .arch-mini .row {
+    display: flex; align-items: center; gap: 14px;
+    padding: 14px 18px;
+    background: var(--bg-section);
+    border-radius: var(--radius-card);
+    transition: transform 0.15s ease;
+  }
+  .arch-mini .row:hover { transform: translateX(4px); }
+  .arch-mini .bar { width: 4px; height: 32px; border-radius: 2px; flex-shrink: 0; }
+  .arch-mini .nm {
+    font-family: var(--font-display);
+    font-weight: 500;
+    font-size: 15px;
+    min-width: 180px;
+    color: var(--fg);
+  }
+  .arch-mini .ds {
+    font-size: 13.5px;
+    color: var(--fg-muted);
+    line-height: 1.5;
+  }
+
+  /* page foot */
+  .pagefoot {
+    display: flex; justify-content: space-between; gap: 16px;
+    margin-top: 80px;
+    padding-top: 40px;
+    border-top: 1px solid var(--stroke);
+  }
+  .pagefoot__btn {
+    flex: 1;
+    background: var(--bg-soft);
+    border: 1px solid var(--stroke);
+    padding: 18px 22px;
+    border-radius: var(--radius-card);
+    transition: border-color 0.15s ease, transform 0.15s ease, background 0.15s ease;
+  }
+  .pagefoot__btn:hover { border-color: var(--action); transform: translateY(-2px); background: var(--bg); }
+  .pagefoot__btn .l {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--fg-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  .pagefoot__btn .t {
+    font-family: var(--font-display);
+    font-weight: 500;
+    font-size: 17px;
+    margin-top: 4px;
+    color: var(--fg);
+  }
+
+  /* responsive */
+  @media (max-width: 1180px) {
+    .layout { grid-template-columns: 240px minmax(0, 1fr); }
+    .toc { display: none; }
+  }
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: 1fr; gap: 32px; }
+    .sidebar { position: static; max-height: none; }
+    .nav__search { display: none; }
+    .doc-title { font-size: 44px; }
+    .hero-card__inner { grid-template-columns: 1fr; }
+    .hero-card__art { display: none; }
+  }
+
+  /* burn button — video plays on hover (matches landing page treatment) */
+  .btn--burn {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    transition: transform 0.2s ease, color 0.2s ease, border-color 0.2s ease, box-shadow 0.25s ease;
+  }
+  .btn--burn > * {
+    position: relative;
+    z-index: 3;
+  }
+  .btn--burn .burn-bg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    z-index: 0;
+    opacity: 0;
+    transition: opacity 0.35s ease;
+    pointer-events: none;
+  }
+  .btn--burn::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    background: linear-gradient(180deg, rgba(20, 8, 0, 0.35), rgba(40, 10, 0, 0.55));
+    opacity: 0;
+    transition: opacity 0.35s ease;
+    pointer-events: none;
+  }
+  .btn--burn::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    background: linear-gradient(120deg, rgba(255, 95, 0, 0.28), rgba(255, 46, 84, 0.22) 50%, rgba(124, 77, 255, 0.25));
+    mix-blend-mode: screen;
+    opacity: 0;
+    transition: opacity 0.35s ease;
+    pointer-events: none;
+  }
+  .btn--burn:hover .burn-bg,
+  .btn--burn:focus-visible .burn-bg { opacity: 1; }
+  .btn--burn:hover::before,
+  .btn--burn:focus-visible::before { opacity: 1; }
+  .btn--burn:hover::after,
+  .btn--burn:focus-visible::after { opacity: 1; }
+  .btn--burn:hover,
+  .btn--burn:focus-visible {
+    color: #fff;
+    border-color: transparent;
+    box-shadow: 0 12px 28px rgba(255, 97, 24, 0.36), 0 0 0 0.5px rgba(255,255,255,0.45) inset;
+    transform: translateY(-1px);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55), 0 0 12px rgba(0, 0, 0, 0.35);
+  }
+</style>
+</head>
+<body>
+
+<!-- ============= NAV ============= -->
+<nav class="nav">
+  <div class="nav__inner">
+    <a href="index.html" class="nav__brand">
+      <img src="art/afterburner-square.png" alt="Afterburner" />
+      <span>afterburner</span>
+      <span class="badge">docs</span>
+    </a>
+    <div class="nav__search">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+      <input type="text" placeholder="Search the docs…" />
+      <kbd>⌘K</kbd>
+    </div>
+    <div class="nav__cta">
+      <a href="index.html" class="btn btn--ghost btn--sm">Home</a>
+      <a href="https://github.com/vertexclique/afterburner" class="btn btn--primary btn--sm btn--burn">
+        <video class="burn-bg" src="art/burning.mp4" muted loop playsinline preload="metadata"></video>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12c0 4.42 2.87 8.17 6.84 9.5.5.08.66-.23.66-.5v-1.69c-2.77.6-3.36-1.34-3.36-1.34-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.87 1.52 2.34 1.07 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.94 0-1.11.39-2 1.03-2.71-.1-.25-.45-1.29.1-2.64 0 0 .84-.27 2.75 1.02.79-.22 1.65-.33 2.5-.33.85 0 1.71.11 2.5.33 1.91-1.29 2.75-1.02 2.75-1.02.55 1.35.2 2.39.1 2.64.64.71 1.03 1.6 1.03 2.71 0 3.84-2.34 4.69-4.57 4.94.36.31.69.92.69 1.85V21c0 .27.16.59.67.5C19.14 20.16 22 16.42 22 12A10 10 0 0 0 12 2z"/></svg>
+        <span class="btn-label">Star</span>
+      </a>
+    </div>
+  </div>
+</nav>
+
+<!-- ============= LAYOUT ============= -->
+<div class="layout">
+
+  <!-- =========== SIDEBAR =========== -->
+  <aside class="sidebar">
+    <div class="sb-section">
+      <h4>Get started</h4>
+      <a class="sb-link active" href="#introduction">Introduction</a>
+      <a class="sb-link" href="#installation">Installation</a>
+      <a class="sb-link" href="#first-burn">Your first burn <span class="tag">5m</span></a>
+    </div>
+    <div class="sb-section">
+      <h4>Core concepts</h4>
+      <a class="sb-link" href="#manifold">Manifold</a>
+      <a class="sb-link" href="#fuel">Fuel &amp; limits</a>
+      <a class="sb-link" href="#tiers">Adaptive tiers</a>
+      <a class="sb-link" href="#scheduler">Scheduler</a>
+      <a class="sb-link" href="#state">Cross-call state</a>
+    </div>
+    <div class="sb-section">
+      <h4>Reference</h4>
+      <a class="sb-link" href="#cli">burn CLI</a>
+      <a class="sb-link" href="#node-compat">Node compat surface</a>
+      <a class="sb-link" href="#env">Environment vars</a>
+      <a class="sb-link" href="#crates">Workspace crates</a>
+      <a class="sb-link" href="#build">Building from source</a>
+    </div>
+  </aside>
+
+  <!-- =========== MAIN =========== -->
+  <main class="main">
+    <div class="crumb">
+      <a href="index.html">afterburner</a>
+      <span class="sep">/</span>
+      <a href="docs.html">docs</a>
+      <span class="sep">/</span>
+      <span class="cur">introduction</span>
+    </div>
+
+    <h1 class="doc-title">Afterburner Docs.</h1>
+    <p class="doc-lede">
+      A drop-in JavaScript runtime for Rust. Run real Node.js apps with <code class="mono">burn</code>, or embed the same engine in your Rust program with one crate. Hard resource limits and fine-grained capability controls are first-class. Every limit, every gate, configurable.
+    </p>
+    <div class="doc-meta">
+      <span class="pill"><span class="pill__dot"></span>v0.1 · stable</span>
+      <span class="pill">MSRV 1.90</span>
+      <span class="pill">2024 edition</span>
+      <span class="pill">Apache-2.0</span>
+    </div>
+
+    <!-- Hero card -->
+    <div class="hero-card">
+      <div class="hero-card__inner">
+        <div>
+          <h2>One crate. One binary.<br/>Zero <em>unsafe</em> in your code.</h2>
+          <p>Afterburner ships a <code>burn</code> CLI that runs Node apps unmodified, and an embeddable Rust crate behind a single ergonomic builder. The defaults are safe; the limits are yours to set.</p>
+          <div class="install" id="installCmd">
+            <span class="dollar">$</span>
+            <span style="color: var(--accent);">cargo add</span>
+            <span>afterburner</span>
+            <span style="margin-left: 16px; color: rgba(255,255,255,0.3);">·</span>
+            <span style="color: rgba(255,255,255,0.7); font-size: 11px;" id="copyBadge">Click to copy</span>
+          </div>
+        </div>
+        <img class="hero-card__art" src="art/afterburner-square.png" alt="" />
+      </div>
+    </div>
+
+    <article class="doc">
+
+      <h2 id="introduction"><span class="anchor">#</span>Introduction</h2>
+      <p>
+        Afterburner is a JavaScript runtime built in Rust. The <code>burn</code> binary runs your existing Node apps (<code>burn server.js</code>, <code>burn npm install</code>, <code>burn app.ts</code>), and the embeddable <code>afterburner</code> crate exposes the same engine to your Rust program. Every Node built-in (<code>fs</code>, <code>crypto</code>, <code>http</code>, <code>zlib</code>, <code>child_process</code>, …) is gated by a capability you configure per script.
+      </p>
+      <p>
+        Memory caps, deterministic fuel metering, an N-worker scheduler, and a fully sandboxed execution mode are the production-grade machinery underneath. The surface you touch is one builder and three methods (<code>register</code>, <code>run</code>, <code>unregister</code>), or just type <code>burn</code> at the shell.
+      </p>
+
+      <div class="callout callout--note">
+        <div class="callout__icon">i</div>
+        <div>
+          <strong>Drop-in promise.</strong>
+          <p>Code that runs under <code>node script.js</code> should run unchanged under <code>burn script.js</code>. Where it doesn't, that's a bug. File an issue with a Node.js docs link and a minimal repro.</p>
+        </div>
+      </div>
+
+      <h2 id="installation"><span class="anchor">#</span>Installation</h2>
+      <p>Add the facade crate to your <code>Cargo.toml</code>:</p>
+
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">Cargo.toml</span>
+          <button class="copy-btn" data-copy='afterburner = "0.1"'>Copy</button>
+        </div>
+<pre><span class="tok-com">[dependencies]</span>
+<span class="tok-mod">afterburner</span> = <span class="tok-str">"0.1"</span></pre>
+      </div>
+
+      <p>Or install the <code>burn</code> CLI:</p>
+
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">shell</span>
+          <button class="copy-btn" data-copy="cargo install afterburner --features bin">Copy</button>
+        </div>
+<pre>$ <span class="tok-mod">cargo install</span> afterburner --features bin
+$ <span class="tok-mod">burn</span> --version
+afterburner 0.1.0</pre>
+      </div>
+
+      <p>Nothing external is needed at runtime; the runtime is fully self-contained in the binary. See <a href="#build" style="color: var(--action);">Building from source</a> if you want to compile the workspace yourself.</p>
+
+      <h2 id="first-burn"><span class="anchor">#</span>Your first burn</h2>
+      <p>Five lines. Register a script, hand it some JSON, get JSON back:</p>
+
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">rust</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre><span class="tok-kw">use</span> afterburner::Afterburner;
+<span class="tok-kw">use</span> serde_json::json;
+
+<span class="tok-kw">fn</span> <span class="tok-fn">main</span>() -&gt; Result&lt;(), Box&lt;<span class="tok-kw">dyn</span> std::error::Error&gt;&gt; {
+    <span class="tok-kw">let</span> ab = Afterburner::<span class="tok-fn">new</span>()?;
+    <span class="tok-kw">let</span> id = ab.<span class="tok-fn">register</span>(<span class="tok-str">"module.exports = (d) =&gt; d.n + 1"</span>)?;
+    <span class="tok-kw">let</span> out = ab.<span class="tok-fn">run</span>(&amp;id, &amp;json!({ <span class="tok-str">"n"</span>: <span class="tok-num">41</span> }))?;
+    <span class="tok-fn">assert_eq!</span>(out, json!(<span class="tok-num">42</span>));
+    Ok(())
+}</pre>
+      </div>
+
+      <p><code>Afterburner::new()</code> uses the <strong>adaptive</strong> mode by default: a fast cold start on the first call, then a fully sandboxed execution path from the second call onward. You don't pick. It picks.</p>
+
+      <h2 id="manifold"><span class="anchor">#</span>The Manifold</h2>
+      <p>
+        Every host capability lives behind a <code>Manifold</code>. The library default is <code>Manifold::sealed()</code>, safe to hand untrusted user scripts. Everything else you grant explicitly.
+      </p>
+
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">rust</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre><span class="tok-kw">use</span> afterburner::{Afterburner, Manifold, FsAccess, NetAccess};
+
+<span class="tok-kw">let</span> ab = Afterburner::<span class="tok-fn">builder</span>()
+    .<span class="tok-fn">manifold</span>(Manifold {
+        fs:  FsAccess::<span class="tok-fn">ReadWrite</span>(vec![<span class="tok-str">"/var/data"</span>.into()]),
+        net: NetAccess::<span class="tok-fn">Allow</span>(vec![<span class="tok-str">"api.example.com"</span>.into()]),
+        crypto: <span class="tok-kw">true</span>,
+        ..Manifold::<span class="tok-fn">sealed</span>()
+    })
+    .<span class="tok-fn">build</span>()?;</pre>
+      </div>
+
+      <h3>Capabilities at a glance</h3>
+      <table class="doc-table">
+        <thead>
+          <tr><th>Capability</th><th>Field</th><th>Default</th><th>Variants</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Filesystem</td><td><code>fs</code></td><td><code>None</code></td><td><code>None</code> · <code>ReadOnly(roots)</code> · <code>ReadWrite(roots)</code></td></tr>
+          <tr><td>Network (out)</td><td><code>net</code></td><td><code>None</code></td><td><code>None</code> · <code>Allow(hosts)</code> · <code>All</code></td></tr>
+          <tr><td>Crypto</td><td><code>crypto</code></td><td><code>false</code></td><td><code>bool</code></td></tr>
+          <tr><td>Subprocess</td><td><code>child_process</code></td><td><code>false</code></td><td><code>bool</code> · <em>native path only</em></td></tr>
+          <tr><td>Environment</td><td><code>env</code></td><td><code>None</code></td><td><code>None</code> · <code>Allow(keys)</code></td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <div class="callout__icon">!</div>
+        <div>
+          <strong>The CLI defaults differ.</strong>
+          <p>The library default is <code>Manifold::sealed()</code>, which denies everything. The <code>burn</code> CLI defaults to <code>Manifold::open()</code> so Node scripts drop in without flags. Pass <code>--sandbox</code> to flip it back to sealed for untrusted input.</p>
+        </div>
+      </div>
+
+      <h2 id="fuel"><span class="anchor">#</span>Fuel, memory &amp; timeouts</h2>
+      <p>Three independent dimensions, all hard caps:</p>
+
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">rust</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre><span class="tok-kw">let</span> ab = Afterburner::<span class="tok-fn">builder</span>()
+    .<span class="tok-fn">fuel</span>(your_op_budget)         <span class="tok-com">// operation count budget</span>
+    .<span class="tok-fn">memory_bytes</span>(your_memory_cap)  <span class="tok-com">// per-script memory ceiling</span>
+    .<span class="tok-fn">timeout_ms</span>(your_deadline)      <span class="tok-com">// wall-clock kill switch</span>
+    .<span class="tok-fn">build</span>()?;</pre>
+      </div>
+
+      <ul>
+        <li><strong>Fuel</strong> meters JS bytecode operations. A tight loop trips the gauge in deterministic op-time, not wall-clock time, so behavior is reproducible across hosts. Pick whatever bound matches your workload.</li>
+        <li><strong>Memory</strong> is enforced by the sandbox allocator. Over-budget allocations return JS-side <code>OutOfMemory</code>, never an OOM kill of the host.</li>
+        <li><strong>Timeout</strong> is wall-clock; backstop for blocking work that doesn't burn fuel (e.g. host I/O).</li>
+      </ul>
+
+      <div class="callout callout--note">
+        <div class="callout__icon">i</div>
+        <div>
+          <strong>Nothing is hardcoded.</strong>
+          <p>The runtime ships sensible defaults, but every limit on this page is a knob you set per build, per call, or per CLI invocation (<code>--fuel</code>, <code>--memory</code>, <code>--timeout</code>, <code>--workers</code>). Pick what fits your workload.</p>
+        </div>
+      </div>
+
+      <h2 id="tiers"><span class="anchor">#</span>Adaptive execution (Flying Start)</h2>
+      <p>The default mode boots fast, then settles into the safer execution path without you noticing:</p>
+
+      <div class="arch-mini">
+        <div class="row"><div class="bar" style="background: var(--accent);"></div><div class="nm">Cold start</div><div class="ds">Sub-millisecond ignition path optimised for first-call latency.</div></div>
+        <div class="row"><div class="bar" style="background: var(--action);"></div><div class="nm">Warm path</div><div class="ds">Fully sandboxed execution with bytecode cached across calls.</div></div>
+        <div class="row"><div class="bar" style="background: var(--color-vibrant-orange);"></div><div class="nm">Hot path</div><div class="ds">Pooled instances, fuel-precharged, ~µs steady-state per call.</div></div>
+      </div>
+
+      <p>If you want to pin a single mode, the builder takes <code>.mode(Mode::Fast)</code> for the cold-start path or <code>.mode(Mode::Sandboxed)</code> for the locked-down path. <code>Mode::Adaptive</code> is the default.</p>
+
+      <h2 id="scheduler"><span class="anchor">#</span>Multi-threaded scheduling</h2>
+      <p>One flag turns a single-threaded runtime into an N-worker scheduler. Bounded per-worker queues plus a global injector; token-bucket admission keeps the system responsive under load; steal-when-idle keeps cores busy without thrashing locality. The width is yours to choose.</p>
+
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">rust</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre><span class="tok-kw">let</span> ab = Afterburner::<span class="tok-fn">builder</span>()
+    .<span class="tok-fn">threaded</span>(your_worker_count)    <span class="tok-com">// any N &gt;= 1</span>
+    .<span class="tok-fn">route_by</span>(RouteBy::<span class="tok-fn">HashKey</span>)    <span class="tok-com">// pin sessions to a worker</span>
+    .<span class="tok-fn">build</span>()?;
+
+<span class="tok-kw">for</span> row <span class="tok-kw">in</span> rows {
+    ab.<span class="tok-fn">submit</span>(&amp;id, &amp;row, row.session_key())?;
+}
+ab.<span class="tok-fn">drain</span>().<span class="tok-fn">await</span>?;            <span class="tok-com">// graceful shutdown</span></pre>
+      </div>
+
+      <h2 id="state"><span class="anchor">#</span>Cross-invocation state</h2>
+      <p>The custom <code>afterburner:state</code> module lets scripts share data across calls. The default <code>InMemoryStateStore</code> ships with the workspace; embedders can plug in their own (Redis, SQLite, …) by implementing the <code>StateStore</code> trait.</p>
+
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">rust · host side</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre><span class="tok-kw">use</span> afterburner_core::InMemoryStateStore;
+<span class="tok-kw">use</span> afterburner_wasi::{WasmCombustor, WasmConfig};
+
+<span class="tok-kw">let</span> store = InMemoryStateStore::<span class="tok-fn">shared</span>();
+<span class="tok-kw">let</span> combustor = WasmCombustor::<span class="tok-fn">new</span>(WasmConfig {
+    state_store: <span class="tok-fn">Some</span>(store.<span class="tok-fn">clone</span>()),
+})?;</pre>
+      </div>
+
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">javascript · script side</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre><span class="tok-kw">const</span> state = <span class="tok-fn">require</span>(<span class="tok-str">'afterburner:state'</span>);
+
+state.<span class="tok-fn">setJSON</span>(<span class="tok-str">'lastSeen'</span>, Date.<span class="tok-fn">now</span>());
+<span class="tok-kw">const</span> n = state.<span class="tok-fn">increment</span>(<span class="tok-str">'hits'</span>);
+
+module.exports = () =&gt; ({ hits: n });</pre>
+      </div>
+
+      <h2 id="cli"><span class="anchor">#</span>The <code>burn</code> CLI</h2>
+      <p>A Deno-style command-line runtime. Deny by default, grant with <code>--allow-*</code> flags.</p>
+
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">shell</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre>$ <span class="tok-mod">burn</span> ./script.js                          <span class="tok-com"># run a file</span>
+$ <span class="tok-mod">burn</span> -e <span class="tok-str">'module.exports = () =&gt; 42'</span>     <span class="tok-com"># eval inline</span>
+$ <span class="tok-fn">echo</span> <span class="tok-str">'{"n":21}'</span> | <span class="tok-mod">burn</span> thrust transform.js  <span class="tok-com"># UDF mode</span>
+$ <span class="tok-mod">burn</span> bench perf.js --iters 10000 --workers 8
+$ <span class="tok-mod">burn</span> repl                                   <span class="tok-com"># interactive</span>
+
+<span class="tok-com"># Deno-style capability grants</span>
+$ <span class="tok-mod">burn</span> --allow-net=<span class="tok-str">api.example.com,*.trusted.io</span> script.js
+$ <span class="tok-mod">burn</span> --allow-fs=<span class="tok-str">/tmp,/var/data</span> etl.js
+$ <span class="tok-mod">burn</span> --allow-env=<span class="tok-str">HOME,PATH</span> launcher.js
+$ <span class="tok-mod">burn</span> -A runall.js                            <span class="tok-com"># grant everything</span></pre>
+      </div>
+
+      <h3 id="cli-flags">Flag reference</h3>
+      <table class="doc-table">
+        <thead>
+          <tr><th>Flag</th><th>Effect</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>-e &lt;src&gt;</code></td><td>Evaluate inline source instead of loading a file.</td></tr>
+          <tr><td><code>thrust &lt;file&gt;</code></td><td>UDF mode: stdin → JSON → script → JSON → stdout, line-delimited.</td></tr>
+          <tr><td><code>bench &lt;file&gt;</code></td><td>Throughput smoke test with iteration + worker counts.</td></tr>
+          <tr><td><code>repl</code></td><td>Interactive evaluator with history and tab-complete.</td></tr>
+          <tr><td><code>--allow-net=&lt;hosts&gt;</code></td><td>Comma list, wildcards allowed (<code>*.trusted.io</code>).</td></tr>
+          <tr><td><code>--allow-fs=&lt;roots&gt;</code></td><td>Comma list of read-write roots. <code>--allow-fs-read</code> for read-only.</td></tr>
+          <tr><td><code>--allow-env=&lt;keys&gt;</code></td><td>Comma list of environment variable keys.</td></tr>
+          <tr><td><code>--sandbox</code></td><td>Flip CLI default from <code>open()</code> to <code>sealed()</code>.</td></tr>
+          <tr><td><code>-A</code></td><td>Grant everything. Useful for trusted scripts; never for untrusted input.</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="node-compat"><span class="anchor">#</span>Node compat surface</h2>
+      <p>Afterburner targets the <strong>Node.js 20.x LTS</strong> API surface. Pure-JS modules are always available; host-backed ones are gated by the <code>Manifold</code>.</p>
+
+      <h3>Always-on (pure JS)</h3>
+      <div class="compat-grid">
+        <div class="compat"><span class="ck ck--ok">✓</span>path</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>url</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>querystring</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>events</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>assert</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>buffer</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>util</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>string_decoder</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>stream</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>timers</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>process</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>console</div>
+      </div>
+
+      <h3>Host-backed (capability-gated)</h3>
+      <div class="compat-grid">
+        <div class="compat"><span class="ck ck--gated">⚿</span>fs</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>fs.promises</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>crypto</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>http</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>https</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>dns</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>child_process</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>os</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>zlib</div>
+      </div>
+
+      <h3>Web globals</h3>
+      <div class="compat-grid">
+        <div class="compat"><span class="ck ck--ok">✓</span>fetch</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>Request / Response</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>Headers</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>AbortController</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>URL</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>URLSearchParams</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>TextEncoder / Decoder</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>btoa / atob</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>structuredClone</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>queueMicrotask</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>performance.now</div>
+      </div>
+
+      <div class="callout callout--ok">
+        <div class="callout__icon">✓</div>
+        <div>
+          <strong>Custom modules</strong>
+          <p><code>require('afterburner:state')</code> for a cross-invocation key/value store. Implicitly available; the host installs the <code>StateStore</code>.</p>
+        </div>
+      </div>
+
+      <h2 id="env"><span class="anchor">#</span>Environment variables</h2>
+      <table class="doc-table">
+        <thead>
+          <tr><th>Variable</th><th>Default</th><th>Purpose</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>AFTERBURNER_LOG</code></td><td><code>warn</code></td><td>Level: <code>off</code> · <code>error</code> · <code>warn</code> · <code>info</code> · <code>debug</code> · <code>trace</code></td></tr>
+          <tr><td><code>AFTERBURNER_LOG_FORMAT</code></td><td><code>text</code></td><td>Reporter format: <code>text</code> (stderr) or <code>json</code> (stdout NDJSON)</td></tr>
+          <tr><td><code>AFTERBURNER_REBUILD_PLENUM</code></td><td>unset</td><td>Set to <code>1</code> to regenerate <code>generated/plenum_bundle.js</code>.</td></tr>
+        </tbody>
+      </table>
+
+      <p>Applications opt into logging with:</p>
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">rust</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre>afterburner_core::log::<span class="tok-fn">init</span>();  <span class="tok-com">// reads AFTERBURNER_LOG + _LOG_FORMAT</span></pre>
+      </div>
+
+      <h2 id="crates"><span class="anchor">#</span>Workspace crates</h2>
+      <p>Nine crates layered for replaceability. Drop down a level whenever the facade is too tight.</p>
+
+      <table class="doc-table">
+        <thead>
+          <tr><th>Crate</th><th>Purpose</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>afterburner</code></td><td>Facade: <code>Afterburner</code> + builder, <code>burn</code> binary, one ergonomic entry point.</td></tr>
+          <tr><td><code>afterburner-core</code></td><td><code>Combustor</code> trait, <code>Manifold</code>, <code>FuelGauge</code>, <code>BurnCache</code>, level-gated logging.</td></tr>
+          <tr><td><code>afterburner-ignite</code></td><td>Fast-path engine; thread-local runtimes for sub-millisecond ignition.</td></tr>
+          <tr><td><code>afterburner-wasi</code></td><td>Sandboxed engine; pooling allocator, instance pre-init, bytecode cache.</td></tr>
+          <tr><td><code>afterburner-node-compat</code></td><td>Node API polyfill bundle + Rust-backed host implementations. Bounded HTTP &amp; DNS with per-call timeouts.</td></tr>
+          <tr><td><code>afterburner-flow</code></td><td>High-level <code>FlowEngine::load / execute / unload</code> for pipeline-style usage.</td></tr>
+          <tr><td><code>afterburner-adaptive</code></td><td>Flying Start: fast → sandboxed tier switch.</td></tr>
+          <tr><td><code>afterburner-thrust</code></td><td>Multi-threaded scheduler. Bounded queues, token-bucket admission, steal-when-idle, graceful drain.</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="build"><span class="anchor">#</span>Building from source</h2>
+      <p>The pre-built <code>burn</code> binary needs nothing external at runtime. To compile the workspace yourself you need a recent Rust toolchain (2024 edition, MSRV 1.90+) and the system C toolchain. That's it. <code>cargo build</code> is reproducible and offline; nothing is downloaded mid-build beyond crate dependencies.</p>
+
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">shell</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre>$ <span class="tok-mod">git</span> clone https://github.com/vertexclique/afterburner
+$ <span class="tok-fn">cd</span> afterburner
+$ <span class="tok-mod">cargo</span> build --release --features bin
+$ ./target/release/<span class="tok-mod">burn</span> --version</pre>
+      </div>
+
+      <div class="callout callout--note">
+        <div class="callout__icon">i</div>
+        <div>
+          <strong>Reproducible by design.</strong>
+          <p>All execution-engine artifacts are committed in-tree and pulled via <code>include_bytes!</code>. <code>cargo build</code> is fully offline once dependencies are resolved. No extra toolchains on every host.</p>
+        </div>
+      </div>
+
+      <!-- pagefoot -->
+      <div class="pagefoot">
+        <a class="pagefoot__btn" href="index.html">
+          <div class="l">← Previous</div>
+          <div class="t">Landing</div>
+        </a>
+        <a class="pagefoot__btn" href="https://github.com/vertexclique/afterburner" style="text-align: right;">
+          <div class="l">Next →</div>
+          <div class="t">Examples on GitHub</div>
+        </a>
+      </div>
+
+    </article>
+  </main>
+
+  <!-- =========== TOC =========== -->
+  <aside class="toc">
+    <h4>On this page</h4>
+    <ul>
+      <li><a href="#introduction">Introduction</a></li>
+      <li><a href="#installation">Installation</a></li>
+      <li><a href="#first-burn">Your first burn</a></li>
+      <li><a href="#manifold">Manifold</a></li>
+      <li><a href="#fuel">Fuel &amp; limits</a></li>
+      <li><a href="#tiers">Adaptive tiers</a></li>
+      <li><a href="#scheduler">Scheduler</a></li>
+      <li><a href="#state">Cross-call state</a></li>
+      <li><a href="#cli">burn CLI</a></li>
+      <li class="toc-sub"><a href="#cli-flags">Flag reference</a></li>
+      <li><a href="#node-compat">Node compat</a></li>
+      <li><a href="#env">Environment vars</a></li>
+      <li><a href="#crates">Workspace crates</a></li>
+      <li><a href="#build">Building from source</a></li>
+    </ul>
+  </aside>
+
+</div>
+
+<script>
+  /* sidebar + toc highlight on scroll */
+  const sections = [...document.querySelectorAll('.doc h2[id]')];
+  const sbLinks  = [...document.querySelectorAll('.sb-link[href^="#"]')];
+  const tocLinks = [...document.querySelectorAll('.toc a[href^="#"]')];
+
+  function highlight() {
+    const top = window.scrollY + 110;
+    let current = sections[0]?.id;
+    for (const s of sections) {
+      if (s.offsetTop <= top) current = s.id;
+    }
+    sbLinks.forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + current));
+    tocLinks.forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + current));
+  }
+  document.addEventListener('scroll', highlight, { passive: true });
+  highlight();
+
+  /* burn buttons — play video on hover */
+  document.querySelectorAll('.btn--burn').forEach(btn => {
+    const vid = btn.querySelector('.burn-bg');
+    if (!vid) return;
+    const play = () => {
+      try { vid.currentTime = 0; } catch(e){}
+      vid.play().catch(() => {});
+    };
+    const pause = () => { vid.pause(); };
+    btn.addEventListener('mouseenter', play);
+    btn.addEventListener('focus', play);
+    btn.addEventListener('mouseleave', pause);
+    btn.addEventListener('blur', pause);
+  });
+
+  /* copy buttons */
+  document.querySelectorAll('.copy-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const target = btn.dataset.copy ?? btn.closest('.codeblock').querySelector('pre').textContent;
+      navigator.clipboard.writeText(target.trim());
+      const old = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(() => btn.textContent = old, 1200);
+    });
+  });
+
+  /* hero install copy */
+  document.getElementById('installCmd').addEventListener('click', () => {
+    navigator.clipboard.writeText('cargo add afterburner');
+    const b = document.getElementById('copyBadge');
+    b.textContent = 'Copied!';
+    setTimeout(() => b.textContent = 'Click to copy', 1400);
+  });
+
+  /* search shortcut */
+  document.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+      e.preventDefault();
+      document.querySelector('.nav__search input')?.focus();
+    }
+  });
+</script>
+
+<!-- ============= TWEAKS PANEL ============= -->
+<aside class="tweaks" id="tweaks" aria-label="Tweaks">
+  <div class="tweaks__head">
+    <span class="tweaks__title">Tweaks</span>
+    <button class="tweaks__close" id="tw-close" aria-label="Close">×</button>
+  </div>
+  <div class="tweaks__body">
+    <div class="tweaks__group">
+      <div class="tweaks__label"><span>Mood</span></div>
+      <div class="tweaks__seg" role="radiogroup" aria-label="Mood">
+        <button data-tw-key="mood" data-tw-val="violet">Violet</button>
+        <button data-tw-key="mood" data-tw-val="inferno">Inferno</button>
+        <button data-tw-key="mood" data-tw-val="cyber">Cyber</button>
+      </div>
+      <p class="tweaks__hint">Reshapes accent, gradient, and aurora colors across the docs.</p>
+    </div>
+
+    <div class="tweaks__group">
+      <div class="tweaks__label"><span>Density</span></div>
+      <div class="tweaks__seg" role="radiogroup" aria-label="Density">
+        <button data-tw-key="density" data-tw-val="airy">Airy</button>
+        <button data-tw-key="density" data-tw-val="standard">Standard</button>
+        <button data-tw-key="density" data-tw-val="compressed">Compressed</button>
+      </div>
+      <p class="tweaks__hint">Scales the vertical rhythm of every section.</p>
+    </div>
+
+    <div class="tweaks__group">
+      <div class="tweaks__label"><span>Code theme</span></div>
+      <div class="tweaks__seg" role="radiogroup" aria-label="Code theme">
+        <button data-tw-key="codeTheme" data-tw-val="auto">Auto</button>
+        <button data-tw-key="codeTheme" data-tw-val="midnight">Midnight</button>
+        <button data-tw-key="codeTheme" data-tw-val="inferno">Inferno</button>
+        <button data-tw-key="codeTheme" data-tw-val="matrix">Matrix</button>
+      </div>
+      <p class="tweaks__hint">Recolors every codeblock and adds an ember shimmer. Auto follows the mood.</p>
+    </div>
+
+    <div class="tweaks__group">
+      <div class="tweaks__label"><span>Glow intensity</span><span class="v" id="tw-intensity-val">70</span></div>
+      <input type="range" id="tw-intensity" class="tweaks__slider" min="0" max="100" step="5" value="70" />
+      <p class="tweaks__hint">Strength of the ambient gradient highlights and accents.</p>
+    </div>
+  </div>
+</aside>
+
+<script>
+  /* TWEAKS — defaults declared inline so the host can rewrite them on disk. */
+  window.TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+    "mood": "inferno",
+    "density": "standard",
+    "intensity": 70,
+    "codeTheme": "auto"
+  }/*EDITMODE-END*/;
+</script>
+<script src="tweaks.js"></script>
+
+</body>
+</html>

@@ -48,10 +48,13 @@ pub fn hash(
     let algo = algo_from_type(ty);
     // Defaults match the npm package's documented defaults.
     let t = if time_cost == 0 { 3 } else { time_cost };
-    let m = if memory_cost_kib == 0 { 65_536 } else { memory_cost_kib };
+    let m = if memory_cost_kib == 0 {
+        65_536
+    } else {
+        memory_cost_kib
+    };
     let p = if parallelism == 0 { 4 } else { parallelism };
-    let params = Params::new(m, t, p, None)
-        .map_err(|e| format!("argon2 params: {e}"))?;
+    let params = Params::new(m, t, p, None).map_err(|e| format!("argon2 params: {e}"))?;
     let argon = Argon2::new(algo, Version::V0x13, params);
 
     // `SaltString::generate` pulls from OsRng — matches the npm
@@ -67,8 +70,7 @@ pub fn hash(
 /// the verifier. Returns `Ok(true)` on match, `Ok(false)` on
 /// mismatch, `Err` if the hash string is malformed.
 pub fn verify(phc_hash: &str, password: &str) -> Result<bool, String> {
-    let parsed = PasswordHash::new(phc_hash)
-        .map_err(|e| format!("argon2 parse hash: {e}"))?;
+    let parsed = PasswordHash::new(phc_hash).map_err(|e| format!("argon2 parse hash: {e}"))?;
     // Let the argon2 algorithm handle verification; hash parameters
     // come from the stored string so we don't need to recompute.
     let argon = Argon2::default();
@@ -89,8 +91,7 @@ pub fn needs_rehash(
     memory_cost_kib: u32,
     parallelism: u32,
 ) -> Result<bool, String> {
-    let parsed = PasswordHash::new(phc_hash)
-        .map_err(|e| format!("argon2 parse hash: {e}"))?;
+    let parsed = PasswordHash::new(phc_hash).map_err(|e| format!("argon2 parse hash: {e}"))?;
     // Compare algorithm first — a type change always requires rehash.
     let target_algo = algo_from_type(ty);
     let target_ident = target_algo.ident();
@@ -101,7 +102,11 @@ pub fn needs_rehash(
     // `parsed.params`. Missing parameter means "was at some default"
     // — treat as needing rehash if caller explicitly requested one.
     let t = if time_cost == 0 { 3 } else { time_cost };
-    let m = if memory_cost_kib == 0 { 65_536 } else { memory_cost_kib };
+    let m = if memory_cost_kib == 0 {
+        65_536
+    } else {
+        memory_cost_kib
+    };
     let p = if parallelism == 0 { 4 } else { parallelism };
     let get_num = |key: &str| -> Option<u64> {
         parsed

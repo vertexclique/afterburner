@@ -67,10 +67,7 @@ fn sandbox_without_allow_net_blocks_connect() {
         .expect("spawn burn");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("SEALED_OK"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -108,21 +105,12 @@ fn allow_list_blocks_unlisted_host() {
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
-        .args([
-            "--sandbox",
-            "--allow-net",
-            "127.0.0.2",
-            "-e",
-            &parent,
-        ])
+        .args(["--sandbox", "--allow-net", "127.0.0.2", "-e", &parent])
         .output()
         .expect("spawn burn");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("FILTER_OK"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -160,21 +148,12 @@ fn allow_list_permits_listed_host() {
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
-        .args([
-            "--sandbox",
-            "--allow-net",
-            "127.0.0.1",
-            "-e",
-            &parent,
-        ])
+        .args(["--sandbox", "--allow-net", "127.0.0.1", "-e", &parent])
         .output()
         .expect("spawn burn");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("ALLOWED_OK"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"

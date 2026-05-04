@@ -114,9 +114,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     // server.close() — releases the port + aborts the axum task.
     let _ = globals.set(
         "__host_http_close",
-        Func::from(|server_id: f64| -> f64 {
-            unsafe { host_http_close(server_id as i32) as f64 }
-        }),
+        Func::from(|server_id: f64| -> f64 { unsafe { host_http_close(server_id as i32) as f64 } }),
     );
 
     // require() calls this for TS / ESM files. Returns the
@@ -147,13 +145,16 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
                 // already looks for (`__HOST_ERR__:` prefix lets the
                 // require resolver convert to a typed Error).
                 let detail = match n {
-                    -1 => alloc::string::String::from("no transpile hook (build with `ts` feature)"),
-                    -2 => alloc::string::String::from("transpile output too large for guest buffer"),
+                    -1 => {
+                        alloc::string::String::from("no transpile hook (build with `ts` feature)")
+                    }
+                    -2 => {
+                        alloc::string::String::from("transpile output too large for guest buffer")
+                    }
                     _ => {
                         let mut err_buf = alloc::vec![0u8; 2048];
-                        let err_n = unsafe {
-                            host_last_error(err_buf.as_mut_ptr(), err_buf.len() as u32)
-                        };
+                        let err_n =
+                            unsafe { host_last_error(err_buf.as_mut_ptr(), err_buf.len() as u32) };
                         if err_n > 0 {
                             String::from_utf8(err_buf[..err_n as usize].to_vec())
                                 .unwrap_or_else(|_| alloc::string::String::from("transpile error"))
@@ -223,12 +224,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
             let pw = password.as_bytes();
             let h = hash.as_bytes();
             let n = unsafe {
-                host_shadow_bcrypt_verify(
-                    pw.as_ptr(),
-                    pw.len() as u32,
-                    h.as_ptr(),
-                    h.len() as u32,
-                )
+                host_shadow_bcrypt_verify(pw.as_ptr(), pw.len() as u32, h.as_ptr(), h.len() as u32)
             };
             // `-1`/`0`/`1` preserved across the f64 bridge; JS side
             // branches on the value.
@@ -240,9 +236,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
         Func::from(|rounds: f64| -> String {
             let cap: u32 = 64;
             let mut buf = alloc::vec![0u8; cap as usize];
-            let n = unsafe {
-                host_shadow_bcrypt_gen_salt(rounds as i32, buf.as_mut_ptr(), cap)
-            };
+            let n = unsafe { host_shadow_bcrypt_gen_salt(rounds as i32, buf.as_mut_ptr(), cap) };
             if n < 0 {
                 return host_err_or_default("bcrypt gen_salt failed");
             }
@@ -297,12 +291,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
             let h = hash.as_bytes();
             let pw = password.as_bytes();
             let n = unsafe {
-                host_shadow_argon2_verify(
-                    h.as_ptr(),
-                    h.len() as u32,
-                    pw.as_ptr(),
-                    pw.len() as u32,
-                )
+                host_shadow_argon2_verify(h.as_ptr(), h.len() as u32, pw.as_ptr(), pw.len() as u32)
             };
             n as f64
         }),
@@ -310,12 +299,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     let _ = globals.set(
         "__host_shadow_argon2_needs_rehash",
         Func::from(
-            |hash: String,
-             ty: f64,
-             time_cost: f64,
-             memory_cost: f64,
-             parallelism: f64|
-             -> f64 {
+            |hash: String, ty: f64, time_cost: f64, memory_cost: f64, parallelism: f64| -> f64 {
                 let h = hash.as_bytes();
                 let n = unsafe {
                     host_shadow_argon2_needs_rehash(
@@ -338,49 +322,65 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     // reasonable payloads including ~2 KB RSA signatures.
     let _ = globals.set(
         "__host_shadow_jwt_sign",
-        Func::from(|payload_json: String, secret: String, opts_json: String| -> String {
-            let pj = payload_json.as_bytes();
-            let s = secret.as_bytes();
-            let oj = opts_json.as_bytes();
-            let cap: u32 = 4096;
-            let mut buf = alloc::vec![0u8; cap as usize];
-            let n = unsafe {
-                host_shadow_jwt_sign(
-                    pj.as_ptr(), pj.len() as u32,
-                    s.as_ptr(), s.len() as u32,
-                    oj.as_ptr(), oj.len() as u32,
-                    buf.as_mut_ptr(), cap,
-                )
-            };
-            if n < 0 { return host_err_or_default("jwt sign failed"); }
-            match String::from_utf8(buf[..n as usize].to_vec()) {
-                Ok(s) => s,
-                Err(_) => alloc::string::String::from("__HOST_ERR__:jwt sign not utf-8"),
-            }
-        }),
+        Func::from(
+            |payload_json: String, secret: String, opts_json: String| -> String {
+                let pj = payload_json.as_bytes();
+                let s = secret.as_bytes();
+                let oj = opts_json.as_bytes();
+                let cap: u32 = 4096;
+                let mut buf = alloc::vec![0u8; cap as usize];
+                let n = unsafe {
+                    host_shadow_jwt_sign(
+                        pj.as_ptr(),
+                        pj.len() as u32,
+                        s.as_ptr(),
+                        s.len() as u32,
+                        oj.as_ptr(),
+                        oj.len() as u32,
+                        buf.as_mut_ptr(),
+                        cap,
+                    )
+                };
+                if n < 0 {
+                    return host_err_or_default("jwt sign failed");
+                }
+                match String::from_utf8(buf[..n as usize].to_vec()) {
+                    Ok(s) => s,
+                    Err(_) => alloc::string::String::from("__HOST_ERR__:jwt sign not utf-8"),
+                }
+            },
+        ),
     );
     let _ = globals.set(
         "__host_shadow_jwt_verify",
-        Func::from(|token: String, secret: String, opts_json: String| -> String {
-            let t = token.as_bytes();
-            let s = secret.as_bytes();
-            let oj = opts_json.as_bytes();
-            let cap: u32 = 16 * 1024;
-            let mut buf = alloc::vec![0u8; cap as usize];
-            let n = unsafe {
-                host_shadow_jwt_verify(
-                    t.as_ptr(), t.len() as u32,
-                    s.as_ptr(), s.len() as u32,
-                    oj.as_ptr(), oj.len() as u32,
-                    buf.as_mut_ptr(), cap,
-                )
-            };
-            if n < 0 { return host_err_or_default("jwt verify failed"); }
-            match String::from_utf8(buf[..n as usize].to_vec()) {
-                Ok(s) => s,
-                Err(_) => alloc::string::String::from("__HOST_ERR__:jwt verify not utf-8"),
-            }
-        }),
+        Func::from(
+            |token: String, secret: String, opts_json: String| -> String {
+                let t = token.as_bytes();
+                let s = secret.as_bytes();
+                let oj = opts_json.as_bytes();
+                let cap: u32 = 16 * 1024;
+                let mut buf = alloc::vec![0u8; cap as usize];
+                let n = unsafe {
+                    host_shadow_jwt_verify(
+                        t.as_ptr(),
+                        t.len() as u32,
+                        s.as_ptr(),
+                        s.len() as u32,
+                        oj.as_ptr(),
+                        oj.len() as u32,
+                        buf.as_mut_ptr(),
+                        cap,
+                    )
+                };
+                if n < 0 {
+                    return host_err_or_default("jwt verify failed");
+                }
+                match String::from_utf8(buf[..n as usize].to_vec()) {
+                    Ok(s) => s,
+                    Err(_) => alloc::string::String::from("__HOST_ERR__:jwt verify not utf-8"),
+                }
+            },
+        ),
     );
     let _ = globals.set(
         "__host_shadow_jwt_decode",
@@ -389,12 +389,11 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
             let cap: u32 = 16 * 1024;
             let mut buf = alloc::vec![0u8; cap as usize];
             let n = unsafe {
-                host_shadow_jwt_decode(
-                    t.as_ptr(), t.len() as u32,
-                    buf.as_mut_ptr(), cap,
-                )
+                host_shadow_jwt_decode(t.as_ptr(), t.len() as u32, buf.as_mut_ptr(), cap)
             };
-            if n < 0 { return host_err_or_default("jwt decode failed"); }
+            if n < 0 {
+                return host_err_or_default("jwt decode failed");
+            }
             match String::from_utf8(buf[..n as usize].to_vec()) {
                 Ok(s) => s,
                 Err(_) => alloc::string::String::from("__HOST_ERR__:jwt decode not utf-8"),
@@ -442,12 +441,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
             let pb = path.as_bytes();
             let db = worker_data.as_bytes();
             unsafe {
-                host_worker_spawn(
-                    pb.as_ptr(),
-                    pb.len() as u32,
-                    db.as_ptr(),
-                    db.len() as u32,
-                ) as f64
+                host_worker_spawn(pb.as_ptr(), pb.len() as u32, db.as_ptr(), db.len() as u32) as f64
             }
         }),
     );
@@ -540,28 +534,20 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
         "__host_net_write",
         Func::from(|conn_id: f64, payload_b64: String| -> f64 {
             let pb = payload_b64.as_bytes();
-            unsafe {
-                host_net_write(conn_id as i32, pb.as_ptr(), pb.len() as u32) as f64
-            }
+            unsafe { host_net_write(conn_id as i32, pb.as_ptr(), pb.len() as u32) as f64 }
         }),
     );
     let _ = globals.set(
         "__host_net_end",
-        Func::from(|conn_id: f64| -> f64 {
-            unsafe { host_net_end(conn_id as i32) as f64 }
-        }),
+        Func::from(|conn_id: f64| -> f64 { unsafe { host_net_end(conn_id as i32) as f64 } }),
     );
     let _ = globals.set(
         "__host_net_destroy",
-        Func::from(|conn_id: f64| -> f64 {
-            unsafe { host_net_destroy(conn_id as i32) as f64 }
-        }),
+        Func::from(|conn_id: f64| -> f64 { unsafe { host_net_destroy(conn_id as i32) as f64 } }),
     );
     let _ = globals.set(
         "__host_net_pending",
-        Func::from(|conn_id: f64| -> f64 {
-            unsafe { host_net_pending(conn_id as i32) as f64 }
-        }),
+        Func::from(|conn_id: f64| -> f64 { unsafe { host_net_pending(conn_id as i32) as f64 } }),
     );
     let _ = globals.set(
         "__host_net_set_no_delay",
@@ -617,28 +603,20 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
         "__host_tls_write",
         Func::from(|conn_id: f64, payload_b64: String| -> f64 {
             let pb = payload_b64.as_bytes();
-            unsafe {
-                host_tls_write(conn_id as i32, pb.as_ptr(), pb.len() as u32) as f64
-            }
+            unsafe { host_tls_write(conn_id as i32, pb.as_ptr(), pb.len() as u32) as f64 }
         }),
     );
     let _ = globals.set(
         "__host_tls_end",
-        Func::from(|conn_id: f64| -> f64 {
-            unsafe { host_tls_end(conn_id as i32) as f64 }
-        }),
+        Func::from(|conn_id: f64| -> f64 { unsafe { host_tls_end(conn_id as i32) as f64 } }),
     );
     let _ = globals.set(
         "__host_tls_destroy",
-        Func::from(|conn_id: f64| -> f64 {
-            unsafe { host_tls_destroy(conn_id as i32) as f64 }
-        }),
+        Func::from(|conn_id: f64| -> f64 { unsafe { host_tls_destroy(conn_id as i32) as f64 } }),
     );
     let _ = globals.set(
         "__host_tls_pending",
-        Func::from(|conn_id: f64| -> f64 {
-            unsafe { host_tls_pending(conn_id as i32) as f64 }
-        }),
+        Func::from(|conn_id: f64| -> f64 { unsafe { host_tls_pending(conn_id as i32) as f64 } }),
     );
     let _ = globals.set(
         "__host_tls_listen",
@@ -681,19 +659,13 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
         "__host_dgram_bind",
         Func::from(|host: String, port: f64| -> f64 {
             let hb = host.as_bytes();
-            unsafe {
-                host_dgram_bind(hb.as_ptr(), hb.len() as u32, port as i32) as f64
-            }
+            unsafe { host_dgram_bind(hb.as_ptr(), hb.len() as u32, port as i32) as f64 }
         }),
     );
     let _ = globals.set(
         "__host_dgram_send",
         Func::from(
-            |socket_id: f64,
-             host: String,
-             port: f64,
-             payload_b64: String|
-             -> f64 {
+            |socket_id: f64, host: String, port: f64, payload_b64: String| -> f64 {
                 let hb = host.as_bytes();
                 let pb = payload_b64.as_bytes();
                 unsafe {
@@ -718,9 +690,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     let _ = globals.set(
         "__host_dgram_address",
         Func::from(|socket_id: f64| -> String {
-            match call_read(|out, cap| unsafe {
-                host_dgram_address(socket_id as i32, out, cap)
-            }) {
+            match call_read(|out, cap| unsafe { host_dgram_address(socket_id as i32, out, cap) }) {
                 Ok(s) => s,
                 Err(e) => format!("__HOST_ERR__:{e}"),
             }
@@ -893,16 +863,12 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     );
     let _ = globals.set(
         "__host_wasm_drop_module",
-        Func::from(|id: f64| -> f64 {
-            unsafe { host_wasm_drop_module(id as i64) as f64 }
-        }),
+        Func::from(|id: f64| -> f64 { unsafe { host_wasm_drop_module(id as i64) as f64 } }),
     );
     let _ = globals.set(
         "__host_wasm_module_exports",
         Func::from(|id: f64| -> String {
-            match call_read(|out, cap| unsafe {
-                host_wasm_module_exports(id as i64, out, cap)
-            }) {
+            match call_read(|out, cap| unsafe { host_wasm_module_exports(id as i64, out, cap) }) {
                 Ok(s) => s,
                 Err(e) => alloc::format!("__HOST_ERR__:{e}"),
             }
@@ -911,9 +877,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     let _ = globals.set(
         "__host_wasm_module_imports",
         Func::from(|id: f64| -> String {
-            match call_read(|out, cap| unsafe {
-                host_wasm_module_imports(id as i64, out, cap)
-            }) {
+            match call_read(|out, cap| unsafe { host_wasm_module_imports(id as i64, out, cap) }) {
                 Ok(s) => s,
                 Err(e) => alloc::format!("__HOST_ERR__:{e}"),
             }
@@ -927,42 +891,36 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     );
     let _ = globals.set(
         "__host_wasm_drop_instance",
-        Func::from(|id: f64| -> f64 {
-            unsafe { host_wasm_drop_instance(id as i64) as f64 }
-        }),
+        Func::from(|id: f64| -> f64 { unsafe { host_wasm_drop_instance(id as i64) as f64 } }),
     );
     let _ = globals.set(
         "__host_wasm_call_export",
-        Func::from(|instance_id: f64, name: String, args_json: String| -> String {
-            let nb = name.as_bytes();
-            let ab = args_json.as_bytes();
-            match call_read(|out, cap| unsafe {
-                host_wasm_call_export(
-                    instance_id as i64,
-                    nb.as_ptr(),
-                    nb.len() as u32,
-                    ab.as_ptr(),
-                    ab.len() as u32,
-                    out,
-                    cap,
-                )
-            }) {
-                Ok(s) => s,
-                Err(e) => alloc::format!("__HOST_ERR__:{e}"),
-            }
-        }),
+        Func::from(
+            |instance_id: f64, name: String, args_json: String| -> String {
+                let nb = name.as_bytes();
+                let ab = args_json.as_bytes();
+                match call_read(|out, cap| unsafe {
+                    host_wasm_call_export(
+                        instance_id as i64,
+                        nb.as_ptr(),
+                        nb.len() as u32,
+                        ab.as_ptr(),
+                        ab.len() as u32,
+                        out,
+                        cap,
+                    )
+                }) {
+                    Ok(s) => s,
+                    Err(e) => alloc::format!("__HOST_ERR__:{e}"),
+                }
+            },
+        ),
     );
     let _ = globals.set(
         "__host_wasm_memory_read",
         Func::from(|instance_id: f64, offset: f64, len: f64| -> String {
             match call_read(|out, cap| unsafe {
-                host_wasm_memory_read(
-                    instance_id as i64,
-                    offset as i32,
-                    len as i32,
-                    out,
-                    cap,
-                )
+                host_wasm_memory_read(instance_id as i64, offset as i32, len as i32, out, cap)
             }) {
                 Ok(s) => s,
                 Err(e) => alloc::format!("__HOST_ERR__:{e}"),

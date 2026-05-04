@@ -50,7 +50,6 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
-
 pub type WorkerId = i32;
 
 mod frame {
@@ -477,13 +476,7 @@ impl DaemonWorkers {
         stdin_tx.send(serde_json::to_vec(&init_frame).unwrap_or_default());
 
         // HopscotchMap insert is lock-free.
-        parent.active.insert(
-            id,
-            WorkerHandle {
-                stdin_tx,
-                kill,
-            },
-        );
+        parent.active.insert(id, WorkerHandle { stdin_tx, kill });
         parent.alive.fetch_add(1, Ordering::Release);
 
         id
@@ -654,7 +647,8 @@ fn read_init_frame_from_stdin(max_bytes: usize) -> Result<InitPayload, ChildInit
     let thread_id = v
         .get("thread_id")
         .and_then(|x| x.as_i64())
-        .ok_or_else(|| ChildInitError::InvalidFrame("missing thread_id".into()))? as WorkerId;
+        .ok_or_else(|| ChildInitError::InvalidFrame("missing thread_id".into()))?
+        as WorkerId;
     let worker_data = v
         .get("worker_data")
         .and_then(|x| x.as_str())
@@ -672,9 +666,7 @@ fn map_io(e: FrameReadError) -> ChildInitError {
         FrameReadError::TooLarge(n) => {
             ChildInitError::InvalidFrame(format!("frame too large: {n} bytes"))
         }
-        FrameReadError::Truncated => {
-            ChildInitError::InvalidFrame("truncated frame body".into())
-        }
+        FrameReadError::Truncated => ChildInitError::InvalidFrame("truncated frame body".into()),
         FrameReadError::Io(io) => ChildInitError::Io(io),
     }
 }

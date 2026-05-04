@@ -59,13 +59,9 @@ fn spawn_tls_echo_server(certs: &TestCerts) -> u16 {
     // tokio runtime has fully set up.
     let std_listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = std_listener.local_addr().expect("local_addr").port();
-    std_listener
-        .set_nonblocking(true)
-        .expect("set_nonblocking");
+    std_listener.set_nonblocking(true).expect("set_nonblocking");
 
-    let cert_chain = vec![
-        CertificateDer::from(certs.cert_der.to_vec()),
-    ];
+    let cert_chain = vec![CertificateDer::from(certs.cert_der.to_vec())];
     let key = parse_pem_key(&certs.key_pem);
     let server_config = Arc::new(
         ServerConfig::builder()
@@ -168,10 +164,7 @@ fn round_trip_echo() {
         .expect("spawn burn");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("TLS_ROUND_TRIP_OK"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -214,10 +207,7 @@ fn handshake_failure_self_signed_with_strict_verification() {
         .expect("spawn burn");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("HANDSHAKE_FAIL"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -259,10 +249,7 @@ fn destroy_kills_connection() {
         .expect("spawn burn");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("CLOSED_OK destroyed=true"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -329,8 +316,8 @@ fn burn_serves_tls_and_host_client_echoes() {
         .with_no_client_auth();
 
     let server_name = rustls::pki_types::ServerName::try_from("localhost").expect("sni");
-    let mut conn = rustls::ClientConnection::new(Arc::new(client_config), server_name)
-        .expect("client conn");
+    let mut conn =
+        rustls::ClientConnection::new(Arc::new(client_config), server_name).expect("client conn");
     let mut tcp = std::net::TcpStream::connect(("127.0.0.1", port)).expect("tcp connect");
     let mut tls = rustls::Stream::new(&mut conn, &mut tcp);
     tls.write_all(b"abc-from-host").expect("write");
@@ -345,8 +332,6 @@ fn burn_serves_tls_and_host_client_echoes() {
         got.extend_from_slice(&buf[..n]);
     }
     assert_eq!(&got, b"abc-from-host");
-    drop(tls);
-    drop(tcp);
     child.kill().ok();
     child.wait().ok();
 }
@@ -358,9 +343,7 @@ fn alpn_echo_negotiates_protocol() {
     // Echo server with ALPN advertising "burn-test/1".
     let std_listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = std_listener.local_addr().expect("local_addr").port();
-    std_listener
-        .set_nonblocking(true)
-        .expect("set_nonblocking");
+    std_listener.set_nonblocking(true).expect("set_nonblocking");
 
     let cert_chain = vec![CertificateDer::from(certs.cert_der.to_vec())];
     let key = parse_pem_key(&certs.key_pem);
@@ -379,17 +362,17 @@ fn alpn_echo_negotiates_protocol() {
         rt.block_on(async move {
             let tokio_listener = TokioListener::from_std(std_listener).expect("from_std");
             let acceptor = TlsAcceptor::from(server_config);
-            if let Ok((stream, _)) = tokio_listener.accept().await {
-                if let Ok(mut tls) = acceptor.accept(stream).await {
-                    let mut buf = [0u8; 4096];
-                    while let Ok(n) = tls.read(&mut buf).await {
-                        if n == 0 {
-                            break;
-                        }
-                        let _ = tls.write_all(&buf[..n]).await;
+            if let Ok((stream, _)) = tokio_listener.accept().await
+                && let Ok(mut tls) = acceptor.accept(stream).await
+            {
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = tls.read(&mut buf).await {
+                    if n == 0 {
+                        break;
                     }
-                    let _ = tls.shutdown().await;
+                    let _ = tls.write_all(&buf[..n]).await;
                 }
+                let _ = tls.shutdown().await;
             }
         });
     });
@@ -424,10 +407,7 @@ fn alpn_echo_negotiates_protocol() {
         .expect("spawn burn");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("ALPN=burn-test/1"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -836,8 +816,5 @@ fn ip_helpers() {
         .expect("spawn burn");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "stdout: {stdout}");
-    assert!(
-        stdout.contains("IP=[true,true,4]"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("IP=[true,true,4]"), "stdout: {stdout}");
 }

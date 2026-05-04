@@ -22,8 +22,7 @@
 use crate::AfterburnerError;
 use crate::wasm::{
     DaemonDgram, DaemonHttp, DaemonNet, DaemonRuntime, DaemonTls, DaemonWorkers, DgramEvent,
-    NetEvent, TlsEvent,
-    WasmCombustor, WasmConfig, WorkerConfig, WorkerEvent,
+    NetEvent, TlsEvent, WasmCombustor, WasmConfig, WorkerConfig, WorkerEvent,
 };
 use crate::{EnvAccess, ScriptInvocation};
 use anyhow::{Context, Result};
@@ -507,7 +506,10 @@ fn tls_event_to_envelope(evt: &TlsEvent) -> (serde_json::Value, Option<i32>) {
             }),
             None,
         ),
-        TlsEvent::Data { conn_id, payload_b64 } => (
+        TlsEvent::Data {
+            conn_id,
+            payload_b64,
+        } => (
             serde_json::json!({
                 "kind": "tls-data",
                 "conn_id": conn_id,
@@ -531,7 +533,11 @@ fn tls_event_to_envelope(evt: &TlsEvent) -> (serde_json::Value, Option<i32>) {
             }),
             Some(*conn_id),
         ),
-        TlsEvent::Error { conn_id, message, code } => (
+        TlsEvent::Error {
+            conn_id,
+            message,
+            code,
+        } => (
             serde_json::json!({
                 "kind": "tls-error",
                 "conn_id": conn_id,
@@ -581,11 +587,7 @@ fn cert_chain_to_b64(chain: &[Vec<u8>]) -> serde_json::Value {
     use base64::Engine as _;
     let arr: Vec<serde_json::Value> = chain
         .iter()
-        .map(|der| {
-            serde_json::Value::String(
-                base64::engine::general_purpose::STANDARD.encode(der),
-            )
-        })
+        .map(|der| serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(der)))
         .collect();
     serde_json::Value::Array(arr)
 }
@@ -691,16 +693,18 @@ pub fn script_label(path: &Path) -> String {
 /// is built with the `ts` feature.
 #[cfg(feature = "ts")]
 pub(super) fn ts_transpile_hook() -> Option<afterburner_wasi::host::TranspileFn> {
-    Some(Arc::new(|source: &str, path: &str| -> Result<String, String> {
-        let p = std::path::PathBuf::from(path);
-        // Treat `.mjs`/`.cjs` / plain JS without TS syntax as ESM-
-        // lowering-only so `import`/`export` still get rewritten.
-        if crate::ts::is_typescript(&p) {
-            crate::ts::transpile(source, &p).map_err(|e| e.to_string())
-        } else {
-            crate::ts::lower_esm_js(source, &p).map_err(|e| e.to_string())
-        }
-    }))
+    Some(Arc::new(
+        |source: &str, path: &str| -> Result<String, String> {
+            let p = std::path::PathBuf::from(path);
+            // Treat `.mjs`/`.cjs` / plain JS without TS syntax as ESM-
+            // lowering-only so `import`/`export` still get rewritten.
+            if crate::ts::is_typescript(&p) {
+                crate::ts::transpile(source, &p).map_err(|e| e.to_string())
+            } else {
+                crate::ts::lower_esm_js(source, &p).map_err(|e| e.to_string())
+            }
+        },
+    ))
 }
 
 #[cfg(not(feature = "ts"))]

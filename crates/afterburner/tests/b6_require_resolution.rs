@@ -82,11 +82,21 @@ fn assert_ok(out: &std::process::Output, what: &str) {
 #[test]
 fn require_relative_js_file() {
     let dir = scratch("rel_js");
-    fs::write(dir.join("lib.js"), "module.exports = { greet: () => 'hello from lib' };").unwrap();
-    let out = run_burn_in(&dir, "const lib = require('./lib'); console.log(lib.greet());");
+    fs::write(
+        dir.join("lib.js"),
+        "module.exports = { greet: () => 'hello from lib' };",
+    )
+    .unwrap();
+    let out = run_burn_in(
+        &dir,
+        "const lib = require('./lib'); console.log(lib.greet());",
+    );
     let _ = fs::remove_dir_all(&dir);
     assert_ok(&out, "require('./lib')");
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hello from lib");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "hello from lib"
+    );
 }
 
 #[test]
@@ -293,7 +303,10 @@ fn loaded_module_receives_filename_and_dirname() {
         stdout.contains("/s/probe.js"),
         "__filename missing / wrong: {stdout}"
     );
-    assert!(stdout.contains("/s\n"), "__dirname missing / wrong: {stdout}");
+    assert!(
+        stdout.contains("/s\n"),
+        "__dirname missing / wrong: {stdout}"
+    );
 }
 
 // ---- JSON auto-parse ---------------------------------------------------
@@ -470,7 +483,8 @@ fn require_main_for_file_invocation() {
         .display()
         .to_string();
     assert!(
-        stdout.contains(&format!("FN={}", abs)) || stdout.contains(&format!("FN={}", script.display())),
+        stdout.contains(&format!("FN={}", abs))
+            || stdout.contains(&format!("FN={}", script.display())),
         "stdout: {stdout}\nexpected filename: {abs}"
     );
     assert!(stdout.contains("IS_MAIN_FORMAT=true"));

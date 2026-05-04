@@ -64,10 +64,7 @@ fn ts_drops_variable_type_annotations() {
     let out = run_burn_file(&script);
     let _ = fs::remove_dir_all(&dir);
     assert_ok(&out, "var type annotations");
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        "42 forty-two"
-    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "42 forty-two");
 }
 
 #[test]

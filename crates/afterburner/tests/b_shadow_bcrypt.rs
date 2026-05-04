@@ -190,10 +190,7 @@ fn shadow_wins_over_node_modules_bcrypt() {
     // can't load in the WASM sandbox. Simulate by materializing a
     // fake node_modules/bcrypt/ tree and confirming require returns
     // the shadow, not the fake.
-    let dir = std::env::temp_dir().join(format!(
-        "burn_bcrypt_precedence_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("burn_bcrypt_precedence_{}", std::process::id()));
     std::fs::create_dir_all(dir.join("node_modules/bcrypt")).unwrap();
     std::fs::write(
         dir.join("node_modules/bcrypt/package.json"),

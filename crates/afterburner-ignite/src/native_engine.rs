@@ -300,7 +300,11 @@ impl Combustor for NativeCombustor {
         let env_json = serde_json::to_string(&invocation.env)
             .map_err(|e| AfterburnerError::Engine(format!("env json: {e}")))?;
         let cwd_json = serde_json::to_string(
-            &(if invocation.cwd.is_empty() { "/" } else { invocation.cwd.as_str() }),
+            &(if invocation.cwd.is_empty() {
+                "/"
+            } else {
+                invocation.cwd.as_str()
+            }),
         )
         .map_err(|e| AfterburnerError::Engine(format!("cwd json: {e}")))?;
         let stage = build_script_stage(source, &argv_json, &env_json, &cwd_json);

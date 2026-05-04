@@ -94,13 +94,7 @@ fn worker_inherits_sandbox_no_fs() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
-        .args([
-            "--sandbox",
-            "--allow-fs",
-            &dir_str,
-            "-e",
-            &parent,
-        ])
+        .args(["--sandbox", "--allow-fs", &dir_str, "-e", &parent])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -108,10 +102,7 @@ fn worker_inherits_sandbox_no_fs() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("SANDBOX_HELD"),
         "expected SANDBOX_HELD; stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -160,10 +151,7 @@ fn depth_cap_rejects_when_at_limit() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("DEPTH_CAP_HELD"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -202,10 +190,7 @@ fn eval_mode_rejected() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("EVAL_REJECTED"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -270,10 +255,7 @@ fn path_outside_fs_allowlist_rejected() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("PATH_REJECTED"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -311,7 +293,10 @@ fn codec_narrow_fs_root() {
     m.fs = FsAccess::ReadWrite(vec![PathBuf::from("/srv/app")]);
     let args = manifold_to_cli_args(&m);
     assert!(args.contains(&"--sandbox".to_string()));
-    assert!(args.contains(&"--allow-fs=/srv/app".to_string()), "{args:?}");
+    assert!(
+        args.contains(&"--allow-fs=/srv/app".to_string()),
+        "{args:?}"
+    );
     // Must NOT include any other allow flags.
     for a in &args {
         assert!(

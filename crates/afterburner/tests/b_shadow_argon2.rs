@@ -190,10 +190,7 @@ fn verify_rejects_malformed_hash() {
 
 #[test]
 fn shadow_wins_over_node_modules_argon2() {
-    let dir = std::env::temp_dir().join(format!(
-        "burn_argon2_precedence_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("burn_argon2_precedence_{}", std::process::id()));
     std::fs::create_dir_all(dir.join("node_modules/argon2")).unwrap();
     std::fs::write(
         dir.join("node_modules/argon2/package.json"),

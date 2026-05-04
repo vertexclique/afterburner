@@ -317,8 +317,7 @@ fn wrap_fs(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 match fs_host::read_file_sync(&path, &m) {
                     Ok(bytes) => {
                         use base64::Engine as _;
-                        let encoded =
-                            base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
                         write_out(&mut caller, &memory, out_ptr, out_cap, encoded.as_bytes())
                     }
                     Err(e) => map_err(&mut caller, e),
@@ -907,7 +906,8 @@ fn wrap_dns(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                             Some(s) => s,
                             None => return E_OTHER,
                         };
-                        let servers_csv = match read_str(&memory, &caller, servers_ptr, servers_len) {
+                        let servers_csv = match read_str(&memory, &caller, servers_ptr, servers_len)
+                        {
                             Some(s) => s,
                             None => String::new(),
                         };
@@ -915,11 +915,15 @@ fn wrap_dns(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                         let m = caller.data().manifold.clone();
                         match $impl(&arg, &servers, &m) {
                             Ok(list) => {
-                                let v: Vec<serde_json::Value> = list
-                                    .into_iter()
-                                    .map(serde_json::Value::String)
-                                    .collect();
-                                write_json(&mut caller, &memory, out_ptr, out_cap, &serde_json::Value::Array(v))
+                                let v: Vec<serde_json::Value> =
+                                    list.into_iter().map(serde_json::Value::String).collect();
+                                write_json(
+                                    &mut caller,
+                                    &memory,
+                                    out_ptr,
+                                    out_cap,
+                                    &serde_json::Value::Array(v),
+                                )
                             }
                             Err(e) => {
                                 record(&mut caller, &format!("{}: {e}", $label));
@@ -961,16 +965,13 @@ fn wrap_dns(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     Some(s) => s,
                     None => return E_OTHER,
                 };
-                let servers_csv = match read_str(&memory, &caller, servers_ptr, servers_len) {
-                    Some(s) => s,
-                    None => String::new(),
-                };
+                let servers_csv =
+                    read_str(&memory, &caller, servers_ptr, servers_len).unwrap_or_default();
                 let servers = parse_servers_csv(&servers_csv);
                 let m = caller.data().manifold.clone();
                 match dns_host::resolve_mx(&name, &servers, &m) {
                     Ok(list) => {
-                        let v: Vec<serde_json::Value> =
-                            list.iter().map(|r| r.to_json()).collect();
+                        let v: Vec<serde_json::Value> = list.iter().map(|r| r.to_json()).collect();
                         write_json(
                             &mut caller,
                             &memory,
@@ -1004,10 +1005,8 @@ fn wrap_dns(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     Some(s) => s,
                     None => return E_OTHER,
                 };
-                let servers_csv = match read_str(&memory, &caller, servers_ptr, servers_len) {
-                    Some(s) => s,
-                    None => String::new(),
-                };
+                let servers_csv =
+                    read_str(&memory, &caller, servers_ptr, servers_len).unwrap_or_default();
                 let servers = parse_servers_csv(&servers_csv);
                 let m = caller.data().manifold.clone();
                 match dns_host::resolve_txt(&name, &servers, &m) {
@@ -2281,8 +2280,7 @@ fn wrap_shadow_bcrypt(linker: &mut Linker<HostState>) -> Result<(), AfterburnerE
                 #[cfg(not(feature = "shadow-bcrypt"))]
                 {
                     let _ = (password, cost, out_ptr, out_cap);
-                    caller.data_mut().last_error =
-                        "shadow-bcrypt feature not enabled".into();
+                    caller.data_mut().last_error = "shadow-bcrypt feature not enabled".into();
                     -1
                 }
             },
@@ -2330,8 +2328,7 @@ fn wrap_shadow_bcrypt(linker: &mut Linker<HostState>) -> Result<(), AfterburnerE
                 #[cfg(not(feature = "shadow-bcrypt"))]
                 {
                     let _ = (password, hash);
-                    caller.data_mut().last_error =
-                        "shadow-bcrypt feature not enabled".into();
+                    caller.data_mut().last_error = "shadow-bcrypt feature not enabled".into();
                     -1
                 }
             },
@@ -2342,11 +2339,7 @@ fn wrap_shadow_bcrypt(linker: &mut Linker<HostState>) -> Result<(), AfterburnerE
         .func_wrap(
             NS,
             "host_shadow_bcrypt_gen_salt",
-            |mut caller: Caller<'_, HostState>,
-             rounds: i32,
-             out_ptr: i32,
-             out_cap: i32|
-             -> i32 {
+            |mut caller: Caller<'_, HostState>, rounds: i32, out_ptr: i32, out_cap: i32| -> i32 {
                 #[cfg(feature = "shadow-bcrypt")]
                 {
                     let Some(memory) = guest_memory(&mut caller) else {
@@ -2364,8 +2357,7 @@ fn wrap_shadow_bcrypt(linker: &mut Linker<HostState>) -> Result<(), AfterburnerE
                 #[cfg(not(feature = "shadow-bcrypt"))]
                 {
                     let _ = (rounds, out_ptr, out_cap);
-                    caller.data_mut().last_error =
-                        "shadow-bcrypt feature not enabled".into();
+                    caller.data_mut().last_error = "shadow-bcrypt feature not enabled".into();
                     -1
                 }
             },
@@ -2406,8 +2398,16 @@ fn wrap_shadow_argon2(linker: &mut Linker<HostState>) -> Result<(), AfterburnerE
                 {
                     let ty_u = if ty < 0 { 2 } else { ty as u8 };
                     let t_u = if time_cost < 0 { 0 } else { time_cost as u32 };
-                    let m_u = if memory_cost < 0 { 0 } else { memory_cost as u32 };
-                    let p_u = if parallelism < 0 { 0 } else { parallelism as u32 };
+                    let m_u = if memory_cost < 0 {
+                        0
+                    } else {
+                        memory_cost as u32
+                    };
+                    let p_u = if parallelism < 0 {
+                        0
+                    } else {
+                        parallelism as u32
+                    };
                     match afterburner_node_compat::shadows::argon2::hash(
                         password, ty_u, t_u, m_u, p_u,
                     ) {
@@ -2420,9 +2420,16 @@ fn wrap_shadow_argon2(linker: &mut Linker<HostState>) -> Result<(), AfterburnerE
                 }
                 #[cfg(not(feature = "shadow-argon2"))]
                 {
-                    let _ = (password, ty, time_cost, memory_cost, parallelism, out_ptr, out_cap);
-                    caller.data_mut().last_error =
-                        "shadow-argon2 feature not enabled".into();
+                    let _ = (
+                        password,
+                        ty,
+                        time_cost,
+                        memory_cost,
+                        parallelism,
+                        out_ptr,
+                        out_cap,
+                    );
+                    caller.data_mut().last_error = "shadow-argon2 feature not enabled".into();
                     -1
                 }
             },
@@ -2470,8 +2477,7 @@ fn wrap_shadow_argon2(linker: &mut Linker<HostState>) -> Result<(), AfterburnerE
                 #[cfg(not(feature = "shadow-argon2"))]
                 {
                     let _ = (hash, password);
-                    caller.data_mut().last_error =
-                        "shadow-argon2 feature not enabled".into();
+                    caller.data_mut().last_error = "shadow-argon2 feature not enabled".into();
                     -1
                 }
             },
@@ -2504,8 +2510,16 @@ fn wrap_shadow_argon2(linker: &mut Linker<HostState>) -> Result<(), AfterburnerE
                 {
                     let ty_u = if ty < 0 { 2 } else { ty as u8 };
                     let t_u = if time_cost < 0 { 0 } else { time_cost as u32 };
-                    let m_u = if memory_cost < 0 { 0 } else { memory_cost as u32 };
-                    let p_u = if parallelism < 0 { 0 } else { parallelism as u32 };
+                    let m_u = if memory_cost < 0 {
+                        0
+                    } else {
+                        memory_cost as u32
+                    };
+                    let p_u = if parallelism < 0 {
+                        0
+                    } else {
+                        parallelism as u32
+                    };
                     match afterburner_node_compat::shadows::argon2::needs_rehash(
                         hash, ty_u, t_u, m_u, p_u,
                     ) {
@@ -2520,8 +2534,7 @@ fn wrap_shadow_argon2(linker: &mut Linker<HostState>) -> Result<(), AfterburnerE
                 #[cfg(not(feature = "shadow-argon2"))]
                 {
                     let _ = (hash, ty, time_cost, memory_cost, parallelism);
-                    caller.data_mut().last_error =
-                        "shadow-argon2 feature not enabled".into();
+                    caller.data_mut().last_error = "shadow-argon2 feature not enabled".into();
                     -1
                 }
             },
@@ -2555,7 +2568,8 @@ fn wrap_shadow_jwt(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErro
                 let Some(memory) = guest_memory(&mut caller) else {
                     return E_OTHER;
                 };
-                let Some(payload_bytes) = read_bytes(&memory, &caller, payload_ptr, payload_len) else {
+                let Some(payload_bytes) = read_bytes(&memory, &caller, payload_ptr, payload_len)
+                else {
                     return E_OTHER;
                 };
                 let Some(secret) = read_bytes(&memory, &caller, secret_ptr, secret_len) else {
@@ -2575,7 +2589,9 @@ fn wrap_shadow_jwt(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErro
                 #[cfg(feature = "shadow-jsonwebtoken")]
                 {
                     match afterburner_node_compat::shadows::jsonwebtoken::sign(
-                        payload_str, &secret, opts_str,
+                        payload_str,
+                        &secret,
+                        opts_str,
                     ) {
                         Ok(s) => write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes()),
                         Err(e) => {
@@ -2587,8 +2603,7 @@ fn wrap_shadow_jwt(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErro
                 #[cfg(not(feature = "shadow-jsonwebtoken"))]
                 {
                     let _ = (payload_str, secret, opts_str, out_ptr, out_cap);
-                    caller.data_mut().last_error =
-                        "shadow-jsonwebtoken feature not enabled".into();
+                    caller.data_mut().last_error = "shadow-jsonwebtoken feature not enabled".into();
                     -1
                 }
             },
@@ -2644,8 +2659,7 @@ fn wrap_shadow_jwt(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErro
                 #[cfg(not(feature = "shadow-jsonwebtoken"))]
                 {
                     let _ = (token_str, secret, opts_str, out_ptr, out_cap);
-                    caller.data_mut().last_error =
-                        "shadow-jsonwebtoken feature not enabled".into();
+                    caller.data_mut().last_error = "shadow-jsonwebtoken feature not enabled".into();
                     -1
                 }
             },
@@ -2687,8 +2701,7 @@ fn wrap_shadow_jwt(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErro
                 #[cfg(not(feature = "shadow-jsonwebtoken"))]
                 {
                     let _ = (token_str, out_ptr, out_cap);
-                    caller.data_mut().last_error =
-                        "shadow-jsonwebtoken feature not enabled".into();
+                    caller.data_mut().last_error = "shadow-jsonwebtoken feature not enabled".into();
                     -1
                 }
             },
@@ -2963,10 +2976,7 @@ fn wrap_workers(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
         .func_wrap(
             NS,
             "host_worker_post_to_parent",
-            |mut caller: Caller<'_, HostState>,
-             payload_ptr: i32,
-             payload_len: i32|
-             -> i32 {
+            |mut caller: Caller<'_, HostState>, payload_ptr: i32, payload_len: i32| -> i32 {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return werr::E_OTHER;
                 };
@@ -3115,11 +3125,7 @@ fn wrap_net(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         .func_wrap(
             NS,
             "host_net_connect",
-            |mut caller: Caller<'_, HostState>,
-             host_ptr: i32,
-             host_len: i32,
-             port: i32|
-             -> i32 {
+            |mut caller: Caller<'_, HostState>, host_ptr: i32, host_len: i32, port: i32| -> i32 {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return nerr::E_OTHER;
                 };
@@ -3257,11 +3263,7 @@ fn wrap_net(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         .func_wrap(
             NS,
             "host_net_listen",
-            |mut caller: Caller<'_, HostState>,
-             host_ptr: i32,
-             host_len: i32,
-             port: i32|
-             -> i32 {
+            |mut caller: Caller<'_, HostState>, host_ptr: i32, host_len: i32, port: i32| -> i32 {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return nerr::E_OTHER;
                 };
@@ -3480,8 +3482,7 @@ fn wrap_tls(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     record(&mut caller, "tls_listen: invalid key PEM");
                     return terr::E_BAD_CERT;
                 };
-                let sni_map_json = read_str(&memory, &caller, sni_ptr, sni_len)
-                    .unwrap_or_default();
+                let sni_map_json = read_str(&memory, &caller, sni_ptr, sni_len).unwrap_or_default();
                 let Some(tls) = caller.data().daemon_tls.clone() else {
                     record(&mut caller, "tls.createServer requires daemon mode");
                     return terr::E_NO_DAEMON;
@@ -3574,11 +3575,7 @@ fn wrap_dgram(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         .func_wrap(
             NS,
             "host_dgram_bind",
-            |mut caller: Caller<'_, HostState>,
-             host_ptr: i32,
-             host_len: i32,
-             port: i32|
-             -> i32 {
+            |mut caller: Caller<'_, HostState>, host_ptr: i32, host_len: i32, port: i32| -> i32 {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return derr::E_OTHER;
                 };
@@ -3627,14 +3624,13 @@ fn wrap_dgram(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     record(&mut caller, &format!("dgram.send: invalid port {port}"));
                     return derr::E_BAD_PORT;
                 }
-                let Some(payload_b64) =
-                    read_str(&memory, &caller, payload_ptr, payload_len)
-                else {
+                let Some(payload_b64) = read_str(&memory, &caller, payload_ptr, payload_len) else {
                     record(&mut caller, "dgram.send: invalid payload");
                     return derr::E_BAD_PAYLOAD;
                 };
                 let mut last_error = String::new();
-                let Some(payload) = crate::daemon_net::decode_payload(&payload_b64, &mut last_error)
+                let Some(payload) =
+                    crate::daemon_net::decode_payload(&payload_b64, &mut last_error)
                 else {
                     if last_error.is_empty() {
                         last_error = "dgram.send: payload decode failed".into();
@@ -3687,7 +3683,10 @@ fn wrap_dgram(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     return derr::E_NO_DAEMON;
                 };
                 let Some((addr, port)) = dgram.address(socket_id) else {
-                    record(&mut caller, &format!("dgram.address: unknown id {socket_id}"));
+                    record(
+                        &mut caller,
+                        &format!("dgram.address: unknown id {socket_id}"),
+                    );
                     return derr::E_BAD_ID;
                 };
                 let json = format!(
@@ -3741,10 +3740,7 @@ fn wrap_child_process(linker: &mut Linker<HostState>) -> Result<(), AfterburnerE
                     match serde_json::from_str(&argv_json) {
                         Ok(v) => v,
                         Err(e) => {
-                            record(
-                                &mut caller,
-                                &format!("child_process: argv parse: {e}"),
-                            );
+                            record(&mut caller, &format!("child_process: argv parse: {e}"));
                             return E_OTHER;
                         }
                     }
@@ -3811,8 +3807,7 @@ fn wrap_shadow_sqlite3(linker: &mut Linker<HostState>) -> Result<(), Afterburner
                 #[cfg(not(feature = "shadow-sqlite3"))]
                 {
                     let _ = path;
-                    caller.data_mut().last_error =
-                        "shadow-sqlite3 feature not enabled".into();
+                    caller.data_mut().last_error = "shadow-sqlite3 feature not enabled".into();
                     -1
                 }
             },
@@ -3833,9 +3828,8 @@ fn wrap_shadow_sqlite3(linker: &mut Linker<HostState>) -> Result<(), Afterburner
 
     #[cfg(feature = "shadow-sqlite3")]
     fn parse_params(s: &str) -> Result<Vec<serde_json::Value>, AfterburnerError> {
-        let v: serde_json::Value = serde_json::from_str(s).map_err(|e| {
-            AfterburnerError::Host(format!("sqlite3: params JSON parse: {e}"))
-        })?;
+        let v: serde_json::Value = serde_json::from_str(s)
+            .map_err(|e| AfterburnerError::Host(format!("sqlite3: params JSON parse: {e}")))?;
         match v {
             serde_json::Value::Array(arr) => Ok(arr),
             _ => Err(AfterburnerError::Host(
@@ -3864,8 +3858,7 @@ fn wrap_shadow_sqlite3(linker: &mut Linker<HostState>) -> Result<(), Afterburner
                 let Some(sql) = read_str(&memory, &caller, sql_ptr, sql_len) else {
                     return E_OTHER;
                 };
-                let Some(params_raw) = read_str(&memory, &caller, params_ptr, params_len)
-                else {
+                let Some(params_raw) = read_str(&memory, &caller, params_ptr, params_len) else {
                     return E_OTHER;
                 };
                 #[cfg(feature = "shadow-sqlite3")]
@@ -3895,8 +3888,7 @@ fn wrap_shadow_sqlite3(linker: &mut Linker<HostState>) -> Result<(), Afterburner
                 #[cfg(not(feature = "shadow-sqlite3"))]
                 {
                     let _ = (id, sql, params_raw, out_ptr, out_cap);
-                    caller.data_mut().last_error =
-                        "shadow-sqlite3 feature not enabled".into();
+                    caller.data_mut().last_error = "shadow-sqlite3 feature not enabled".into();
                     E_OTHER
                 }
             },
@@ -3923,8 +3915,7 @@ fn wrap_shadow_sqlite3(linker: &mut Linker<HostState>) -> Result<(), Afterburner
                 let Some(sql) = read_str(&memory, &caller, sql_ptr, sql_len) else {
                     return E_OTHER;
                 };
-                let Some(params_raw) = read_str(&memory, &caller, params_ptr, params_len)
-                else {
+                let Some(params_raw) = read_str(&memory, &caller, params_ptr, params_len) else {
                     return E_OTHER;
                 };
                 #[cfg(feature = "shadow-sqlite3")]
@@ -3951,8 +3942,7 @@ fn wrap_shadow_sqlite3(linker: &mut Linker<HostState>) -> Result<(), Afterburner
                 #[cfg(not(feature = "shadow-sqlite3"))]
                 {
                     let _ = (id, sql, params_raw, out_ptr, out_cap);
-                    caller.data_mut().last_error =
-                        "shadow-sqlite3 feature not enabled".into();
+                    caller.data_mut().last_error = "shadow-sqlite3 feature not enabled".into();
                     E_OTHER
                 }
             },
@@ -3979,8 +3969,7 @@ fn wrap_shadow_sqlite3(linker: &mut Linker<HostState>) -> Result<(), Afterburner
                 let Some(sql) = read_str(&memory, &caller, sql_ptr, sql_len) else {
                     return E_OTHER;
                 };
-                let Some(params_raw) = read_str(&memory, &caller, params_ptr, params_len)
-                else {
+                let Some(params_raw) = read_str(&memory, &caller, params_ptr, params_len) else {
                     return E_OTHER;
                 };
                 #[cfg(feature = "shadow-sqlite3")]
@@ -4007,8 +3996,7 @@ fn wrap_shadow_sqlite3(linker: &mut Linker<HostState>) -> Result<(), Afterburner
                 #[cfg(not(feature = "shadow-sqlite3"))]
                 {
                     let _ = (id, sql, params_raw, out_ptr, out_cap);
-                    caller.data_mut().last_error =
-                        "shadow-sqlite3 feature not enabled".into();
+                    caller.data_mut().last_error = "shadow-sqlite3 feature not enabled".into();
                     E_OTHER
                 }
             },
@@ -4041,8 +4029,7 @@ fn wrap_shadow_sqlite3(linker: &mut Linker<HostState>) -> Result<(), Afterburner
                 #[cfg(not(feature = "shadow-sqlite3"))]
                 {
                     let _ = (id, sql);
-                    caller.data_mut().last_error =
-                        "shadow-sqlite3 feature not enabled".into();
+                    caller.data_mut().last_error = "shadow-sqlite3 feature not enabled".into();
                     E_OTHER
                 }
             },
@@ -4069,8 +4056,7 @@ fn wrap_shadow_sqlite3(linker: &mut Linker<HostState>) -> Result<(), Afterburner
                 #[cfg(not(feature = "shadow-sqlite3"))]
                 {
                     let _ = id;
-                    caller.data_mut().last_error =
-                        "shadow-sqlite3 feature not enabled".into();
+                    caller.data_mut().last_error = "shadow-sqlite3 feature not enabled".into();
                     E_OTHER
                 }
             },
@@ -4114,8 +4100,7 @@ fn wrap_shadow_sharp(linker: &mut Linker<HostState>) -> Result<(), AfterburnerEr
                     use base64::Engine as _;
                     match afterburner_node_compat::shadows::sharp::run(&json) {
                         Ok(bytes) => {
-                            let b64 =
-                                base64::engine::general_purpose::STANDARD.encode(&bytes);
+                            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
                             write_out(&mut caller, &memory, out_ptr, out_cap, b64.as_bytes())
                         }
                         Err(e) => {
@@ -4127,8 +4112,7 @@ fn wrap_shadow_sharp(linker: &mut Linker<HostState>) -> Result<(), AfterburnerEr
                 #[cfg(not(feature = "shadow-sharp"))]
                 {
                     let _ = (json, out_ptr, out_cap);
-                    caller.data_mut().last_error =
-                        "shadow-sharp feature not enabled".into();
+                    caller.data_mut().last_error = "shadow-sharp feature not enabled".into();
                     E_OTHER
                 }
             },
@@ -4155,9 +4139,7 @@ fn wrap_shadow_sharp(linker: &mut Linker<HostState>) -> Result<(), AfterburnerEr
                 #[cfg(feature = "shadow-sharp")]
                 {
                     match afterburner_node_compat::shadows::sharp::metadata(&json) {
-                        Ok(s) => {
-                            write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes())
-                        }
+                        Ok(s) => write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes()),
                         Err(e) => {
                             caller.data_mut().last_error = e;
                             E_OTHER
@@ -4167,8 +4149,7 @@ fn wrap_shadow_sharp(linker: &mut Linker<HostState>) -> Result<(), AfterburnerEr
                 #[cfg(not(feature = "shadow-sharp"))]
                 {
                     let _ = (json, out_ptr, out_cap);
-                    caller.data_mut().last_error =
-                        "shadow-sharp feature not enabled".into();
+                    caller.data_mut().last_error = "shadow-sharp feature not enabled".into();
                     E_OTHER
                 }
             },
@@ -4194,17 +4175,14 @@ fn wrap_shadow_sharp(linker: &mut Linker<HostState>) -> Result<(), AfterburnerEr
 //   __host_wasm_drop_instance(id)              -> 0
 
 fn wrap_wasm_loader(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
-    use base64::Engine as _;
     use crate::wasm_loader::WasmValue;
+    use base64::Engine as _;
 
     linker
         .func_wrap(
             NS,
             "host_wasm_compile",
-            |mut caller: Caller<'_, HostState>,
-             ptr: i32,
-             len: i32|
-             -> i64 {
+            |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i64 {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return -1;
                 };
@@ -4245,11 +4223,7 @@ fn wrap_wasm_loader(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
         .func_wrap(
             NS,
             "host_wasm_module_exports",
-            |mut caller: Caller<'_, HostState>,
-             id: i64,
-             out_ptr: i32,
-             out_cap: i32|
-             -> i32 {
+            |mut caller: Caller<'_, HostState>, id: i64, out_ptr: i32, out_cap: i32| -> i32 {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return E_OTHER;
                 };
@@ -4283,11 +4257,7 @@ fn wrap_wasm_loader(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
         .func_wrap(
             NS,
             "host_wasm_module_imports",
-            |mut caller: Caller<'_, HostState>,
-             id: i64,
-             out_ptr: i32,
-             out_cap: i32|
-             -> i32 {
+            |mut caller: Caller<'_, HostState>, id: i64, out_ptr: i32, out_cap: i32| -> i32 {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return E_OTHER;
                 };
@@ -4366,25 +4336,24 @@ fn wrap_wasm_loader(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
                 let Some(args_json) = read_str(&memory, &caller, args_ptr, args_len) else {
                     return E_OTHER;
                 };
-                let args: Vec<WasmValue> = match serde_json::from_str::<serde_json::Value>(&args_json) {
-                    Ok(serde_json::Value::Array(arr)) => {
-                        let parsed: std::result::Result<Vec<WasmValue>, _> = arr
-                            .iter()
-                            .map(WasmValue::from_json)
-                            .collect();
-                        match parsed {
-                            Ok(v) => v,
-                            Err(e) => {
-                                caller.data_mut().last_error = e.to_string();
-                                return E_OTHER;
+                let args: Vec<WasmValue> =
+                    match serde_json::from_str::<serde_json::Value>(&args_json) {
+                        Ok(serde_json::Value::Array(arr)) => {
+                            let parsed: std::result::Result<Vec<WasmValue>, _> =
+                                arr.iter().map(WasmValue::from_json).collect();
+                            match parsed {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    caller.data_mut().last_error = e.to_string();
+                                    return E_OTHER;
+                                }
                             }
                         }
-                    }
-                    _ => {
-                        record(&mut caller, "wasm.call: args must be a JSON array");
-                        return E_OTHER;
-                    }
-                };
+                        _ => {
+                            record(&mut caller, "wasm.call: args must be a JSON array");
+                            return E_OTHER;
+                        }
+                    };
                 let loader = caller.data().wasm_loader.clone();
                 match loader.call_export(instance_id as u64, &name, args) {
                     Ok(results) => {
@@ -4419,8 +4388,7 @@ fn wrap_wasm_loader(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
                 let loader = caller.data().wasm_loader.clone();
                 match loader.memory_read(instance_id as u64, offset as u32, len as u32) {
                     Ok(bytes) => {
-                        let b64 =
-                            base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
                         write_out(&mut caller, &memory, out_ptr, out_cap, b64.as_bytes())
                     }
                     Err(e) => {

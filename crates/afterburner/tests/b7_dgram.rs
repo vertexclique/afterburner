@@ -113,11 +113,11 @@ fn send_to_external_listener() {
     let mut log_contents = String::new();
     for _ in 0..30 {
         std::thread::sleep(Duration::from_millis(300));
-        if let Ok(s) = fs::read_to_string(&log) {
-            if !s.is_empty() {
-                log_contents = s;
-                break;
-            }
+        if let Ok(s) = fs::read_to_string(&log)
+            && !s.is_empty()
+        {
+            log_contents = s;
+            break;
         }
     }
     let _ = child.kill();
@@ -125,7 +125,10 @@ fn send_to_external_listener() {
 
     let (n, _from): (usize, SocketAddr) = result.expect("recv from burn");
     assert_eq!(&buf[..n], b"hello-from-burn", "burn payload mismatch");
-    assert!(log_contents.contains("OK"), "burn send callback: {log_contents:?}");
+    assert!(
+        log_contents.contains("OK"),
+        "burn send callback: {log_contents:?}"
+    );
 }
 
 #[test]
@@ -163,11 +166,11 @@ fn receive_from_external_sender() {
         let mut got = None;
         for _ in 0..30 {
             std::thread::sleep(Duration::from_millis(500));
-            if let Ok(s) = fs::read_to_string(&port_log) {
-                if let Ok(p) = s.trim().parse::<u16>() {
-                    got = Some(p);
-                    break;
-                }
+            if let Ok(s) = fs::read_to_string(&port_log)
+                && let Ok(p) = s.trim().parse::<u16>()
+            {
+                got = Some(p);
+                break;
             }
         }
         got.expect("burn published bound port within 15s")
@@ -182,11 +185,11 @@ fn receive_from_external_sender() {
     let mut last = String::new();
     for _ in 0..30 {
         std::thread::sleep(Duration::from_millis(500));
-        if let Ok(s) = fs::read_to_string(&log) {
-            if s.contains("GOT=") {
-                last = s;
-                break;
-            }
+        if let Ok(s) = fs::read_to_string(&log)
+            && s.contains("GOT=")
+        {
+            last = s;
+            break;
         }
     }
     let _ = child.kill();

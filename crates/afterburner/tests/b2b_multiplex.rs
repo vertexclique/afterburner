@@ -53,9 +53,7 @@ fn http_get(port: u16) -> Option<String> {
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).ok()?;
     let req = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
     stream.write_all(req.as_bytes()).ok()?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
     let mut out = String::new();
     stream.read_to_string(&mut out).ok()?;
     Some(out)
@@ -203,8 +201,14 @@ fn close_then_relisten_on_same_port_succeeds() {
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(stdout.contains("first-listening"), "first never listened: {stdout}");
-    assert!(stdout.contains("first-closed"), "first never closed: {stdout}");
+    assert!(
+        stdout.contains("first-listening"),
+        "first never listened: {stdout}"
+    );
+    assert!(
+        stdout.contains("first-closed"),
+        "first never closed: {stdout}"
+    );
     assert!(
         stdout.contains("second-listening"),
         "second should have listened after first closed: {stdout}"

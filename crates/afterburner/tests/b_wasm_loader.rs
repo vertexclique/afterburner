@@ -71,10 +71,7 @@ fn run_inline(source: &str) -> std::process::Output {
 fn assert_ok(out: &std::process::Output, marker: &str) {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains(marker),
         "missing `{marker}`. stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -292,10 +289,8 @@ fn module_imports_empty_for_no_imports() {
 fn module_imports_lists_required_imports() {
     // (module (import "env" "log" (func (param i32))))
     let bytes: Vec<u8> = vec![
-        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
-        0x01, 0x05, 0x01, 0x60, 0x01, 0x7f, 0x00,
-        0x02, 0x0b, 0x01,
-        0x03, b'e', b'n', b'v', 0x03, b'l', b'o', b'g', 0x00, 0x00,
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x01, 0x7f, 0x00,
+        0x02, 0x0b, 0x01, 0x03, b'e', b'n', b'v', 0x03, b'l', b'o', b'g', 0x00, 0x00,
     ];
     let bytes_js = js_byte_array(&bytes);
     let src = format!(
@@ -448,10 +443,8 @@ fn wrong_arg_count_runtime_errors() {
 #[serial]
 fn unsatisfied_imports_link_error() {
     let bytes: Vec<u8> = vec![
-        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
-        0x01, 0x05, 0x01, 0x60, 0x01, 0x7f, 0x00,
-        0x02, 0x0b, 0x01,
-        0x03, b'e', b'n', b'v', 0x03, b'l', b'o', b'g', 0x00, 0x00,
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x01, 0x7f, 0x00,
+        0x02, 0x0b, 0x01, 0x03, b'e', b'n', b'v', 0x03, b'l', b'o', b'g', 0x00, 0x00,
     ];
     let bytes_js = js_byte_array(&bytes);
     let src = format!(
