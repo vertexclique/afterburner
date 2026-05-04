@@ -54,24 +54,21 @@ jobs:
         run: cargo clippy -p afterburner --all-targets --features release-cli -- -D warnings
 
   test:
-    name: cargo test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    name: cargo test (x86_64-linux)
+    # Tests run on a single target — x86_64 Linux. The runtime is
+    # platform-portable but the test surface gets long, and CI minutes
+    # add up; macOS / Windows test coverage is paid for at release
+    # time by the multi-target build matrix in release.yml. If a
+    # platform-specific bug reproduces, add a one-off job here.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: wasm32-wasip1
           rustflags: ''
-      - name: Install libclang (Linux)
-        if: runner.os == 'Linux'
+      - name: Install libclang
         run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
-      - name: Install libclang (macOS)
-        if: runner.os == 'macOS'
-        run: brew install llvm
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (default features, library-only)
         # `bin` is NOT in default features, so any test using
