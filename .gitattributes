@@ -1,0 +1,27 @@
+# Enforce LF line endings + byte-identical checkouts across platforms.
+# Without this, Windows runners get CRLF-converted text files (notably
+# `generated/plenum_bundle.js` and the polyfills) which gives them a
+# different SHA than the Linux/macOS runners that produced the
+# committed plugin sidecar — `afterburner-wasi/build.rs`'s drift gate
+# then panics on a phantom mismatch.
+
+# Default: text files normalize on commit, check out with LF.
+*               text=auto eol=lf
+
+# Generated assets that get hashed by build scripts MUST be byte-stable.
+crates/afterburner-node-compat/generated/plenum_bundle.js text eol=lf
+crates/afterburner-node-compat/polyfills/**            text eol=lf
+crates/afterburner-wasi/plugin/afterburner_plugin.wasm.bundle-sha256 text eol=lf
+
+# Binary artifacts — never touch.
+*.wasm          binary
+*.png           binary
+*.svg           binary
+*.mp4           binary
+*.zip           binary
+*.tar.gz        binary
+
+# Shell scripts: explicit LF so Windows-checked-out copies still
+# `chmod +x` cleanly when run via WSL / git-bash.
+*.sh            text eol=lf
+*.ps1           text eol=crlf
