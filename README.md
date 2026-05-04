@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/vertexclique/afterburner/main/art/png/afterburner-bg-2000x500.png" alt="Afterburner" width="100%"/>
+  <img src="https://github.com/vertexclique/afterburner/raw/master/art/svg/afterburner-bg-2000x500.svg" alt="Afterburner" width="100%"/>
 </p>
 
 <p align="center">
