@@ -110,6 +110,18 @@ UDF, batched UDF, multi-worker scheduling, streaming crypto,
 app — `require('express')` resolves the actual npm package out of
 `node_modules/` and serves HTTP end-to-end.
 
+### Environment variables
+
+| Variable | Default | Purpose |
+|:---|:---|:---|
+| `BURN_MAX_LINEAR_MEMORY` | `1G` (1 GiB) | Per-instance WASM linear-memory ceiling enforced by Wasmtime's pooling allocator. Accepts plain bytes or a `K`/`M`/`G` suffix (`4G` = 4 GiB, `128M` = 128 MiB). Hard-clamped to 4 GiB. Bump for long-running daemon-mode workloads (Express, Fastify) that accumulate per-request state; lower for many-concurrent-instances. The CLI's `--memory <N>` sets a tighter per-call cap below this ceiling and is independent of `-A` (which only flips capability gates, not resource caps). |
+| `BURN_VERSION` | `latest` | Version pin used by `install.sh` / `install.ps1`. No effect after install. |
+| `BURN_INSTALL` | `~/.local/bin` | Install dir for the bootstrap installers. |
+| `BURN_QUIET` | unset | Set to `1` to suppress the first-run capability banner. Same as `--quiet`. |
+| `AFTERBURNER_LOG` | `warn` | Library-side log level: `off` / `error` / `warn` / `info` / `debug` / `trace`. |
+| `AFTERBURNER_LOG_FORMAT` | `text` | Reporter format: `text` (stderr) or `json` (NDJSON to stdout). |
+| `AFTERBURNER_REBUILD_PLENUM` | unset | Set to `1` during build to regenerate `crates/afterburner-node-compat/generated/plenum_bundle.js` from the polyfill sources. |
+
 ---
 
 ## Workspace Crates

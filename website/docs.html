@@ -1060,6 +1060,14 @@ afterburner 0.1.1</pre>
         </div>
       </div>
 
+      <div class="callout callout--note">
+        <div class="callout__icon">i</div>
+        <div>
+          <strong>Long-running daemons: the pool ceiling.</strong>
+          <p>The WASM-mode pooling allocator pre-reserves a per-instance virtual address range — <code>1 GiB</code> by default. Daemon-mode workloads (Express, Fastify, etc. that share a single QuickJS Store across many requests) can accumulate state across the whole listener lifetime and eventually touch this ceiling, even though the host has plenty of free RAM. Override with <code>BURN_MAX_LINEAR_MEMORY</code> at startup: <code>BURN_MAX_LINEAR_MEMORY=4G ./burn server.js</code> bumps the per-slot ceiling to 4 GiB (the wasm32 ABI maximum); <code>=128M</code> tightens it. <code>--memory &lt;N&gt;</code> sets a tighter per-call cap below this hard limit and is independent of <code>-A</code> (which only flips capability gates, not resource caps).</p>
+        </div>
+      </div>
+
       <h2 id="tiers"><span class="anchor">#</span>Adaptive execution (Flying Start)</h2>
       <p>The default mode boots fast, then settles into the safer execution path without you noticing:</p>
 
@@ -1384,6 +1392,10 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
           <tr><td><code>AFTERBURNER_LOG</code></td><td><code>warn</code></td><td>Level: <code>off</code> · <code>error</code> · <code>warn</code> · <code>info</code> · <code>debug</code> · <code>trace</code></td></tr>
           <tr><td><code>AFTERBURNER_LOG_FORMAT</code></td><td><code>text</code></td><td>Reporter format: <code>text</code> (stderr) or <code>json</code> (stdout NDJSON)</td></tr>
           <tr><td><code>AFTERBURNER_REBUILD_PLENUM</code></td><td>unset</td><td>Set to <code>1</code> to regenerate <code>generated/plenum_bundle.js</code>.</td></tr>
+          <tr><td><code>BURN_MAX_LINEAR_MEMORY</code></td><td><code>1G</code> (1 GiB)</td><td>Per-instance WASM linear-memory ceiling enforced by Wasmtime's pooling allocator. Accepts plain bytes or a <code>K</code>/<code>M</code>/<code>G</code> suffix (e.g. <code>4G</code> = 4 GiB, <code>128M</code> = 128 MiB). Hard-clamped to 4 GiB (the wasm32 ABI limit). Bump it for long-running daemon-mode workloads (Express, Fastify, etc.) that accumulate per-request state across many calls; lower it when running many concurrent instances on small hosts. <code>--memory &lt;N&gt;</code> on the CLI sets a tighter per-call cap below this hard limit and is independent of <code>-A</code>.</td></tr>
+          <tr><td><code>BURN_VERSION</code></td><td><code>latest</code></td><td>Version pin used by the <code>install.sh</code> / <code>install.ps1</code> bootstrap (e.g. <code>v0.1.1</code>). Has no effect after the binary is installed.</td></tr>
+          <tr><td><code>BURN_INSTALL</code></td><td><code>~/.local/bin</code></td><td>Install dir for the bootstrap installers. The runtime itself doesn't read this.</td></tr>
+          <tr><td><code>BURN_QUIET</code></td><td>unset</td><td>Set to <code>1</code> to suppress the first-run capability banner and other non-essential stderr notices. Same as <code>--quiet</code> / <code>-q</code>.</td></tr>
         </tbody>
       </table></div>
 
