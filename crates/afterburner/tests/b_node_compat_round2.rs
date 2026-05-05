@@ -702,6 +702,98 @@ fn timers_promises_setTimeout_resolves_with_value() {
     assert_ok(&run_inline(src), "TIMERS_PROMISE_OK");
 }
 
+// ----- process.nextTick ordering (Phase 0 / Gap E) --------------------
+
+#[test]
+#[serial]
+fn nexttick_decouples_from_calling_stack() {
+    // Pre-Phase-0 our `nextTick` was synchronous (`fn.apply(null, args)`
+    // inline), which broke the core nextTick contract: the callback
+    // must NOT run on the calling stack — code AFTER the
+    // `process.nextTick(...)` line must execute before the callback
+    // fires.
+    //
+    // Express's `finalhandler` depends on this. Sync inline execution
+    // would flush the 404 response before the user's `next(err)` line
+    // returned, scrambling middleware ordering and producing garbled
+    // responses.
+    let src = r#"
+        const order = [];
+        order.push('A');
+        process.nextTick(() => order.push('NT'));
+        order.push('B');
+        setTimeout(() => {
+            console.log('ORDER:' + order.join(','));
+        }, 0);
+    "#;
+    assert_ok(&run_inline(src), "ORDER:A,B,NT");
+}
+
+#[test]
+#[serial]
+fn nexttick_runs_before_real_macrotask_timer() {
+    // nextTick fires within the current tick, before any real
+    // macrotask boundary. We can't probe `setTimeout(0)` (which our
+    // polyfill implements as a microtask via `Promise.resolve().then`,
+    // identical to nextTick's queueMicrotask), but we CAN probe a
+    // host-backed `setTimeout(50)` that crosses a real timer
+    // boundary.
+    let src = r#"
+        const order = [];
+        process.nextTick(() => order.push('NT'));
+        setTimeout(() => {
+            order.push('TIMER50');
+            console.log('ORDER:' + order.join(','));
+        }, 50);
+    "#;
+    assert_ok(&run_inline(src), "ORDER:NT,TIMER50");
+}
+
+#[test]
+#[serial]
+fn nexttick_passes_extra_args_through() {
+    let src = r#"
+        process.nextTick((a, b, c) => {
+            if (a + b + c === 6) console.log('NT_ARGS_OK');
+            else { console.error('args:', a, b, c); process.exit(2); }
+        }, 1, 2, 3);
+    "#;
+    assert_ok(&run_inline(src), "NT_ARGS_OK");
+}
+
+#[test]
+#[serial]
+fn nexttick_exception_does_not_poison_queue() {
+    // Per Node, an exception thrown inside a nextTick callback
+    // emits `uncaughtException` but doesn't cancel pending ticks.
+    // We log + continue so the second callback still runs.
+    let src = r#"
+        const order = [];
+        process.nextTick(() => { throw new Error('boom'); });
+        process.nextTick(() => order.push('after'));
+        setTimeout(() => {
+            if (order[0] === 'after') console.log('NT_ISO_OK');
+            else { console.error('order:', order); process.exit(2); }
+        }, 0);
+    "#;
+    assert_ok(&run_inline(src), "NT_ISO_OK");
+}
+
+#[test]
+#[serial]
+fn nexttick_rejects_non_function_callback() {
+    let src = r#"
+        try {
+            process.nextTick('not-a-function');
+            console.error('expected throw'); process.exit(2);
+        } catch (e) {
+            if (e instanceof TypeError) console.log('NT_TYPE_OK');
+            else { console.error('e:', e); process.exit(3); }
+        }
+    "#;
+    assert_ok(&run_inline(src), "NT_TYPE_OK");
+}
+
 // ----- process.binding clearer error ----------------------------------
 
 #[test]

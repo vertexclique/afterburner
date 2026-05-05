@@ -5439,10 +5439,58 @@ __register_module('perf_hooks', function(module, exports, require) {
         cwd:      function() { return globalThis.__host_cwd || '/'; },
         chdir:    function() { throw new Error('process.chdir is not supported'); },
 
+        // Real Node drains the nextTick queue synchronously between
+        // each macrotask but BEFORE the microtask queue. Express's
+        // `finalhandler` (the 404/500 fallback) defers its response
+        // with `process.nextTick`, expecting middleware that called
+        // `next(err)` to run first. The pre-fix synchronous-call
+        // implementation broke that ordering: a nextTick scheduled
+        // from inside a Promise microtask ran INSIDE the microtask
+        // instead of after it.
+        //
+        // We approximate Node's semantics by queueing nextTick
+        // callbacks into `__ntQueue` and draining via a single
+        // `queueMicrotask`. Microtask order is FIFO, so a nextTick
+        // scheduled in current sync code runs before any user
+        // `Promise.then` queued AFTER it. Exceptions in a nextTick
+        // callback are caught + logged so a single failure doesn't
+        // poison the rest of the queue (Node's behaviour: emit
+        // `uncaughtException` and continue; we surface to console
+        // until we wire a real uncaughtException emitter).
+        //
+        // Caveat: nested nextTicks (callback A queues callback B)
+        // run on the *next* drain pass here, not the same one. Real
+        // Node has an inner/outer queue that drains nested ticks
+        // greedily before the microtask queue. Document the
+        // divergence; revisit if a real workload hits it.
         nextTick: function(fn) {
             if (typeof fn !== 'function') throw new TypeError('callback must be a function');
             var args = Array.prototype.slice.call(arguments, 1);
-            fn.apply(null, args);
+            if (!globalThis.__ntQueue) globalThis.__ntQueue = [];
+            globalThis.__ntQueue.push({ fn: fn, args: args });
+            if (!globalThis.__ntScheduled) {
+                globalThis.__ntScheduled = true;
+                queueMicrotask(function drainNT() {
+                    var queue = globalThis.__ntQueue;
+                    globalThis.__ntQueue = [];
+                    globalThis.__ntScheduled = false;
+                    for (var i = 0; i < queue.length; i++) {
+                        var item = queue[i];
+                        try {
+                            item.fn.apply(null, item.args);
+                        } catch (e) {
+                            // Per Node convention, exceptions in
+                            // nextTick callbacks emit
+                            // `uncaughtException`. Until that's
+                            // wired, log + continue so the rest of
+                            // the queue still runs.
+                            if (globalThis.console && globalThis.console.error) {
+                                globalThis.console.error('Uncaught (in nextTick): ' + (e && e.stack || e));
+                            }
+                        }
+                    }
+                });
+            }
         },
 
         exit: function(code) {
