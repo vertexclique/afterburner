@@ -132,7 +132,7 @@ app — `require('express')` resolves the actual npm package out of
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
 
-**Corporate use notice.** Any corporate entity — company, agency, fund, foundation, or any organisation operating commercially — that uses Afterburner (in production, in internal tooling, in a product, or in a service) **must email the maintainer** at `vertexclique@gmail.com` before adopting it. The maintainer reserves the right to refuse permission to use this project to specific entities, at the maintainer's sole discretion, regardless of the underlying Apache-2.0 grant. Individuals and non-commercial open-source use are not subject to this notice.
+**Corporate use notice.** Any corporate entity company, agency, fund, foundation, or any organisation operating commercially that uses Afterburner (in production, in internal tooling, in a product, or in a service) **must email the maintainer** at `vertexclique |TA| gmail <BOT> com` before adopting it. The maintainer reserves the right to refuse permission to use this project to specific entities, at the maintainer's sole discretion, regardless of the underlying Apache-2.0 grant. Individuals and non-commercial open-source use are not subject to this notice.
 
 ---
 
