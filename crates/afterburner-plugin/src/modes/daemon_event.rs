@@ -9,10 +9,50 @@
 //!
 //! Top-level `await` resolves through Javy's event loop drain so
 //! handlers can be `async` without special wrapping.
+//!
+//! **Bytecode is compiled once.** The dispatch wrapper is a
+//! constant string; recompiling it per event leaks residual parser
+//! state into the long-lived Store (interned atoms, source-pos
+//! tables, etc.) and exhausts WASM linear memory after a few tens
+//! of thousands of requests. We compile lazily on the first event,
+//! cache the bytecode in a `OnceCell`, and reuse it forever after.
+//! QuickJS bytecode is `Vec<u8>` — owning it across calls doesn't
+//! hold any Store references.
 
 use alloc::format;
+use alloc::vec::Vec;
+use core::cell::OnceCell;
 
 use crate::stdio::write_stderr;
+
+// `OnceCell` is `!Sync`, but the daemon-event path is single-threaded
+// inside the WASM Store: Javy's plugin invocation model is one event
+// at a time. The host coordinator serialises events through a single
+// `daemon_step` call. We use a `static mut` accessed under the same
+// safety condition Javy itself relies on (no concurrent re-entry into
+// a plugin Store).
+static mut DISPATCH_BYTECODE: OnceCell<Vec<u8>> = OnceCell::new();
+
+#[allow(static_mut_refs)]
+fn dispatch_bytecode() -> Result<&'static [u8], &'static str> {
+    // Safety: see module comment — daemon-event invocations are
+    // serialised by the host. We never read while another writer
+    // could be running.
+    let cell = unsafe { &*core::ptr::addr_of!(DISPATCH_BYTECODE) };
+    if let Some(bc) = cell.get() {
+        return Ok(bc.as_slice());
+    }
+    let bc = javy_plugin_api::compile_src(DISPATCH_SOURCE.as_bytes())
+        .map_err(|_| "compile_src failed for dispatch wrapper")?;
+    unsafe {
+        let cell_mut = &mut *core::ptr::addr_of_mut!(DISPATCH_BYTECODE);
+        // OK to ignore Err here: a concurrent set is impossible per
+        // the serialisation invariant; if it ever happened, the
+        // first-set wins and we'd return that.
+        let _ = cell_mut.set(bc);
+        Ok(cell_mut.get().expect("just set").as_slice())
+    }
+}
 
 /// JS-side dispatch wrapper. Keeps the Rust dispatcher lean — the JS
 /// already has the handler table on globalThis; we just decode the
@@ -288,7 +328,7 @@ pub fn run(_envelope: &serde_json::Value) {
     // the JS dispatcher re-parses the envelope via __AB_GET_ENVELOPE__()
     // which gives it the authoritative bytes. That keeps the host→JS
     // boundary on exactly one serialization path.
-    let bytecode = match javy_plugin_api::compile_src(DISPATCH_SOURCE.as_bytes()) {
+    let bytecode = match dispatch_bytecode() {
         Ok(bc) => bc,
         Err(e) => {
             let msg = format!("compile_src (daemon-event dispatch): {e}\n");
@@ -296,7 +336,7 @@ pub fn run(_envelope: &serde_json::Value) {
             core::arch::wasm32::unreachable()
         }
     };
-    if let Err(e) = javy_plugin_api::invoke(&bytecode, None) {
+    if let Err(e) = javy_plugin_api::invoke(bytecode, None) {
         let msg = format!("invoke (daemon-event): {e}\n");
         write_stderr(msg.as_bytes());
         core::arch::wasm32::unreachable()
