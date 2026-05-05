@@ -1577,7 +1577,7 @@
     <div class="runs__head reveal">
       <span class="kicker">// What works today</span>
       <h2>The Node app you have<br/>runs on the runtime you want.</h2>
-    <p class="muted" style="max-width: 620px; margin: 12px auto 0; text-align: center; font-size: 15px;">Every Node 20 LTS built-in resolves to a real polyfill backed by Rust host functions, with Node 22 / 24 / 26 stable additions landing as we go. <code>require('express')</code> from real <code>node_modules</code> works today — see <code>examples/express-app</code>. No <code>require</code> returns a stub error.</p>
+    <p class="muted" style="max-width: 620px; margin: 12px auto 0; text-align: center; font-size: 15px;">Every Node 20 LTS built-ins backed by Rust host functions, with Node 22 / 24 / 26 stable additions landing as we go.</p>
     </div>
     <div class="runs__grid reveal">
       <div class="runs__cell">
@@ -1733,7 +1733,7 @@
 <!-- ============= CTA ============= -->
 <section class="cta">
   <div class="container">
-    <h2>One command to <em>go</em>.</h2>
+    <h2>One command to <em>BURN</em>.</h2>
     <div class="installer">
       <div class="installer__tabs" role="tablist" aria-label="Install command for OS">
         <button class="installer__tab" data-os="macos" role="tab" aria-selected="false">
@@ -1804,52 +1804,6 @@
     </div>
   </div>
 </footer>
-
-<!-- ============= TWEAKS PANEL ============= -->
-<aside class="tweaks" id="tweaks" aria-label="Tweaks">
-  <div class="tweaks__head">
-    <span class="tweaks__title">Tweaks</span>
-    <button class="tweaks__close" id="tw-close" aria-label="Close">×</button>
-  </div>
-  <div class="tweaks__body">
-    <div class="tweaks__group">
-      <div class="tweaks__label"><span>Mood</span></div>
-      <div class="tweaks__seg" role="radiogroup" aria-label="Mood">
-        <button data-tw-key="mood" data-tw-val="violet">Violet</button>
-        <button data-tw-key="mood" data-tw-val="inferno">Inferno</button>
-        <button data-tw-key="mood" data-tw-val="cyber">Cyber</button>
-      </div>
-      <p class="tweaks__hint">Reshapes accent, gradient, and aurora colors across the page.</p>
-    </div>
-
-    <div class="tweaks__group">
-      <div class="tweaks__label"><span>Density</span></div>
-      <div class="tweaks__seg" role="radiogroup" aria-label="Density">
-        <button data-tw-key="density" data-tw-val="airy">Airy</button>
-        <button data-tw-key="density" data-tw-val="standard">Standard</button>
-        <button data-tw-key="density" data-tw-val="compressed">Compressed</button>
-      </div>
-      <p class="tweaks__hint">Scales the vertical rhythm of every section.</p>
-    </div>
-
-    <div class="tweaks__group">
-      <div class="tweaks__label"><span>Code theme</span></div>
-      <div class="tweaks__seg" role="radiogroup" aria-label="Code theme">
-        <button data-tw-key="codeTheme" data-tw-val="auto">Auto</button>
-        <button data-tw-key="codeTheme" data-tw-val="midnight">Midnight</button>
-        <button data-tw-key="codeTheme" data-tw-val="inferno">Inferno</button>
-        <button data-tw-key="codeTheme" data-tw-val="matrix">Matrix</button>
-      </div>
-      <p class="tweaks__hint">Recolors syntax tokens, code panels, and the live terminal. Auto follows the mood.</p>
-    </div>
-
-    <div class="tweaks__group">
-      <div class="tweaks__label"><span>Orbital intensity</span><span class="v" id="tw-intensity-val">70</span></div>
-      <input type="range" id="tw-intensity" class="tweaks__slider" min="0" max="100" step="5" value="70" oninput="this.style.setProperty('--p', this.value)" />
-      <p class="tweaks__hint">Glow strength, sonar speed, and how many chips orbit the logo.</p>
-    </div>
-  </div>
-</aside>
 
 <script>
   /* ============= REVEAL ON SCROLL ============= */
@@ -2293,17 +2247,6 @@ fn main() -> anyhow::Result<()> {
   })();
 
 </script>
-
-<script>
-  /* TWEAKS — defaults declared inline so the host can rewrite them on disk. */
-  window.TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
-    "mood": "inferno",
-    "density": "standard",
-    "intensity": 100,
-    "codeTheme": "midnight"
-  }/*EDITMODE-END*/;
-</script>
-<script src="tweaks.js"></script>
 
 </body>
 </html>

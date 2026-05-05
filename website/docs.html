@@ -67,6 +67,62 @@
     border-radius: var(--radius-tag);
     color: var(--fg-muted);
   }
+  .nav__search-results {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0; right: 0;
+    background: var(--bg);
+    border: 1px solid var(--stroke);
+    border-radius: 8px;
+    box-shadow: 0 16px 40px rgba(15, 18, 35, 0.12);
+    max-height: 60vh;
+    overflow-y: auto;
+    display: none;
+    z-index: 60;
+  }
+  .nav__search-results.open { display: block; }
+  .nav__search-row {
+    display: block;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--stroke);
+    color: var(--fg);
+  }
+  .nav__search-row:last-child { border-bottom: 0; }
+  .nav__search-row:hover { background: var(--bg-soft); }
+  .nav__search-row.active { background: rgba(232, 53, 10, 0.07); }
+  .nav__search-row__title {
+    font-family: var(--font-display);
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--fg);
+    margin-bottom: 2px;
+    display: flex; align-items: baseline; gap: 8px;
+  }
+  .nav__search-row__title .kind {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--action);
+  }
+  .nav__search-row__snip {
+    font-size: 12.5px;
+    color: var(--fg-muted);
+    line-height: 1.45;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .nav__search-row mark {
+    background: rgba(232, 53, 10, 0.18);
+    color: inherit;
+    padding: 0 2px;
+    border-radius: 2px;
+  }
+  .nav__search-empty {
+    padding: 14px; font-size: 13px; color: var(--fg-muted); text-align: center;
+  }
   .nav__cta { display: flex; gap: 8px; align-items: center; }
 
   /* ============= LAYOUT ============= */
@@ -1545,13 +1601,174 @@ $ ./target/release/<span class="tok-mod">burn</span> --version</pre>
     setTimeout(() => b.textContent = 'Click to copy', 1400);
   });
 
-  /* search shortcut */
-  document.addEventListener('keydown', (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-      e.preventDefault();
-      document.querySelector('.nav__search input')?.focus();
+  /* doc search — single-page client index over h2 + h3 sections.
+     Indexes title + body text per section, ranks by simple weighted
+     substring match, renders a results dropdown under the input. */
+  (function search() {
+    const wrap  = document.querySelector('.nav__search');
+    const input = wrap?.querySelector('input');
+    if (!wrap || !input) return;
+
+    const headings = [...document.querySelectorAll('.doc h2[id], .doc h3[id]')];
+    const index = headings.map(h => {
+      const title = h.textContent.replace(/^#\s*/, '').trim();
+      let body = '';
+      let n = h.nextElementSibling;
+      while (n && !/^H[23]$/.test(n.tagName)) {
+        body += ' ' + n.textContent;
+        n = n.nextElementSibling;
+      }
+      body = body.replace(/\s+/g, ' ').trim();
+      return {
+        id: h.id,
+        title,
+        body,
+        titleLower: title.toLowerCase(),
+        bodyLower:  body.toLowerCase(),
+        kind: h.tagName === 'H2' ? 'section' : 'topic',
+      };
+    });
+
+    const dd = document.createElement('div');
+    dd.className = 'nav__search-results';
+    dd.setAttribute('role', 'listbox');
+    wrap.appendChild(dd);
+
+    let activeIdx = -1;
+    let lastResults = [];
+
+    function escapeReg(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+    function escapeHtml(s) {
+      return s.replace(/[&<>"']/g, c => (
+        { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]
+      ));
     }
-  });
+    function highlight(text, terms) {
+      let out = escapeHtml(text);
+      for (const t of terms) {
+        if (!t) continue;
+        out = out.replace(new RegExp('(' + escapeReg(t) + ')', 'gi'), '<mark>$1</mark>');
+      }
+      return out;
+    }
+
+    function rank(q) {
+      const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+      if (!terms.length) return [];
+      return index.map(s => {
+        let score = 0;
+        for (const t of terms) {
+          if (s.titleLower === t)            score += 40;
+          if (s.titleLower.startsWith(t))    score += 12;
+          if (s.titleLower.includes(t))      score += 8;
+          const re = new RegExp(escapeReg(t), 'g');
+          const hits = (s.bodyLower.match(re) || []).length;
+          score += Math.min(hits, 5) * 2;
+        }
+        return { s, score };
+      })
+        .filter(r => r.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 8)
+        .map(r => r.s);
+    }
+
+    function snippetFor(s, terms) {
+      const t = terms[0];
+      if (!t) return s.body.slice(0, 110);
+      const i = s.bodyLower.indexOf(t);
+      if (i < 0) return s.body.slice(0, 110);
+      const start = Math.max(0, i - 32);
+      const end   = Math.min(s.body.length, i + t.length + 80);
+      const pre   = start > 0 ? '…' : '';
+      const post  = end < s.body.length ? '…' : '';
+      return pre + s.body.slice(start, end) + post;
+    }
+
+    function setActive(i) {
+      const rows = dd.querySelectorAll('.nav__search-row');
+      if (!rows.length) return;
+      activeIdx = ((i % rows.length) + rows.length) % rows.length;
+      rows.forEach((r, j) => r.classList.toggle('active', j === activeIdx));
+      rows[activeIdx].scrollIntoView({ block: 'nearest' });
+    }
+
+    function close() {
+      dd.classList.remove('open');
+      activeIdx = -1;
+    }
+
+    function render() {
+      const q = input.value.trim();
+      if (!q) { close(); dd.innerHTML = ''; return; }
+      const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+      const results = rank(q);
+      lastResults = results;
+      if (!results.length) {
+        dd.innerHTML = '<div class="nav__search-empty">No matches for “' + escapeHtml(q) + '”.</div>';
+        dd.classList.add('open');
+        activeIdx = -1;
+        return;
+      }
+      dd.innerHTML = results.map((r, i) => (
+        '<a class="nav__search-row' + (i === 0 ? ' active' : '') + '" ' +
+        'href="#' + r.id + '" data-idx="' + i + '" role="option">' +
+          '<div class="nav__search-row__title">' +
+            '<span class="kind">' + r.kind + '</span>' +
+            highlight(r.title, terms) +
+          '</div>' +
+          '<div class="nav__search-row__snip">' +
+            highlight(snippetFor(r, terms), terms) +
+          '</div>' +
+        '</a>'
+      )).join('');
+      activeIdx = 0;
+      dd.classList.add('open');
+    }
+
+    input.addEventListener('input', render);
+    input.addEventListener('focus', () => { if (input.value) render(); });
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown')      { e.preventDefault(); setActive(activeIdx + 1); }
+      else if (e.key === 'ArrowUp')   { e.preventDefault(); setActive(activeIdx - 1); }
+      else if (e.key === 'Enter') {
+        const rows = dd.querySelectorAll('.nav__search-row');
+        if (activeIdx >= 0 && rows[activeIdx]) {
+          e.preventDefault();
+          rows[activeIdx].click();
+        }
+      } else if (e.key === 'Escape') {
+        if (dd.classList.contains('open')) { e.preventDefault(); close(); }
+        else { input.blur(); }
+      }
+    });
+
+    dd.addEventListener('click', (e) => {
+      const row = e.target.closest('.nav__search-row');
+      if (!row) return;
+      // let the anchor navigation happen, then dismiss
+      setTimeout(() => { close(); input.value = ''; input.blur(); }, 0);
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!wrap.contains(e.target)) close();
+    });
+
+    /* keyboard shortcut: Cmd/Ctrl+K focuses + selects */
+    document.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        input.focus();
+        input.select();
+      }
+      if (e.key === '/' && document.activeElement !== input &&
+          !['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)) {
+        e.preventDefault();
+        input.focus();
+      }
+    });
+  })();
 
   /* OS-aware installer (multiple per page) */
   (function installers() {
@@ -1621,63 +1838,6 @@ $ ./target/release/<span class="tok-mod">burn</span> --version</pre>
     }
   })();
 </script>
-
-<!-- ============= TWEAKS PANEL ============= -->
-<aside class="tweaks" id="tweaks" aria-label="Tweaks">
-  <div class="tweaks__head">
-    <span class="tweaks__title">Tweaks</span>
-    <button class="tweaks__close" id="tw-close" aria-label="Close">×</button>
-  </div>
-  <div class="tweaks__body">
-    <div class="tweaks__group">
-      <div class="tweaks__label"><span>Mood</span></div>
-      <div class="tweaks__seg" role="radiogroup" aria-label="Mood">
-        <button data-tw-key="mood" data-tw-val="violet">Violet</button>
-        <button data-tw-key="mood" data-tw-val="inferno">Inferno</button>
-        <button data-tw-key="mood" data-tw-val="cyber">Cyber</button>
-      </div>
-      <p class="tweaks__hint">Reshapes accent, gradient, and aurora colors across the docs.</p>
-    </div>
-
-    <div class="tweaks__group">
-      <div class="tweaks__label"><span>Density</span></div>
-      <div class="tweaks__seg" role="radiogroup" aria-label="Density">
-        <button data-tw-key="density" data-tw-val="airy">Airy</button>
-        <button data-tw-key="density" data-tw-val="standard">Standard</button>
-        <button data-tw-key="density" data-tw-val="compressed">Compressed</button>
-      </div>
-      <p class="tweaks__hint">Scales the vertical rhythm of every section.</p>
-    </div>
-
-    <div class="tweaks__group">
-      <div class="tweaks__label"><span>Code theme</span></div>
-      <div class="tweaks__seg" role="radiogroup" aria-label="Code theme">
-        <button data-tw-key="codeTheme" data-tw-val="auto">Auto</button>
-        <button data-tw-key="codeTheme" data-tw-val="midnight">Midnight</button>
-        <button data-tw-key="codeTheme" data-tw-val="inferno">Inferno</button>
-        <button data-tw-key="codeTheme" data-tw-val="matrix">Matrix</button>
-      </div>
-      <p class="tweaks__hint">Recolors every codeblock and adds an ember shimmer. Auto follows the mood.</p>
-    </div>
-
-    <div class="tweaks__group">
-      <div class="tweaks__label"><span>Glow intensity</span><span class="v" id="tw-intensity-val">70</span></div>
-      <input type="range" id="tw-intensity" class="tweaks__slider" min="0" max="100" step="5" value="70" />
-      <p class="tweaks__hint">Strength of the ambient gradient highlights and accents.</p>
-    </div>
-  </div>
-</aside>
-
-<script>
-  /* TWEAKS — defaults declared inline so the host can rewrite them on disk. */
-  window.TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
-    "mood": "inferno",
-    "density": "standard",
-    "intensity": 70,
-    "codeTheme": "auto"
-  }/*EDITMODE-END*/;
-</script>
-<script src="tweaks.js"></script>
 
 </body>
 </html>

@@ -107,7 +107,7 @@ See [`examples/`](./examples/) for standalone projects covering single
 UDF, batched UDF, multi-worker scheduling, streaming crypto,
 `HostContext` + capability grants, and rebuilding `burn` in 30 lines.
 [`examples/express-app`](./examples/express-app) runs a real Express.js
-app — `require('express')` resolves the actual npm package out of
+app: `require('express')` resolves the actual npm package out of
 `node_modules/` and serves HTTP end-to-end.
 
 ---
@@ -132,11 +132,11 @@ app — `require('express')` resolves the actual npm package out of
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
 
-**Corporate use notice.** Any corporate entity — company, agency, fund, foundation, or any organisation operating commercially — that uses Afterburner (in production, in internal tooling, in a product, in a service, or as a research artefact tied to commercial work) **must email the maintainer** at `vertexclique |TA| gmail <BOT> com` before adopting it. The maintainer reserves the right to refuse permission to use this project to specific entities, at the maintainer's sole discretion, regardless of the underlying Apache-2.0 grant.
+**Corporate use notice.** Any corporate entity (company, agency, fund, foundation, or any organisation operating commercially) that uses Afterburner (in production, in internal tooling, in a product, in a service, or as a research artefact tied to commercial work) **must email the maintainer** at `vertexclique |TA| gmail <BOT> com` before adopting it. The maintainer reserves the right to refuse permission to use this project to specific entities, at the maintainer's sole discretion, regardless of the underlying Apache-2.0 grant.
 
-This notice **applies equally to forks, soft forks, derivative works, repackagings, rebrands, vendored copies, and embedded copies** of Afterburner — whether the source originates from this repository, a hosted fork on any platform (GitHub, GitLab, Codeberg, internal mirrors, etc.), a vendored snapshot in another repo, an npm/cargo/Docker re-publication, or a derivative project that incorporates any non-trivial portion of this code base. There is no loophole via forking, renaming, mirroring, or wrapping: a corporate entity that uses Afterburner via any of these paths is bound by the same notice as a corporate entity using the upstream directly.
+This notice **applies equally to forks, soft forks, derivative works, repackagings, rebrands, vendored copies, and embedded copies** of Afterburner whether the source originates from this repository, a hosted fork on any platform (GitHub, GitLab, Codeberg, internal mirrors, etc.), a vendored snapshot in another repo, an npm/cargo/Docker re-publication, or a derivative project that incorporates any non-trivial portion of this code base. There is no loophole via forking, renaming, mirroring, or wrapping: a corporate entity that uses Afterburner via any of these paths is bound by the same notice as a corporate entity using the upstream directly.
 
-Individuals using Afterburner for personal projects, students using it for coursework, and non-commercial open-source projects (no paid sponsorship, no monetised hosting, no enterprise SLA) are not subject to this notice — they're explicitly welcome under the Apache-2.0 terms.
+Individuals using Afterburner for personal projects, students using it for coursework, and non-commercial open-source projects (no paid sponsorship, no monetised hosting, no enterprise SLA) are not subject to this notice, they're explicitly welcome under the Apache-2.0 terms.
 
 ---
 
