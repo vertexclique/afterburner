@@ -69,9 +69,16 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             archive: zip
-          - target: aarch64-pc-windows-msvc
-            os: windows-latest
-            archive: zip
+          # aarch64-pc-windows-msvc is intentionally NOT in the
+          # release matrix. rustls's default Ring crypto backend
+          # lacks aarch64-windows assembly, and the resulting build
+          # failure cascades into 56+ "cannot find rustls" errors
+          # across `daemon_tls.rs`. Re-enable when we migrate to the
+          # `aws-lc-rs` crypto provider (which supports all four
+          # major Tier 1/2 platform×arch combos). x86_64-pc-windows-
+          # msvc above covers the bulk of Windows users; ARM Windows
+          # users can run the x86_64 binary under emulation in the
+          # meantime.
     steps:
       - uses: actions/checkout@v4
 

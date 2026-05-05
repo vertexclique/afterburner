@@ -58,8 +58,19 @@ afterburner-node-compat.workspace = true
 hex.workspace = true
 base64.workspace = true
 
-[target.'cfg(unix)'.dependencies]
-libc.workspace = true
+# Daemon deps. All cross-platform — `axum`, `tokio`, `hyper`,
+# `bytes`, `rustls`, `tokio-rustls`, `rustls-pemfile`, `webpki-roots`,
+# `socket2` build on Linux, macOS, and Windows. Previously these
+# were under `[target.'cfg(unix)'.dependencies]`, which silently
+# skipped them on Windows targets — `cargo build --target
+# *-windows-msvc --features daemon` failed with "cannot find module
+# or crate `rustls`" 56× over because the deps were never linked.
+#
+# `aarch64-pc-windows-msvc` still fails: rustls's Ring crypto
+# backend lacks aarch64-windows assembly. Excluded from the release
+# matrix in `.github/workflows/release.yml` until we migrate to
+# `aws-lc-rs`. x86_64-windows builds clean with these deps in the
+# main `[dependencies]` table.
 axum = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true }
@@ -69,6 +80,10 @@ tokio-rustls = { workspace = true, optional = true }
 rustls-pemfile = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
 socket2 = { workspace = true, optional = true }
+
+# Genuinely unix-only — no Windows equivalent for the parts we use.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 afterburner-ignite.workspace = true
