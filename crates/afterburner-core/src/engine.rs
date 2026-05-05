@@ -22,6 +22,31 @@ pub trait Combustor: Send + Sync {
     /// produced.
     fn thrust(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<Value>;
 
+    /// Thrust with an optional working-directory override. Same semantics
+    /// as [`thrust`](Self::thrust); `cwd` is the value backends should
+    /// expose to user code as `process.cwd()` / `__host_cwd` for the
+    /// duration of this invocation. Backends that don't surface cwd at
+    /// runtime (or don't support per-call overrides) inherit the default
+    /// implementation, which silently drops `cwd` and forwards to
+    /// [`thrust`](Self::thrust).
+    ///
+    /// Embedders that need cwd to flow into the JS sandbox should set it
+    /// at registration time via `Afterburner::builder().cwd(path)`; the
+    /// builder prepends a cwd-pin prelude to the registered source so
+    /// `require('foo')` resolves out of `<cwd>/node_modules/foo`. The
+    /// per-call hook here exists for future backends that wire cwd into
+    /// the plugin envelope; today only the registration-time path is
+    /// active.
+    fn thrust_with_cwd(
+        &self,
+        id: &ScriptId,
+        input: &Value,
+        limits: &FuelGauge,
+        _cwd: Option<&str>,
+    ) -> Result<Value> {
+        self.thrust(id, input, limits)
+    }
+
     /// Release any resources associated with a compiled script. After this
     /// call, `thrust` with the same `id` returns `ScriptNotFound`.
     fn extinguish(&self, id: &ScriptId);

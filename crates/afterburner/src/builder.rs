@@ -12,6 +12,7 @@ use afterburner_core::{
 };
 use serde_json::Value;
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -89,6 +90,16 @@ pub struct Afterburner {
     defaults: FuelGauge,
     /// Kept for debug/introspection; backend already holds its own clone.
     _state_store: SharedStateStore,
+    /// Working directory for the registered scripts. When `Some`,
+    /// `register()` prepends a small JS prelude that pins
+    /// `globalThis.__host_cwd` and refreshes the entry-`require`
+    /// resolver so `require('foo')` walks `<cwd>/node_modules/foo` —
+    /// matching how `cwd` flows through Node's CommonJS resolver. The
+    /// prelude also rebinds the local `require` parameter (the UDF
+    /// envelope passes `globalThis.require` by value at call time, so
+    /// updating `globalThis.require` is invisible to the function-
+    /// scoped `require` without an explicit re-fetch).
+    cwd: Option<PathBuf>,
     /// `Some` only in flow mode; gives `register_bundle` a path to the
     /// flow-engine's multi-file loader.
     #[cfg(feature = "flow")]
@@ -120,12 +131,47 @@ impl Afterburner {
     /// Compile + cache a source. Idempotent by content hash — registering
     /// the same source twice returns the same `ScriptId` and skips
     /// recompilation.
+    ///
+    /// When the builder was configured with `.cwd(path)`, this method
+    /// prepends a JS prelude that pins `globalThis.__host_cwd` and
+    /// refreshes the require resolver so `require('foo')` walks from
+    /// `<cwd>/node_modules/foo`. The prelude also rebinds the local
+    /// `require` parameter — the UDF envelope passes
+    /// `globalThis.require` *by value* at the function-call site, so
+    /// updating the global is invisible without an explicit re-fetch.
+    /// Without the rebind, `require('express')` walks from `/` and
+    /// fails to resolve.
     pub fn register(&self, source: &str) -> Result<ScriptId> {
+        let wrapped: String;
+        let effective: &str = match self.cwd_prelude() {
+            Some(prelude) => {
+                wrapped = format!("{prelude}{source}");
+                wrapped.as_str()
+            }
+            None => source,
+        };
         match &self.engine {
-            EngineHolder::Cache(c) => c.register(source),
+            EngineHolder::Cache(c) => c.register(effective),
             #[cfg(feature = "thrust")]
-            EngineHolder::Thrust(t) => t.register(source),
+            EngineHolder::Thrust(t) => t.register(effective),
         }
+    }
+
+    /// Render the cwd-pin prelude when a cwd is configured, else `None`.
+    /// Centralised so both `register()` and any future per-call cwd
+    /// path emit identical JS.
+    fn cwd_prelude(&self) -> Option<String> {
+        let cwd = self.cwd.as_ref()?;
+        let cwd_str = cwd.to_str()?;
+        // JSON-encode for safe interpolation into a JS string literal.
+        let cwd_json = serde_json::to_string(cwd_str).ok()?;
+        Some(format!(
+            "globalThis.__host_cwd = {cwd_json};\n\
+             if (typeof globalThis.__plenum_refresh_entry_require === 'function') {{\n\
+                 globalThis.__plenum_refresh_entry_require();\n\
+                 require = globalThis.require;\n\
+             }}\n"
+        ))
     }
 
     /// Compile + cache a multi-file ES-module bundle. Flow mode only;
@@ -251,6 +297,7 @@ pub struct AfterburnerBuilder {
     host_context: Option<Arc<dyn HostContext>>,
     state_store: Option<SharedStateStore>,
     cache_backend: Option<Arc<dyn BurnCacheBackend>>,
+    cwd: Option<PathBuf>,
     #[cfg(feature = "flow")]
     use_flow: bool,
 }
@@ -317,6 +364,23 @@ impl AfterburnerBuilder {
     /// Attach a shared (cluster-wide) bytecode/source cache backend.
     pub fn cache_backend(mut self, backend: Arc<dyn BurnCacheBackend>) -> Self {
         self.cache_backend = Some(backend);
+        self
+    }
+
+    /// Set the working directory for registered scripts. When set, the
+    /// require resolver walks `node_modules` from this directory rather
+    /// than the host process's cwd. Required for embedders that ship
+    /// JS with `require('foo')` against vendored or `npm install`-ed
+    /// dependencies (e.g. an Express app whose `node_modules` lives
+    /// alongside the example, not next to the host binary).
+    ///
+    /// The path must be valid UTF-8; non-UTF-8 paths are silently
+    /// ignored at registration time (the prelude is omitted). Pass an
+    /// absolute path to avoid surprises — relative paths resolve
+    /// against the host process's working directory at register time,
+    /// not at run time.
+    pub fn cwd(mut self, path: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(path.into());
         self
     }
 
@@ -390,6 +454,7 @@ impl AfterburnerBuilder {
             engine: EngineHolder::Cache(cache),
             defaults,
             _state_store: state_store,
+            cwd: self.cwd,
             #[cfg(feature = "flow")]
             flow,
         })
@@ -569,6 +634,7 @@ impl ThreadedBuilder {
             engine: EngineHolder::Thrust(engine),
             defaults,
             _state_store: state_store,
+            cwd: self.parent.cwd,
             #[cfg(feature = "flow")]
             flow: None,
         })
