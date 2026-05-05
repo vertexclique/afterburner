@@ -374,6 +374,7 @@ fn bench_columnar_typed_parallel(
                             name: names[c].as_str(),
                             dtype: ColumnDtype::Float64,
                             data: &cols[c],
+            heap: None,
                             validity: None,
                         });
                     }
@@ -512,6 +513,7 @@ fn bench_columnar_typed_double(
                         name: "x",
                         dtype: ColumnDtype::Float64,
                         data: buf,
+            heap: None,
                         validity: None,
                     });
                     let _ = burn

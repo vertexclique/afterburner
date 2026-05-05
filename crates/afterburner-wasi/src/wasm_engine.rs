@@ -1303,12 +1303,14 @@ mod tests {
             name: "c0",
             dtype: ColumnDtype::Int32,
             data: &c0_data,
+            heap: None,
             validity: None,
         });
         batch.push(ColumnRef {
             name: "c1",
             dtype: ColumnDtype::Int32,
             data: &c1_data,
+            heap: None,
             validity: None,
         });
 
@@ -1367,6 +1369,7 @@ mod tests {
                 name: names[j].as_str(),
                 dtype: ColumnDtype::Float64,
                 data: buf,
+            heap: None,
                 validity: None,
             });
         }
@@ -1408,6 +1411,7 @@ mod tests {
             name: "c0",
             dtype: ColumnDtype::Int32,
             data: &data,
+            heap: None,
             validity: None,
         });
         let err = c
@@ -1433,6 +1437,7 @@ mod tests {
             name: "amount",
             dtype: ColumnDtype::Decimal128,
             data: &data,
+            heap: None,
             validity: None,
         });
         let err = c

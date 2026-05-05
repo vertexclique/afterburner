@@ -112,13 +112,15 @@ pub enum ColumnDtype {
 }
 
 impl ColumnDtype {
-    /// Per-element byte count for fixed-width dtypes.
+    /// Per-row byte count of the column's *primary* data buffer.
     ///
-    /// Returns `Err` for variable-width dtypes (Utf8 / Bytea / Jsonb) —
-    /// they don't have a per-element size; their slots are 16 bytes
-    /// each and the actual byte count of a column is
-    /// `row_count × 16` (slots) plus a separate heap. Use
-    /// [`Self::is_fixed_width`] to gate before calling.
+    /// * Fixed-width dtypes: the size of one element.
+    /// * Variable-width (Utf8 / Bytea / Jsonb): always 16 bytes — the
+    ///   inline-or-pointer slot. Long-slot bytes live in a separate
+    ///   heap buffer; `size_bytes` covers the slot array only.
+    ///
+    /// The encoder uses this to validate `data.len() == row_count *
+    /// dtype.size_bytes()` for every column type.
     pub fn size_bytes(self) -> Result<usize, AfterburnerError> {
         Ok(match self {
             ColumnDtype::Bool | ColumnDtype::Int8 | ColumnDtype::UInt8 => 1,
@@ -129,16 +131,18 @@ impl ColumnDtype {
             | ColumnDtype::Float64
             | ColumnDtype::Timestamp => 8,
             ColumnDtype::Decimal128 | ColumnDtype::Interval | ColumnDtype::Uuid => 16,
-            ColumnDtype::Utf8 | ColumnDtype::Bytea | ColumnDtype::Jsonb => {
-                return Err(AfterburnerError::Engine(format!(
-                    "ColumnDtype::{self:?} is variable-width — call inline_slot_bytes() + heap separately",
-                )));
-            }
+            // Variable-width dtypes use a 16-byte inline-or-pointer
+            // slot per row (DuckDB-style `string_t`). The actual
+            // bytes for >12-byte slots live in the heap buffer
+            // pointed at by `heap_offset` in the column header.
+            ColumnDtype::Utf8 | ColumnDtype::Bytea | ColumnDtype::Jsonb => INLINE_SLOT_BYTES,
         })
     }
 
-    /// True if the dtype's byte size per row is a single constant
-    /// (no inline slot + heap split). Phase 1 ships only these.
+    /// True if the dtype's storage is a single constant-stride buffer
+    /// (no separate heap region). Numerics + 16-byte fixed dtypes.
+    /// Variable-width returns `false`; that path needs the column's
+    /// `heap` slice in addition to its slot data.
     pub fn is_fixed_width(self) -> bool {
         !matches!(
             self,
@@ -146,26 +150,14 @@ impl ColumnDtype {
         )
     }
 
-    /// True if the dtype is implemented in the current Phase. Phase 1
-    /// ships fixed-width numeric + temporal dtypes; the rest are
-    /// reserved tags and surfaced via a clean
-    /// [`AfterburnerError::Engine`] from the columnar host path.
+    /// True if the dtype is implemented in the current Afterburner
+    /// version. Decimal128 / Uuid / Interval (16-byte fixed) remain
+    /// Phase-2 deferred; everything else (numerics + temporal +
+    /// Utf8 / Bytea / Jsonb) ships from Phase 1.5 onward.
     pub fn is_phase1_supported(self) -> bool {
-        matches!(
+        !matches!(
             self,
-            ColumnDtype::Bool
-                | ColumnDtype::Int8
-                | ColumnDtype::Int16
-                | ColumnDtype::Int32
-                | ColumnDtype::Int64
-                | ColumnDtype::UInt8
-                | ColumnDtype::UInt16
-                | ColumnDtype::UInt32
-                | ColumnDtype::UInt64
-                | ColumnDtype::Float32
-                | ColumnDtype::Float64
-                | ColumnDtype::Date32
-                | ColumnDtype::Timestamp
+            ColumnDtype::Decimal128 | ColumnDtype::Interval | ColumnDtype::Uuid
         )
     }
 
@@ -204,6 +196,22 @@ impl ColumnDtype {
     }
 }
 
+/// Inline-or-pointer slot size for variable-width dtypes (Utf8 /
+/// Bytea / Jsonb). 16 bytes per row, DuckDB-style `string_t` layout:
+///
+/// * `len ≤ 12`: `[len: u32 LE][bytes: [u8; 12]]` — inline; first
+///   `len` bytes of the data field carry the value, remainder is
+///   padding.
+/// * `len > 12`:  `[len: u32 LE][prefix: [u8; 4]][heap_off: u32 LE]`
+///   — the 4-byte prefix is the first four bytes of the value (used
+///   for fast comparisons / hash bucketing); `heap_off` is the
+///   absolute byte offset into the column's heap buffer where the
+///   full `len` bytes live.
+pub const INLINE_SLOT_BYTES: usize = 16;
+/// Inline cap — slot values up to this size embed in the slot
+/// itself, longer values point at the heap buffer.
+pub const INLINE_SLOT_INLINE_MAX: usize = 12;
+
 /// Borrowed reference to a single column in a [`ColumnarBatch`].
 ///
 /// The host owns the buffers; this struct just borrows them for the
@@ -220,11 +228,23 @@ impl ColumnDtype {
 pub struct ColumnRef<'a> {
     pub name: &'a str,
     pub dtype: ColumnDtype,
-    /// Raw column data. For fixed-width dtypes, length must be exactly
-    /// `row_count × dtype.size_bytes()`. For variable-width (Phase 1.5),
-    /// this is the slot array (`row_count × 16` bytes) and `heap`
-    /// carries the bytes the long-string slots point at.
+    /// Primary column data buffer.
+    ///
+    /// * Fixed-width dtypes: exactly `row_count × dtype.size_bytes()`
+    ///   bytes of contiguous element values.
+    /// * Variable-width (Utf8 / Bytea / Jsonb): exactly
+    ///   `row_count × INLINE_SLOT_BYTES = row_count × 16` bytes of
+    ///   inline-or-pointer slots. Each slot's first 4 bytes are the
+    ///   value's length (u32 LE); slots with `len ≤ 12` carry the
+    ///   value inline in the next 12 bytes; slots with `len > 12`
+    ///   carry a 4-byte prefix + a 4-byte `heap_offset` (u32 LE)
+    ///   into the column's [`Self::heap`] buffer.
     pub data: &'a [u8],
+    /// Heap-bytes buffer for variable-width dtypes. `Some(slice)`
+    /// only when `dtype.is_fixed_width() == false`. Long-slot
+    /// `heap_offset` indexes into this buffer; the slot's `len`
+    /// gives how many bytes to read.
+    pub heap: Option<&'a [u8]>,
     /// `None` ⇒ every row valid. `Some(bitmap)` ⇒ packed
     /// LSB-first u64 bitmap, `ceil(row_count / 8)` bytes.
     pub validity: Option<&'a [u8]>,
@@ -268,9 +288,79 @@ pub struct ColumnarOutput {
 pub struct OwnedColumn {
     pub name: String,
     pub dtype: ColumnDtype,
+    /// Same shape as [`ColumnRef::data`].
     pub data: Vec<u8>,
+    /// Heap-bytes buffer; `Some` only for variable-width dtypes.
+    pub heap: Option<Vec<u8>>,
     /// `None` ⇒ every row valid. Same convention as [`ColumnRef::validity`].
     pub validity: Option<Vec<u8>>,
+}
+
+impl OwnedColumn {
+    /// Materialise the value at row `i` as a `&[u8]`. Variable-width
+    /// columns: handles inline + heap slots transparently. Fixed-
+    /// width columns: returns the element's `dtype.size_bytes()` bytes.
+    /// Caller is responsible for honouring the validity bitmap; this
+    /// helper does not consult `validity`.
+    pub fn row_bytes(&self, i: usize) -> Result<&[u8], AfterburnerError> {
+        if self.dtype.is_fixed_width() {
+            let stride = self.dtype.size_bytes()?;
+            let off = i.checked_mul(stride).ok_or_else(|| {
+                AfterburnerError::Engine(format!(
+                    "row_bytes: row {i} × stride {stride} overflows usize",
+                ))
+            })?;
+            return self
+                .data
+                .get(off..off + stride)
+                .ok_or_else(|| AfterburnerError::Engine(format!("row_bytes: row {i} out of range")));
+        }
+        // Variable-width: parse the inline-or-pointer slot.
+        let slot_off = i
+            .checked_mul(INLINE_SLOT_BYTES)
+            .ok_or_else(|| AfterburnerError::Engine("row_bytes: slot index overflow".into()))?;
+        let slot = self
+            .data
+            .get(slot_off..slot_off + INLINE_SLOT_BYTES)
+            .ok_or_else(|| AfterburnerError::Engine(format!("row_bytes: row {i} out of range")))?;
+        let len = u32::from_le_bytes(slot[0..4].try_into().unwrap()) as usize;
+        if len <= INLINE_SLOT_INLINE_MAX {
+            Ok(&slot[4..4 + len])
+        } else {
+            let heap_off =
+                u32::from_le_bytes(slot[12..16].try_into().unwrap()) as usize;
+            let heap = self.heap.as_ref().ok_or_else(|| {
+                AfterburnerError::Engine(format!(
+                    "row_bytes: var-width column '{}' has long slot at row {i} but no heap buffer",
+                    self.name,
+                ))
+            })?;
+            heap.get(heap_off..heap_off + len).ok_or_else(|| {
+                AfterburnerError::Engine(format!(
+                    "row_bytes: heap slice out of bounds: heap_off={heap_off}, len={len}, heap_len={}",
+                    heap.len(),
+                ))
+            })
+        }
+    }
+
+    /// Convenience for [`Self::row_bytes`] returning a UTF-8 `&str`
+    /// for [`ColumnDtype::Utf8`] columns.
+    pub fn row_str(&self, i: usize) -> Result<&str, AfterburnerError> {
+        if self.dtype != ColumnDtype::Utf8 {
+            return Err(AfterburnerError::Engine(format!(
+                "row_str called on non-Utf8 column '{}' (dtype {:?})",
+                self.name, self.dtype,
+            )));
+        }
+        let bytes = self.row_bytes(i)?;
+        std::str::from_utf8(bytes).map_err(|e| {
+            AfterburnerError::Engine(format!(
+                "row_str: column '{}' row {i} not UTF-8: {e}",
+                self.name,
+            ))
+        })
+    }
 }
 
 // ---- wire-level header layout ------------------------------------------
@@ -308,7 +398,10 @@ pub const COLUMN_HEADER_BYTES: usize = std::mem::size_of::<ColumnHeader>();
 /// Per-column header, byte-packed `#[repr(C)]`. The guest reads these
 /// sequentially out of the `[ColumnHeader; column_count]` array.
 ///
-/// Field order matters for ABI stability — never reorder.
+/// Field order matters for ABI stability — never reorder. Adding new
+/// fields is allowed (it grows the header size; the
+/// [`COLUMN_HEADER_BYTES`] constant is the SSOT for both sides) but
+/// reordering existing fields is not.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColumnHeader {
@@ -326,6 +419,17 @@ pub struct ColumnHeader {
     pub name_offset: u32,
     /// Length of the column name in bytes.
     pub name_len: u32,
+    /// **Variable-width dtypes only:** byte offset of the heap-bytes
+    /// buffer relative to the blob. `0` for fixed-width dtypes (no
+    /// heap region present); for var-width dtypes with no >12-byte
+    /// slots the heap is still emitted (possibly empty) and this
+    /// points at it. Phase 1.5+.
+    pub heap_offset: u32,
+    /// **Variable-width dtypes only:** length of the heap-bytes buffer
+    /// in bytes. `0` for fixed-width dtypes. The guest validates
+    /// every long-slot's `heap_offset + len` falls within
+    /// `heap_offset..heap_offset+heap_len`. Phase 1.5+.
+    pub heap_len: u32,
 }
 
 /// Offsets used to lay a [`ColumnarBatch`] into a contiguous host-side
@@ -394,6 +498,48 @@ pub fn encode_batch(batch: &ColumnarBatch<'_>) -> Result<EncodedBatch, Afterburn
                 stride,
             )));
         }
+        // Variable-width dtypes additionally require a heap buffer
+        // (possibly empty if every slot fits inline). Fixed-width
+        // dtypes must NOT pass a heap.
+        if col.dtype.is_fixed_width() {
+            if col.heap.is_some() {
+                return Err(AfterburnerError::Engine(format!(
+                    "column[{idx}] '{}': dtype {:?} is fixed-width — `heap` must be None",
+                    col.name, col.dtype,
+                )));
+            }
+        } else if col.heap.is_none() {
+            return Err(AfterburnerError::Engine(format!(
+                "column[{idx}] '{}': dtype {:?} is variable-width — `heap` is required (use Some(&[]) for empty)",
+                col.name, col.dtype,
+            )));
+        }
+        // Cross-validate slot heap_offsets for var-width columns: every
+        // long slot must point at a valid sub-range of the heap. Catch
+        // malformed inputs at encode time so the guest never sees a
+        // bad pointer.
+        if !col.dtype.is_fixed_width() {
+            let heap = col.heap.unwrap();
+            for r in 0..row_count as usize {
+                let slot_off = r * INLINE_SLOT_BYTES;
+                let slot = &col.data[slot_off..slot_off + INLINE_SLOT_BYTES];
+                let len = u32::from_le_bytes(slot[0..4].try_into().unwrap()) as usize;
+                if len > INLINE_SLOT_INLINE_MAX {
+                    let heap_off =
+                        u32::from_le_bytes(slot[12..16].try_into().unwrap()) as usize;
+                    if heap_off
+                        .checked_add(len)
+                        .is_none_or(|end| end > heap.len())
+                    {
+                        return Err(AfterburnerError::Engine(format!(
+                            "column[{idx}] '{}' row {r}: slot len={len}, heap_off={heap_off}, heap_len={} — out of bounds",
+                            col.name,
+                            heap.len(),
+                        )));
+                    }
+                }
+            }
+        }
         if let Some(bm) = col.validity {
             let need = row_count.div_ceil(8) as usize;
             if bm.len() < need {
@@ -446,6 +592,19 @@ pub fn encode_batch(batch: &ColumnarBatch<'_>) -> Result<EncodedBatch, Afterburn
         cursor += col.name.len();
         let name_len = u32_from_usize(col.name.len())?;
 
+        // Heap follows for variable-width dtypes. 1-byte alignment
+        // suffices because the JS-side reads heap bytes via
+        // `Uint8Array` (1-aligned) — only the slot array needs the
+        // 8-aligned boundary that the data buffer already gets.
+        // 0/0 sentinel for fixed-width columns.
+        let (heap_offset, heap_len) = if let Some(heap) = col.heap {
+            let off = u32_from_usize(cursor)?;
+            cursor += heap.len();
+            (off, u32_from_usize(heap.len())?)
+        } else {
+            (0, 0)
+        };
+
         headers.push(ColumnHeader {
             dtype: col.dtype as u8,
             _pad: [0; 3],
@@ -453,6 +612,8 @@ pub fn encode_batch(batch: &ColumnarBatch<'_>) -> Result<EncodedBatch, Afterburn
             validity_offset,
             name_offset,
             name_len,
+            heap_offset,
+            heap_len,
         });
     }
 
@@ -479,6 +640,8 @@ pub fn encode_batch(batch: &ColumnarBatch<'_>) -> Result<EncodedBatch, Afterburn
         write_u32_le(&mut bytes, h_off + 8, ch.validity_offset);
         write_u32_le(&mut bytes, h_off + 12, ch.name_offset);
         write_u32_le(&mut bytes, h_off + 16, ch.name_len);
+        write_u32_le(&mut bytes, h_off + 20, ch.heap_offset);
+        write_u32_le(&mut bytes, h_off + 24, ch.heap_len);
         h_off += COLUMN_HEADER_BYTES;
     }
 
@@ -491,6 +654,10 @@ pub fn encode_batch(batch: &ColumnarBatch<'_>) -> Result<EncodedBatch, Afterburn
         }
         let n_off = ch.name_offset as usize;
         bytes[n_off..n_off + col.name.len()].copy_from_slice(col.name.as_bytes());
+        if let Some(heap) = col.heap {
+            let h_off = ch.heap_offset as usize;
+            bytes[h_off..h_off + heap.len()].copy_from_slice(heap);
+        }
     }
 
     Ok(EncodedBatch {
@@ -534,6 +701,8 @@ pub fn decode_batch(blob: &[u8]) -> Result<ColumnarOutput, AfterburnerError> {
         let validity_offset = read_u32_le(blob, h_off + 8) as usize;
         let name_offset = read_u32_le(blob, h_off + 12) as usize;
         let name_len = read_u32_le(blob, h_off + 16) as usize;
+        let heap_offset = read_u32_le(blob, h_off + 20) as usize;
+        let heap_len = read_u32_le(blob, h_off + 24) as usize;
 
         let stride = dtype.size_bytes()?;
         let data_len = stride
@@ -581,10 +750,35 @@ pub fn decode_batch(blob: &[u8]) -> Result<ColumnarOutput, AfterburnerError> {
             .map_err(|e| AfterburnerError::Engine(format!("columnar reply column[{i}] name not UTF-8: {e}")))?
             .to_string();
 
+        // Read the heap buffer for variable-width dtypes. Fixed-width
+        // columns must have heap_len == 0 (and heap_offset == 0); we
+        // tolerate non-zero heap_offset for fixed-width as long as
+        // heap_len is zero (defensive — guest may write any value).
+        let heap = if dtype.is_fixed_width() {
+            if heap_len != 0 {
+                return Err(AfterburnerError::Engine(format!(
+                    "columnar reply column[{i}] '{name}': fixed-width dtype {dtype:?} has non-zero heap_len {heap_len}",
+                )));
+            }
+            None
+        } else {
+            if heap_offset
+                .checked_add(heap_len)
+                .is_none_or(|end| end > blob.len())
+            {
+                return Err(AfterburnerError::Engine(format!(
+                    "columnar reply column[{i}] '{name}' heap out of bounds: heap_offset={heap_offset}, len={heap_len}, blob_len={}",
+                    blob.len(),
+                )));
+            }
+            Some(blob[heap_offset..heap_offset + heap_len].to_vec())
+        };
+
         columns.push(OwnedColumn {
             name,
             dtype,
             data,
+            heap,
             validity,
         });
     }
@@ -652,10 +846,13 @@ mod tests {
     }
 
     #[test]
-    fn dtype_size_bytes_variable_width_errors() {
-        assert!(ColumnDtype::Utf8.size_bytes().is_err());
-        assert!(ColumnDtype::Bytea.size_bytes().is_err());
-        assert!(ColumnDtype::Jsonb.size_bytes().is_err());
+    fn dtype_size_bytes_variable_width_returns_inline_slot() {
+        // Phase 1.5: variable-width dtypes return INLINE_SLOT_BYTES
+        // (16) for the slot array. The actual bytes for >12-byte
+        // values live in a separate heap buffer.
+        assert_eq!(ColumnDtype::Utf8.size_bytes().unwrap(), INLINE_SLOT_BYTES);
+        assert_eq!(ColumnDtype::Bytea.size_bytes().unwrap(), INLINE_SLOT_BYTES);
+        assert_eq!(ColumnDtype::Jsonb.size_bytes().unwrap(), INLINE_SLOT_BYTES);
     }
 
     #[test]
@@ -675,14 +872,15 @@ mod tests {
             ColumnDtype::Float64,
             ColumnDtype::Date32,
             ColumnDtype::Timestamp,
-        ] {
-            assert!(d.is_phase1_supported(), "{:?} should be phase-1", d);
-        }
-        // Var-width + 16-byte fixed reserved-but-deferred for Phase 1.5/2.
-        for d in [
+            // Phase 1.5: variable-width dtypes are now supported.
             ColumnDtype::Utf8,
             ColumnDtype::Bytea,
             ColumnDtype::Jsonb,
+        ] {
+            assert!(d.is_phase1_supported(), "{:?} should be supported", d);
+        }
+        // 16-byte fixed reserved-but-deferred for Phase 2.
+        for d in [
             ColumnDtype::Decimal128,
             ColumnDtype::Uuid,
             ColumnDtype::Interval,
@@ -722,12 +920,14 @@ mod tests {
             name: "c0",
             dtype: ColumnDtype::Int32,
             data: &c0_data,
+            heap: None,
             validity: None,
         });
         batch.push(ColumnRef {
             name: "c1",
             dtype: ColumnDtype::Int32,
             data: &c1_data,
+            heap: None,
             validity: None,
         });
 
@@ -758,6 +958,7 @@ mod tests {
             name: "with_validity",
             dtype: ColumnDtype::Int64,
             data: &data,
+            heap: None,
             validity: Some(&validity),
         });
 
@@ -780,6 +981,7 @@ mod tests {
             name: "bad",
             dtype: ColumnDtype::Int32,
             data: &data,
+            heap: None,
             validity: None,
         });
         let err = encode_batch(&batch).unwrap_err();
@@ -795,6 +997,7 @@ mod tests {
             name: "amount",
             dtype: ColumnDtype::Decimal128,
             data: &data,
+            heap: None,
             validity: None,
         });
         let err = encode_batch(&batch).unwrap_err();
@@ -815,6 +1018,7 @@ mod tests {
             name: "c",
             dtype: ColumnDtype::Int8,
             data: &data,
+            heap: None,
             validity: Some(&bm),
         });
         let err = encode_batch(&batch).unwrap_err();
@@ -838,6 +1042,7 @@ mod tests {
             name: "x",
             dtype: ColumnDtype::Int32,
             data: &data,
+            heap: None,
             validity: None,
         });
         let mut encoded = encode_batch(&batch).unwrap();
@@ -870,6 +1075,7 @@ mod tests {
                 name: n,
                 dtype: ColumnDtype::Float64,
                 data: &f64_data,
+            heap: None,
                 validity: None,
             });
         }
@@ -890,6 +1096,7 @@ mod tests {
             name: "empty",
             dtype: ColumnDtype::Int64,
             data: &[],
+            heap: None,
             validity: None,
         });
         let encoded = encode_batch(&batch).unwrap();
@@ -924,6 +1131,7 @@ mod tests {
                 name: n.as_str(),
                 dtype: ColumnDtype::Float64,
                 data: &buf,
+            heap: None,
                 validity: None,
             });
         }
@@ -941,9 +1149,163 @@ mod tests {
         }
     }
 
+    /// Build a `(slots: Vec<u8>, heap: Vec<u8>)` pair from a list of
+    /// byte sequences using DuckDB-style inline-or-pointer slots.
+    /// Test-only — production callers (ScramDB-side adapter, etc.)
+    /// build their slot arrays from their own internal layouts.
+    fn build_var_column(values: &[&[u8]]) -> (Vec<u8>, Vec<u8>) {
+        let mut slots = vec![0u8; values.len() * INLINE_SLOT_BYTES];
+        let mut heap = Vec::new();
+        for (i, v) in values.iter().enumerate() {
+            let sb = i * INLINE_SLOT_BYTES;
+            let len_bytes = (v.len() as u32).to_le_bytes();
+            slots[sb..sb + 4].copy_from_slice(&len_bytes);
+            if v.len() <= INLINE_SLOT_INLINE_MAX {
+                slots[sb + 4..sb + 4 + v.len()].copy_from_slice(v);
+            } else {
+                slots[sb + 4..sb + 8].copy_from_slice(&v[0..4]);
+                let heap_off = (heap.len() as u32).to_le_bytes();
+                slots[sb + 12..sb + 16].copy_from_slice(&heap_off);
+                heap.extend_from_slice(v);
+            }
+        }
+        (slots, heap)
+    }
+
+    #[test]
+    fn encode_decode_roundtrip_utf8_inline_only() {
+        let strs: Vec<&[u8]> = vec![b"a", b"hi", b"world!", b"hello12byte!"]; // all ≤ 12 bytes
+        let (slots, heap) = build_var_column(&strs);
+        let mut batch = ColumnarBatch::new(strs.len() as u32);
+        batch.push(ColumnRef {
+            name: "msg",
+            dtype: ColumnDtype::Utf8,
+            data: &slots,
+            heap: Some(&heap),
+            validity: None,
+        });
+        let encoded = encode_batch(&batch).unwrap();
+        let decoded = decode_batch(&encoded.bytes).unwrap();
+        assert_eq!(decoded.row_count, 4);
+        assert_eq!(decoded.columns[0].dtype, ColumnDtype::Utf8);
+        assert_eq!(decoded.columns[0].data, slots);
+        // Heap is empty (no values > 12 bytes).
+        assert_eq!(decoded.columns[0].heap.as_ref().unwrap().len(), 0);
+        for (i, expect) in strs.iter().enumerate() {
+            assert_eq!(decoded.columns[0].row_str(i).unwrap().as_bytes(), *expect);
+        }
+    }
+
+    #[test]
+    fn encode_decode_roundtrip_utf8_with_heap() {
+        let long: &[u8] = b"hello there friend, this is over twelve bytes for sure!";
+        let strs: Vec<&[u8]> = vec![b"hi", long, b"ok", long];
+        let (slots, heap) = build_var_column(&strs);
+        let mut batch = ColumnarBatch::new(strs.len() as u32);
+        batch.push(ColumnRef {
+            name: "txt",
+            dtype: ColumnDtype::Utf8,
+            data: &slots,
+            heap: Some(&heap),
+            validity: None,
+        });
+        let encoded = encode_batch(&batch).unwrap();
+        let decoded = decode_batch(&encoded.bytes).unwrap();
+        assert_eq!(decoded.row_count, 4);
+        for (i, expect) in strs.iter().enumerate() {
+            assert_eq!(
+                decoded.columns[0].row_str(i).unwrap().as_bytes(),
+                *expect,
+                "row {i}",
+            );
+        }
+    }
+
+    #[test]
+    fn encode_decode_roundtrip_bytea_with_heap() {
+        let b1: Vec<u8> = (0..32).collect();
+        let b2: Vec<u8> = vec![1, 2, 3];
+        let strs: Vec<&[u8]> = vec![&b1, &b2, &b1];
+        let (slots, heap) = build_var_column(&strs);
+        let mut batch = ColumnarBatch::new(strs.len() as u32);
+        batch.push(ColumnRef {
+            name: "blob",
+            dtype: ColumnDtype::Bytea,
+            data: &slots,
+            heap: Some(&heap),
+            validity: None,
+        });
+        let encoded = encode_batch(&batch).unwrap();
+        let decoded = decode_batch(&encoded.bytes).unwrap();
+        assert_eq!(decoded.row_count, 3);
+        assert_eq!(decoded.columns[0].dtype, ColumnDtype::Bytea);
+        assert_eq!(decoded.columns[0].row_bytes(0).unwrap(), b1.as_slice());
+        assert_eq!(decoded.columns[0].row_bytes(1).unwrap(), b2.as_slice());
+        assert_eq!(decoded.columns[0].row_bytes(2).unwrap(), b1.as_slice());
+    }
+
+    #[test]
+    fn encode_rejects_var_width_without_heap() {
+        let strs: Vec<&[u8]> = vec![b"hi"];
+        let (slots, _) = build_var_column(&strs);
+        let mut batch = ColumnarBatch::new(1);
+        batch.push(ColumnRef {
+            name: "x",
+            dtype: ColumnDtype::Utf8,
+            data: &slots,
+            heap: None,
+            validity: None,
+        });
+        let err = encode_batch(&batch).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("variable-width"), "got {msg}");
+    }
+
+    #[test]
+    fn encode_rejects_fixed_width_with_heap() {
+        let data = vec![0u8; 4]; // 1 row × Int32
+        let heap = vec![1u8; 8];
+        let mut batch = ColumnarBatch::new(1);
+        batch.push(ColumnRef {
+            name: "x",
+            dtype: ColumnDtype::Int32,
+            data: &data,
+            heap: Some(&heap),
+            validity: None,
+        });
+        let err = encode_batch(&batch).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("fixed-width"), "got {msg}");
+    }
+
+    #[test]
+    fn encode_rejects_var_width_long_slot_out_of_heap() {
+        // Hand-craft a slot that claims a 16-byte value with
+        // heap_offset that points past the end of the heap.
+        let mut slots = vec![0u8; INLINE_SLOT_BYTES];
+        slots[0..4].copy_from_slice(&13u32.to_le_bytes()); // len=13 (long)
+        slots[12..16].copy_from_slice(&100u32.to_le_bytes()); // heap_off=100
+        let heap = vec![0u8; 8]; // only 8 bytes — out of range
+        let mut batch = ColumnarBatch::new(1);
+        batch.push(ColumnRef {
+            name: "x",
+            dtype: ColumnDtype::Utf8,
+            data: &slots,
+            heap: Some(&heap),
+            validity: None,
+        });
+        let err = encode_batch(&batch).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("out of bounds"), "got {msg}");
+    }
+
     #[test]
     fn header_struct_sizes_match_constants() {
         assert_eq!(BATCH_HEADER_BYTES, 16, "BatchHeader must be exactly 16 bytes");
-        assert_eq!(COLUMN_HEADER_BYTES, 20, "ColumnHeader must be exactly 20 bytes");
+        // Phase 1.5: ColumnHeader grew from 20 to 28 bytes (added
+        // heap_offset + heap_len for variable-width dtypes). The JS
+        // dispatcher's COL_HDR constant must stay in sync (asserted
+        // by the b_columnar_udf integration tests).
+        assert_eq!(COLUMN_HEADER_BYTES, 28, "ColumnHeader must be exactly 28 bytes");
     }
 }

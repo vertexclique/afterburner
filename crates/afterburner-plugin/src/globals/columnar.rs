@@ -59,8 +59,17 @@ use crate::host_api::{host_columnar_reply, host_get_input, host_get_input_len};
 const COLUMNAR_DISPATCHER: &str = r#"
 (function() {
     const HEADER = 16;
-    const COL_HDR = 20;
-    // Indexed by ColumnDtype tag (1..19). 0 = unused / variable-width.
+    // ColumnHeader: 1+3+4+4+4+4+4+4 = 28 bytes (Phase 1.5 added
+    // heap_offset + heap_len at +20 / +24).
+    const COL_HDR = 28;
+    const INLINE_SLOT = 16;
+    const INLINE_MAX = 12;
+    // dtype tags: 12=Utf8, 18=Bytea, 19=Jsonb (Phase 1.5).
+    const DT_UTF8 = 12, DT_BYTEA = 18, DT_JSONB = 19;
+    function isVarWidth(t) { return t === DT_UTF8 || t === DT_BYTEA || t === DT_JSONB; }
+    // Indexed by ColumnDtype tag (1..19). 0 = unused / variable-width
+    // (the slot array's element size is 16 — INLINE_SLOT — but
+    // var-width has a separate code path).
     const DTYPE_SIZE = [0, 1, 1, 2, 4, 8, 1, 2, 4, 8, 4, 8, 0, 4, 8, 16, 16, 16, 0, 0];
     const DTYPE_VIEW = [
         null,
@@ -75,16 +84,16 @@ const COLUMNAR_DISPATCHER: &str = r#"
         BigUint64Array,// 9  UInt64
         Float32Array,  // 10 Float32
         Float64Array,  // 11 Float64
-        null,          // 12 Utf8     — Phase 1.5
+        null,          // 12 Utf8     — var-width (own path)
         Int32Array,    // 13 Date32
         BigInt64Array, // 14 Timestamp
         null,          // 15 Decimal128 — Phase 2
         null,          // 16 Interval   — Phase 2
         null,          // 17 Uuid       — Phase 2
-        null,          // 18 Bytea     — Phase 1.5
-        null,          // 19 Jsonb     — Phase 1.5
+        null,          // 18 Bytea     — var-width (own path)
+        null,          // 19 Jsonb     — var-width (own path)
     ];
-    function typedToTag(v) {
+    function fixedTypedToTag(v) {
         if (v instanceof Int8Array) return 2;
         if (v instanceof Int16Array) return 3;
         if (v instanceof Int32Array) return 4;
@@ -95,8 +104,16 @@ const COLUMNAR_DISPATCHER: &str = r#"
         if (v instanceof BigUint64Array) return 9;
         if (v instanceof Float32Array) return 10;
         if (v instanceof Float64Array) return 11;
-        var name = (v && v.constructor && v.constructor.name) || typeof v;
-        throw new Error("columnar UDF: result column must be a fixed-width TypedArray, got " + name);
+        return 0;
+    }
+    function classifyVar(v) {
+        // Returns dtype tag for a var-width column or 0 if not.
+        // Utf8: array of strings. Bytea: array of Uint8Arrays.
+        if (!Array.isArray(v) || v.length === 0) return 0;
+        const first = v[0];
+        if (typeof first === 'string') return DT_UTF8;
+        if (first instanceof Uint8Array) return DT_BYTEA;
+        return 0;
     }
     globalThis.__ab_columnar_dispatch = function(userFn) {
         if (typeof userFn !== "function") {
@@ -109,6 +126,7 @@ const COLUMNAR_DISPATCHER: &str = r#"
         const columns_offset = dv.getUint32(8, true);
 
         const dec = new TextDecoder("utf-8");
+        const enc = new TextEncoder();
         const columns = {};
         for (let i = 0; i < column_count; i++) {
             const off = columns_offset + i * COL_HDR;
@@ -116,7 +134,41 @@ const COLUMNAR_DISPATCHER: &str = r#"
             const data_off = dv.getUint32(off + 4, true);
             const name_off = dv.getUint32(off + 12, true);
             const name_len = dv.getUint32(off + 16, true);
+            const heap_off = dv.getUint32(off + 20, true);
+            const heap_len = dv.getUint32(off + 24, true);
             const name = dec.decode(buf.subarray(name_off, name_off + name_len));
+
+            if (isVarWidth(dtype)) {
+                // Parse the slot array + heap into a JS array of
+                // strings (Utf8) or Uint8Array (Bytea/Jsonb). One
+                // pass over slots + heap; long slots dereference into
+                // the heap buffer. The dispatcher allocates
+                // `row_count` JS values up front; user UDFs index
+                // through them like `b.columns.email[i]`.
+                const heap = (heap_len > 0)
+                    ? buf.subarray(heap_off, heap_off + heap_len)
+                    : new Uint8Array(0);
+                const slotsDV = new DataView(buf.buffer, buf.byteOffset + data_off, row_count * INLINE_SLOT);
+                const arr = new Array(row_count);
+                for (let r = 0; r < row_count; r++) {
+                    const sb = r * INLINE_SLOT;
+                    const len = slotsDV.getUint32(sb, true);
+                    let bytes;
+                    if (len <= INLINE_MAX) {
+                        // Inline: bytes live in the slot itself at
+                        // offset +4 (after the length).
+                        const base = data_off + sb + 4;
+                        bytes = buf.subarray(base, base + len);
+                    } else {
+                        const ho = slotsDV.getUint32(sb + 12, true);
+                        bytes = heap.subarray(ho, ho + len);
+                    }
+                    arr[r] = (dtype === DT_UTF8) ? dec.decode(bytes) : new Uint8Array(bytes);
+                }
+                columns[name] = arr;
+                continue;
+            }
+
             const ViewCtor = DTYPE_VIEW[dtype];
             if (!ViewCtor) {
                 throw new Error("columnar UDF: unsupported dtype tag " + dtype + " for column '" + name + "'");
@@ -128,36 +180,115 @@ const COLUMNAR_DISPATCHER: &str = r#"
 
         const out = userFn({row_count: row_count, columns: columns});
         if (!out || typeof out !== "object") {
-            throw new Error("columnar UDF: result must be {row_count, columns: {name: TypedArray}}");
+            throw new Error("columnar UDF: result must be {row_count, columns: {name: TypedArray|string[]|Uint8Array[]}}");
         }
         const out_row_count = (out.row_count >>> 0);
         const out_columns = out.columns || {};
         const out_names = Object.keys(out_columns);
 
-        const enc = new TextEncoder();
-        // Two-pass layout — first the fixed headers, then per-column
-        // data with 8-byte alignment so receiving-side TypedArray views
-        // don't trip alignment checks. Names are 4-byte aligned.
+        // Per-column metadata + pre-encoded var-width slot arrays.
+        const dtype_tags = new Array(out_names.length);
+        const var_slots = new Array(out_names.length); // Uint8Array of length n*16, populated for var-width
+        const var_heaps = new Array(out_names.length); // Uint8Array of heap bytes, populated for var-width
+
+        for (let i = 0; i < out_names.length; i++) {
+            const v = out_columns[out_names[i]];
+            const fixed_tag = fixedTypedToTag(v);
+            if (fixed_tag !== 0) {
+                dtype_tags[i] = fixed_tag;
+                var_slots[i] = null;
+                var_heaps[i] = null;
+                continue;
+            }
+            const var_tag = classifyVar(v);
+            if (var_tag !== 0) {
+                // Build slot array + heap. First pass: encode each
+                // value to bytes + accumulate heap size.
+                const n = v.length;
+                if (n !== out_row_count) {
+                    throw new Error("columnar UDF: column '" + out_names[i] + "' length " + n + " ≠ row_count " + out_row_count);
+                }
+                const encoded = new Array(n);
+                let heap_size = 0;
+                for (let j = 0; j < n; j++) {
+                    let bytes;
+                    if (var_tag === DT_UTF8) {
+                        if (typeof v[j] !== 'string') {
+                            throw new Error("columnar UDF: col '" + out_names[i] + "' row " + j + " is not a string");
+                        }
+                        bytes = enc.encode(v[j]);
+                    } else {
+                        if (!(v[j] instanceof Uint8Array)) {
+                            throw new Error("columnar UDF: col '" + out_names[i] + "' row " + j + " is not a Uint8Array");
+                        }
+                        bytes = v[j];
+                    }
+                    encoded[j] = bytes;
+                    if (bytes.byteLength > INLINE_MAX) heap_size += bytes.byteLength;
+                }
+                const slots = new Uint8Array(n * INLINE_SLOT);
+                const slotsDV = new DataView(slots.buffer, slots.byteOffset, slots.byteLength);
+                const heap = new Uint8Array(heap_size);
+                let heap_cursor = 0;
+                for (let j = 0; j < n; j++) {
+                    const b = encoded[j];
+                    const sb = j * INLINE_SLOT;
+                    slotsDV.setUint32(sb, b.byteLength, true);
+                    if (b.byteLength <= INLINE_MAX) {
+                        // Inline: write up to 12 bytes into slot[4..16].
+                        slots.set(b, sb + 4);
+                    } else {
+                        // Long: write 4-byte prefix + heap_offset.
+                        slots.set(b.subarray(0, 4), sb + 4);
+                        slotsDV.setUint32(sb + 12, heap_cursor, true);
+                        heap.set(b, heap_cursor);
+                        heap_cursor += b.byteLength;
+                    }
+                }
+                dtype_tags[i] = var_tag;
+                var_slots[i] = slots;
+                var_heaps[i] = heap;
+                continue;
+            }
+            const tname = (v && v.constructor && v.constructor.name) || typeof v;
+            throw new Error("columnar UDF: column '" + out_names[i] + "' must be a fixed-width TypedArray or a string[] / Uint8Array[]; got " + tname);
+        }
+
+        // Layout pass — same shape as before, plus heap regions
+        // for var-width columns appended after data + validity + name.
         let cursor = HEADER + out_names.length * COL_HDR;
         cursor = (cursor + 7) & ~7;
         const data_offsets = new Array(out_names.length);
-        const dtype_tags = new Array(out_names.length);
+        const heap_offsets = new Array(out_names.length);
+        const heap_lens = new Array(out_names.length);
         const name_bytes = new Array(out_names.length);
         const name_offsets = new Array(out_names.length);
         for (let i = 0; i < out_names.length; i++) {
-            const v = out_columns[out_names[i]];
-            const tag = typedToTag(v);
-            const size = DTYPE_SIZE[tag];
-            data_offsets[i] = cursor;
-            cursor += out_row_count * size;
+            const tag = dtype_tags[i];
+            // Align cursor to 8 BEFORE writing this column's data.
             cursor = (cursor + 7) & ~7;
-            dtype_tags[i] = tag;
+            data_offsets[i] = cursor;
+            if (var_slots[i]) {
+                cursor += var_slots[i].byteLength; // n * 16
+            } else {
+                const size = DTYPE_SIZE[tag];
+                cursor += out_row_count * size;
+            }
         }
         for (let i = 0; i < out_names.length; i++) {
             name_bytes[i] = enc.encode(out_names[i]);
             name_offsets[i] = cursor;
             cursor += name_bytes[i].byteLength;
-            cursor = (cursor + 3) & ~3;
+        }
+        for (let i = 0; i < out_names.length; i++) {
+            if (var_heaps[i]) {
+                heap_offsets[i] = cursor;
+                heap_lens[i] = var_heaps[i].byteLength;
+                cursor += var_heaps[i].byteLength;
+            } else {
+                heap_offsets[i] = 0;
+                heap_lens[i] = 0;
+            }
         }
 
         const reply = new Uint8Array(cursor);
@@ -170,20 +301,30 @@ const COLUMNAR_DISPATCHER: &str = r#"
             const hOff = HEADER + i * COL_HDR;
             dvR.setUint8(hOff, dtype_tags[i]);
             dvR.setUint32(hOff + 4, data_offsets[i], true);
-            // validity_offset = 0 — Phase 1 reply blobs always omit
-            // the validity bitmap (every row valid). Phase 1.5 lifts
-            // this when nullable result columns are added.
+            // validity_offset = 0 (Phase 1.5 reply blobs always omit).
             dvR.setUint32(hOff + 8, 0, true);
             dvR.setUint32(hOff + 12, name_offsets[i], true);
             dvR.setUint32(hOff + 16, name_bytes[i].byteLength, true);
+            dvR.setUint32(hOff + 20, heap_offsets[i], true);
+            dvR.setUint32(hOff + 24, heap_lens[i], true);
         }
         for (let i = 0; i < out_names.length; i++) {
             const v = out_columns[out_names[i]];
-            const dst = new Uint8Array(reply.buffer, reply.byteOffset + data_offsets[i], v.byteLength);
-            dst.set(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
+            const dst = new Uint8Array(reply.buffer, reply.byteOffset + data_offsets[i],
+                                        var_slots[i] ? var_slots[i].byteLength : v.byteLength);
+            if (var_slots[i]) {
+                dst.set(var_slots[i]);
+            } else {
+                dst.set(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
+            }
         }
         for (let i = 0; i < out_names.length; i++) {
             reply.set(name_bytes[i], name_offsets[i]);
+        }
+        for (let i = 0; i < out_names.length; i++) {
+            if (var_heaps[i]) {
+                reply.set(var_heaps[i], heap_offsets[i]);
+            }
         }
         __AB_COLUMNAR_REPLY__(reply);
     };
