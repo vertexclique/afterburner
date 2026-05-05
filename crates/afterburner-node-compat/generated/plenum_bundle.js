@@ -3644,12 +3644,36 @@ function __plenum_install_http(moduleName) {
             // Stream-ish: body arrives as one chunk then 'end'. Deliver in
             // a microtask so listeners attached synchronously after the
             // handler starts still see the data event.
-            var body = reqData.body || '';
+            //
+            // Chunk type matters: real Node `IncomingMessage` emits
+            // `Buffer`s unless `setEncoding` was called. body-parser /
+            // multer / busboy all collect chunks then call
+            // `Buffer.concat(chunks)` at `'end'`, which throws if any
+            // chunk is a string. Wrap string bodies as Buffer; pass
+            // through already-binary inputs.
+            var body = reqData.body;
             var delivered = false;
             function deliver() {
                 if (delivered) return;
                 delivered = true;
-                if (body) msg.emit('data', body);
+                if (body !== undefined && body !== null && body !== '') {
+                    var Buf = require('buffer').Buffer;
+                    var chunk;
+                    if (typeof body === 'string') {
+                        chunk = Buf.from(body, 'utf8');
+                    } else if (Buf.isBuffer && Buf.isBuffer(body)) {
+                        chunk = body;
+                    } else if (body && typeof body.byteLength === 'number') {
+                        // ArrayBuffer / TypedArray — wrap as Buffer
+                        // (zero-copy in real Node; copy here for
+                        // simplicity since we're already in user-mode
+                        // QuickJS).
+                        chunk = Buf.from(body);
+                    } else {
+                        chunk = Buf.from(String(body), 'utf8');
+                    }
+                    msg.emit('data', chunk);
+                }
                 msg.emit('end');
             }
             msg._deliver = deliver;

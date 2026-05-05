@@ -53,6 +53,25 @@ fn http_get(port: u16, path: &str) -> String {
     resp
 }
 
+fn http_post(port: u16, path: &str, body: &str) -> String {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
+    let req = format!(
+        "POST {path} HTTP/1.1\r\n\
+         Host: 127.0.0.1:{port}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {len}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {body}",
+        len = body.len()
+    );
+    stream.write_all(req.as_bytes()).expect("write");
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp).expect("read");
+    resp
+}
+
 /// Spawn `burn -e <source>` with stdout/stderr piped. Returns the
 /// child handle for later cleanup.
 fn spawn_burn_inline(source: &str) -> Child {
@@ -114,6 +133,118 @@ fn burn_server_echoes_method_and_path() {
     assert!(resp.contains("x-method: GET"), "resp:\n{resp}");
     assert!(resp.contains("x-url: /test?q=1"), "resp:\n{resp}");
     assert!(resp.contains("echo"), "resp:\n{resp}");
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn incoming_message_emits_buffer_chunks() {
+    // Phase 0 / Gap D regression: real Node `IncomingMessage` emits
+    // `Buffer` chunks unless `setEncoding` was called. body-parser /
+    // multer / busboy collect chunks and call `Buffer.concat(chunks)`
+    // at `'end'`, which throws if any chunk is a string. We must emit
+    // Buffers from `__ab_make_incoming_message::deliver()`.
+    let port = pick_port();
+    let source = format!(
+        r#"
+        const http = require('http');
+        http.createServer((req, res) => {{
+            const chunks = [];
+            req.on('data', (chunk) => {{
+                chunks.push({{
+                    type: typeof chunk,
+                    isBuffer: Buffer.isBuffer(chunk),
+                    ctor: chunk && chunk.constructor && chunk.constructor.name,
+                    len: chunk && chunk.length,
+                }});
+            }});
+            req.on('end', () => {{
+                // Concat must succeed — proves chunks are Buffers in
+                // the body-parser sense.
+                let total;
+                try {{
+                    const bufs = [];
+                    // Re-emit to test concat — we already consumed above,
+                    // so feed the asserted shape into a synthetic concat.
+                    total = chunks.length;
+                }} catch (_) {{
+                    total = -1;
+                }}
+                res.setHeader('content-type', 'application/json');
+                res.end(JSON.stringify({{ chunks, total }}));
+            }});
+        }}).listen({port}, () => console.log("listening"));
+        "#
+    );
+    let mut child = spawn_burn_inline(&source);
+    assert!(
+        wait_for_listener(port, Duration::from_secs(15)),
+        "listener didn't bind on :{port}"
+    );
+
+    let resp = http_post(port, "/", r#"{"hello":"world"}"#);
+    assert!(resp.starts_with("HTTP/1.1 200"), "resp:\n{resp}");
+
+    // The body-parser-relevant invariant: `Buffer.isBuffer(chunk)`
+    // returns true. (Our polyfill's `Buffer` is a `Uint8Array`
+    // subclass — same as Node since Buffer was reimplemented on top
+    // of Uint8Array. `chunk.constructor.name` may be `Buffer` or
+    // `Uint8Array` depending on the polyfill internals; what
+    // body-parser, multer, busboy etc. actually check is
+    // `Buffer.isBuffer`.)
+    assert!(
+        resp.contains("\"isBuffer\":true"),
+        "expected isBuffer:true in response, got:\n{resp}"
+    );
+    // Length matches the request body byte count.
+    assert!(
+        resp.contains("\"len\":17"),
+        "expected len:17 (length of {{\"hello\":\"world\"}}) in response, got:\n{resp}"
+    );
+    // Chunk is NOT a string (the pre-fix shape that broke body-parser).
+    assert!(
+        !resp.contains("\"type\":\"string\""),
+        "chunk should not be string post-fix, got:\n{resp}"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn body_parser_pattern_buffer_concat_succeeds() {
+    // The exact pattern body-parser uses internally: collect chunks,
+    // `Buffer.concat`, parse JSON. Without Gap D, `Buffer.concat`
+    // would throw `TypeError: argument must be a Buffer`.
+    let port = pick_port();
+    let source = format!(
+        r#"
+        const http = require('http');
+        http.createServer((req, res) => {{
+            const chunks = [];
+            req.on('data', (c) => chunks.push(c));
+            req.on('end', () => {{
+                try {{
+                    const buf = Buffer.concat(chunks);
+                    const parsed = JSON.parse(buf.toString('utf8'));
+                    res.setHeader('content-type', 'application/json');
+                    res.end(JSON.stringify({{ ok: true, echo: parsed }}));
+                }} catch (e) {{
+                    res.statusCode = 500;
+                    res.end('concat error: ' + e.message);
+                }}
+            }});
+        }}).listen({port}, () => console.log("listening"));
+        "#
+    );
+    let mut child = spawn_burn_inline(&source);
+    assert!(wait_for_listener(port, Duration::from_secs(15)));
+
+    let resp = http_post(port, "/", r#"{"a":1,"b":[2,3]}"#);
+    assert!(resp.starts_with("HTTP/1.1 200"), "resp:\n{resp}");
+    assert!(resp.contains("\"ok\":true"), "resp:\n{resp}");
+    assert!(resp.contains("\"a\":1"), "resp:\n{resp}");
 
     let _ = child.kill();
     let _ = child.wait();
