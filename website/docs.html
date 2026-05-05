@@ -546,18 +546,87 @@
     color: var(--fg);
   }
 
+  /* table scroll wrapper — long tables (CLI flags, env vars, capabilities)
+     overflow viewport on phones; wrap them so they pan horizontally without
+     breaking the article flow. */
+  .table-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    margin: 20px 0 28px;
+    border-radius: var(--radius-card);
+  }
+  .table-scroll .doc-table { margin: 0; min-width: 520px; }
+
   /* responsive */
   @media (max-width: 1180px) {
     .layout { grid-template-columns: 240px minmax(0, 1fr); }
     .toc { display: none; }
   }
   @media (max-width: 860px) {
-    .layout { grid-template-columns: 1fr; gap: 32px; }
+    .layout { grid-template-columns: 1fr; gap: 32px; padding: 28px 20px; }
     .sidebar { position: static; max-height: none; }
     .nav__search { display: none; }
-    .doc-title { font-size: 44px; }
-    .hero-card__inner { grid-template-columns: 1fr; }
+    .nav__inner { padding: 12px 20px; }
+    .doc-title { font-size: 40px; letter-spacing: -0.03em; }
+    .doc-lede { font-size: 16px; margin-bottom: 24px; }
+    .doc-meta { margin-bottom: 36px; }
+    .hero-card { padding: 28px; margin-bottom: 56px; }
+    .hero-card__inner { grid-template-columns: 1fr; gap: 20px; }
     .hero-card__art { display: none; }
+    .hero-card h2 { font-size: 24px; }
+    .hero-card p { font-size: 14px; }
+
+    /* sidebar compresses into a horizontal scrollable strip — keeps nav useful
+       without dominating the viewport before the article starts. */
+    .sidebar {
+      display: flex; flex-wrap: wrap; gap: 6px;
+      padding: 0 0 8px;
+    }
+    .sb-section { margin-bottom: 0; }
+    .sb-section h4 { display: none; }
+    .sb-link { padding: 6px 10px; font-size: 12.5px; }
+    .sb-link .tag { display: none; }
+
+    .doc h2 { font-size: 26px; margin-top: 48px; }
+    .doc h3 { font-size: 18px; margin-top: 28px; }
+    .doc p, .doc li { font-size: 15px; }
+    .codeblock { margin: 18px 0 22px; }
+    .codeblock__head { padding: 8px 14px; }
+    .codeblock pre { padding: 16px 16px; font-size: 12.5px; line-height: 1.65; }
+    .callout { padding: 16px 18px; gap: 12px; margin: 20px 0; }
+    .callout__icon { width: 24px; height: 24px; font-size: 12px; }
+    .arch-mini .row { padding: 12px 14px; flex-wrap: wrap; }
+    .arch-mini .nm { min-width: 0; flex: 1 1 100%; }
+    .arch-mini .ds { font-size: 13px; }
+
+    .compat-grid {
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 6px;
+    }
+    .compat-grid .compat { padding: 8px 12px; font-size: 11.5px; }
+
+    .pagefoot { flex-direction: column; gap: 12px; margin-top: 56px; padding-top: 28px; }
+    .pagefoot__btn { padding: 14px 16px; }
+    .pagefoot__btn .t { font-size: 15px; }
+  }
+
+  @media (max-width: 600px) {
+    .nav__brand { font-size: 14px; }
+    .nav__brand img { width: 22px; height: 22px; }
+    .nav__brand .badge { font-size: 10px; padding: 1px 6px; }
+    .layout { padding: 20px 16px; gap: 24px; }
+    .doc-title { font-size: 32px; }
+    .doc-lede { font-size: 15px; line-height: 1.55; }
+    .crumb { font-size: 11px; }
+    .hero-card { padding: 22px 18px; margin-bottom: 40px; }
+    .hero-card h2 { font-size: 22px; }
+    .hero-card .install { padding: 12px 14px; font-size: 12px; flex-wrap: wrap; }
+    .doc h2 { font-size: 22px; margin-top: 40px; }
+    .doc p, .doc li { font-size: 14.5px; line-height: 1.6; }
+    .codeblock pre { padding: 14px; font-size: 12px; }
+    .callout { padding: 14px 16px; }
+    .callout p { font-size: 14px; }
+    .compat-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
   }
 
   /* ============= INSTALLER (OS-aware single command) ============= */
@@ -937,7 +1006,7 @@ afterburner 0.1.1</pre>
       </div>
 
       <h3>Capabilities at a glance</h3>
-      <table class="doc-table">
+      <div class="table-scroll"><table class="doc-table">
         <thead>
           <tr><th>Capability</th><th>Field</th><th>Default</th><th>Variants</th></tr>
         </thead>
@@ -950,7 +1019,7 @@ afterburner 0.1.1</pre>
           <tr><td>Process exit</td><td><code>allow_exit</code></td><td><code>false</code></td><td><code>bool</code> (whether <code>process.exit(n)</code> terminates the script)</td></tr>
           <tr><td>HTTP timeout</td><td><code>http_timeout_ms</code></td><td><code>None</code></td><td><code>Option&lt;u64&gt;</code> per-call cap on outbound HTTP</td></tr>
         </tbody>
-      </table>
+      </table></div>
 
       <p>Allow-lists accept exact hostnames (<code>api.example.com</code>) and single-label wildcards (<code>*.trusted.io</code>). <code>OutboundHttp</code> covers <code>http</code> / <code>https</code> / <code>fetch</code>. <code>OutboundFull</code> additionally permits raw TCP via <code>net.connect</code> and TLS via <code>tls.connect</code>.</p>
 
@@ -1161,7 +1230,7 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
       </div>
 
       <h3 id="cli-subcommands">Subcommands</h3>
-      <table class="doc-table">
+      <div class="table-scroll"><table class="doc-table">
         <thead>
           <tr><th>Subcommand</th><th>Purpose</th></tr>
         </thead>
@@ -1175,10 +1244,10 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
           <tr><td><code>node | npm | pnpm | npx | yarn | bun</code></td><td>Pass-through shim. Forwards args to the ecosystem binary on <code>$PATH</code>; child <code>node</code> processes route back through <code>burn</code>.</td></tr>
           <tr><td><code>version</code></td><td>Print version and the cargo features built into the binary.</td></tr>
         </tbody>
-      </table>
+      </table></div>
 
       <h3 id="cli-flags">Flag reference</h3>
-      <table class="doc-table">
+      <div class="table-scroll"><table class="doc-table">
         <thead>
           <tr><th>Flag</th><th>Effect</th></tr>
         </thead>
@@ -1195,7 +1264,7 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
           <tr><td><code>-q</code> · <code>--quiet</code></td><td>Suppress banners, capability hints, and warnings on stderr.</td></tr>
           <tr><td><code>-e &lt;code&gt;</code> · <code>--eval &lt;code&gt;</code></td><td>Run an inline snippet instead of a file.</td></tr>
         </tbody>
-      </table>
+      </table></div>
 
       <h2 id="node-compat"><span class="anchor">#</span>Node compat surface</h2>
       <p>Afterburner targets the <strong>Node.js 20.x LTS</strong> API surface. Pure-JS modules are always available. Host-backed ones are gated by the <code>Manifold</code>. Surface-only entries load and expose the right shapes; runtime methods either route through other modules or throw a clear error explaining the limitation.</p>
@@ -1287,7 +1356,7 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
       </div>
 
       <h2 id="env"><span class="anchor">#</span>Environment variables</h2>
-      <table class="doc-table">
+      <div class="table-scroll"><table class="doc-table">
         <thead>
           <tr><th>Variable</th><th>Default</th><th>Purpose</th></tr>
         </thead>
@@ -1296,7 +1365,7 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
           <tr><td><code>AFTERBURNER_LOG_FORMAT</code></td><td><code>text</code></td><td>Reporter format: <code>text</code> (stderr) or <code>json</code> (stdout NDJSON)</td></tr>
           <tr><td><code>AFTERBURNER_REBUILD_PLENUM</code></td><td>unset</td><td>Set to <code>1</code> to regenerate <code>generated/plenum_bundle.js</code>.</td></tr>
         </tbody>
-      </table>
+      </table></div>
 
       <p>Applications opt into logging with:</p>
       <div class="codeblock">
@@ -1310,7 +1379,7 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
       <h2 id="crates"><span class="anchor">#</span>Workspace crates</h2>
       <p>Nine crates layered for replaceability. Drop down a level whenever the facade is too tight.</p>
 
-      <table class="doc-table">
+      <div class="table-scroll"><table class="doc-table">
         <thead>
           <tr><th>Crate</th><th>Purpose</th></tr>
         </thead>
@@ -1325,7 +1394,7 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
           <tr><td><code>afterburner-thrust</code></td><td>Multi-threaded scheduler. Bounded per-worker Chase-Lev deques, token-bucket admission, steal-when-idle, graceful drain. Lock-free <code>HopscotchMap</code> + <code>kovan-channel</code> primitives.</td></tr>
           <tr><td><code>afterburner-plugin</code></td><td>WASM-side Javy plugin (<code>wasm32-wasip1</code>). <code>include_bytes!</code>-baked into the binary at build time; Wizer pre-initialised for fast first-call ignition.</td></tr>
         </tbody>
-      </table>
+      </table></div>
 
       <h2 id="build"><span class="anchor">#</span>Building from source</h2>
       <p>The pre-built <code>burn</code> binary needs nothing external at runtime. To compile the workspace yourself you need a recent Rust toolchain (2024 edition, MSRV 1.90+) and the system C toolchain. That's it. <code>cargo build</code> is reproducible and offline; nothing is downloaded mid-build beyond crate dependencies.</p>
