@@ -34,6 +34,53 @@ pub(super) const DEFAULT_BUF: usize = 64 * 1024;
 const PLENUM_BUNDLE: &str =
     include_str!("../../../afterburner-node-compat/generated/plenum_bundle.js");
 
+/// Patch QuickJS's V8-style `CallSite` prototype with the seven Node-
+/// shaped methods QuickJS doesn't ship natively: `isEval`,
+/// `getEvalOrigin`, `isToplevel`, `isConstructor`, `getThis`,
+/// `getTypeName`, `getMethodName`. Real npm packages probe these at
+/// module-load time — `depd` (transitively required by `body-parser`,
+/// `serve-static`, `morgan`, `finalhandler`) calls `callSite.isEval()`
+/// inside `callSiteLocation`; without this patch the call traps with
+/// `TypeError: not a function` and Express init aborts.
+///
+/// Strategy: capture a sample stack with a temporary
+/// `Error.prepareStackTrace` that returns the raw frames array, walk
+/// to the first frame's prototype, install the missing methods. The
+/// previous `Error.prepareStackTrace` value is restored before user
+/// code runs — preserving the invariant that `e.stack` is a string
+/// for unmodified scripts (no engine-side change). Stub return values
+/// match Node conventions (`false` / `null` / `undefined`).
+///
+/// Wizer preinit re-evaluates this once per snapshot capture; every
+/// Store the plugin instantiates inherits the patched prototype from
+/// the snapshot.
+const CALLSITE_PROTO_PATCH: &str = r#"
+(function patchCallSiteProto() {
+    var sample = {};
+    var prev = Error.prepareStackTrace;
+    Error.prepareStackTrace = function(_e, frames) { return frames; };
+    Error.captureStackTrace(sample);
+    var frames = sample.stack;
+    Error.prepareStackTrace = prev;
+    if (!Array.isArray(frames) || frames.length === 0) return;
+    var proto = Object.getPrototypeOf(frames[0]);
+    var stubs = {
+        isEval:        function() { return false; },
+        getEvalOrigin: function() { return undefined; },
+        isToplevel:    function() { return false; },
+        isConstructor: function() { return false; },
+        getThis:       function() { return undefined; },
+        getTypeName:   function() { return null; },
+        getMethodName: function() { return null; }
+    };
+    for (var name in stubs) {
+        if (typeof proto[name] !== 'function') {
+            proto[name] = stubs[name];
+        }
+    }
+})();
+"#;
+
 /// Install every `__host_*` + `__AB_GET_INPUT__` global and then eval
 /// the plenum polyfill bundle. Called from `modify_runtime`.
 pub fn install(ctx: Ctx<'_>) {
@@ -45,6 +92,12 @@ pub fn install(ctx: Ctx<'_>) {
     // Eval the plenum bundle so Wizer preinit captures `require()` and
     // every Tier-1 polyfill into the snapshot.
     let _ = ctx.eval::<(), _>(PLENUM_BUNDLE);
+
+    // Patch the V8-style CallSite prototype after the plenum bundle so
+    // the snapshot also captures the Node-shaped CallSite methods. The
+    // patch is independent of any plenum module — it only touches
+    // `Error.prepareStackTrace` / `Error.captureStackTrace`.
+    let _ = ctx.eval::<(), _>(CALLSITE_PROTO_PATCH);
 }
 
 /// Retry-doubling helper for variable-length host responses. Returns
