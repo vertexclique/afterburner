@@ -25,7 +25,7 @@
 //!    on the JS side.
 
 use afterburner::Afterburner;
-use afterburner::wasi::{ColumnDtype, ColumnRef, ColumnarBatch};
+use afterburner::wasi::{ColumnDtype, ColumnRef, ColumnarBatch, INLINE_SLOT_BYTES, INLINE_SLOT_INLINE_MAX};
 use anyhow::Result;
 use serde_json::Value;
 use std::sync::Arc;
@@ -460,6 +460,109 @@ fn main() -> Result<()> {
     println!("\ncompute-light UDF (1 Float64 col, doubled):");
     bench_columnar_typed_double(&burn_st, ROWS_BATCHED, workers, 16_000)?;
 
+    // Phase 1.5 var-width path — 1 Utf8 input column → 1 Int32 length
+    // column. Tests the string boundary throughput separate from the
+    // Float64 numeric one (the var-width path has UTF-8 decode +
+    // slot/heap layout overhead the numeric path doesn't pay).
+    println!("\nPhase 1.5 var-width path (1 Utf8 col → Int32 length):");
+    bench_columnar_typed_utf8_length(&burn_st, ROWS_BATCHED, workers, 4_000)?;
+
+    Ok(())
+}
+
+fn bench_columnar_typed_utf8_length(
+    burn: &Afterburner,
+    n: usize,
+    submitters: usize,
+    batch_size: usize,
+) -> Result<()> {
+    let id = burn.register(
+        "module.exports = (b) => {
+            const n = b.row_count;
+            const xs = b.columns.s;
+            const out = new Int32Array(n);
+            for (let i = 0; i < n; i++) out[i] = xs[i].length;
+            return { row_count: n, columns: { len: out } };
+        };",
+    )?;
+    // Pre-build chunks: each row's value is `row_idx % 100 == 0 ?
+    // long-string : short-string`, so ~1% of rows hit the heap path
+    // and the rest are inline. This matches a typical "mostly short
+    // identifiers, occasional URL/long-text" workload.
+    let chunks = n.div_ceil(batch_size);
+    let chunk_bufs: Vec<(Vec<u8>, Vec<u8>)> = (0..chunks)
+        .map(|chunk_idx| {
+            let row_start = chunk_idx * batch_size;
+            let row_end = (row_start + batch_size).min(n);
+            let chunk_rows = row_end - row_start;
+            let mut slots = vec![0u8; chunk_rows * INLINE_SLOT_BYTES];
+            let mut heap: Vec<u8> = Vec::new();
+            for r in 0..chunk_rows {
+                let row_idx = row_start + r;
+                let s: String = if row_idx.is_multiple_of(100) {
+                    format!("https://example.com/path/{row_idx}/long")
+                } else {
+                    format!("k{row_idx}")
+                };
+                let bytes = s.as_bytes();
+                let sb = r * INLINE_SLOT_BYTES;
+                slots[sb..sb + 4]
+                    .copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+                if bytes.len() <= INLINE_SLOT_INLINE_MAX {
+                    slots[sb + 4..sb + 4 + bytes.len()].copy_from_slice(bytes);
+                } else {
+                    slots[sb + 4..sb + 8].copy_from_slice(&bytes[0..4]);
+                    slots[sb + 12..sb + 16]
+                        .copy_from_slice(&(heap.len() as u32).to_le_bytes());
+                    heap.extend_from_slice(bytes);
+                }
+            }
+            (slots, heap)
+        })
+        .collect();
+    let next = Arc::new(AtomicUsize::new(0));
+
+    let t0 = Instant::now();
+    thread::scope(|s| -> Result<()> {
+        let mut handles = Vec::with_capacity(submitters);
+        for _ in 0..submitters {
+            let chunk_bufs = &chunk_bufs;
+            let next = Arc::clone(&next);
+            let id = id.clone();
+            let burn = burn;
+            handles.push(s.spawn(move || -> Result<()> {
+                loop {
+                    let idx = next.fetch_add(1, Ordering::Relaxed);
+                    if idx >= chunk_bufs.len() {
+                        return Ok(());
+                    }
+                    let (slots, heap) = &chunk_bufs[idx];
+                    let chunk_rows = (slots.len() / INLINE_SLOT_BYTES) as u32;
+                    let mut batch = ColumnarBatch::new(chunk_rows);
+                    batch.push(ColumnRef {
+                        name: "s",
+                        dtype: ColumnDtype::Utf8,
+                        data: slots,
+                        heap: Some(heap),
+                        validity: None,
+                    });
+                    let _ = burn
+                        .run_columnar(&id, &batch)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                }
+            }));
+        }
+        for h in handles {
+            h.join()
+                .map_err(|_| anyhow::anyhow!("submitter panicked"))??;
+        }
+        Ok(())
+    })?;
+    report(
+        &format!("columnar-typed-utf8-len (B={batch_size}, {submitters} submitters)"),
+        n,
+        t0.elapsed(),
+    );
     Ok(())
 }
 
