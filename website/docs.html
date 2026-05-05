@@ -989,7 +989,7 @@
           <span class="text"></span>
           <span class="copy">Copy</span>
         </div>
-        <p class="installer__hint">Pin a version with <code>BURN_VERSION=vX.Y.Z</code> · custom install dir with <code>BURN_INSTALL=/usr/local/bin</code></p>
+        <p class="installer__hint">Pin a version with <code>BURN_VERSION=vX.Y.Z</code> · custom install dir with <code>BURN_INSTALL=/usr/local/bin</code> · skip the <code>$PATH</code> update with <code>BURN_INSTALL_NO_PATH=1</code></p>
       </div>
 
       <p>Or pull the runtime as a Rust library:</p>
@@ -1451,7 +1451,10 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
           <tr><td><code>BURN_MAX_LINEAR_MEMORY</code></td><td><code>1G</code> (1 GiB)</td><td>Per-instance WASM linear-memory ceiling enforced by Wasmtime's pooling allocator. Accepts plain bytes or a <code>K</code>/<code>M</code>/<code>G</code> suffix (e.g. <code>4G</code> = 4 GiB, <code>128M</code> = 128 MiB). Hard-clamped to 4 GiB (the wasm32 ABI limit). Bump it for long-running daemon-mode workloads (Express, Fastify, etc.) that accumulate per-request state across many calls; lower it when running many concurrent instances on small hosts. <code>--memory &lt;N&gt;</code> on the CLI sets a tighter per-call cap below this hard limit and is independent of <code>-A</code>.</td></tr>
           <tr><td><code>BURN_VERSION</code></td><td><code>latest</code></td><td>Version pin used by the <code>install.sh</code> / <code>install.ps1</code> bootstrap (e.g. <code>v0.1.1</code>). Has no effect after the binary is installed.</td></tr>
           <tr><td><code>BURN_INSTALL</code></td><td><code>~/.local/bin</code></td><td>Install dir for the bootstrap installers. The runtime itself doesn't read this.</td></tr>
+          <tr><td><code>BURN_INSTALL_NO_PATH</code></td><td>unset</td><td>Set to <code>1</code> to skip the bootstrap installer's automatic <code>$PATH</code> update (it normally appends an <code>export PATH=...</code> line to your shell rc — <code>~/.bashrc</code>, <code>~/.zshrc</code>, fish config, or <code>~/.profile</code> — or sets the User <code>Path</code> environment variable on Windows). Use this if you manage <code>$PATH</code> yourself via dotfiles, chezmoi, or a NixOS / nix-home / Guix configuration.</td></tr>
           <tr><td><code>BURN_QUIET</code></td><td>unset</td><td>Set to <code>1</code> to suppress the first-run capability banner and other non-essential stderr notices. Same as <code>--quiet</code> / <code>-q</code>.</td></tr>
+          <tr><td><code>BURN_SHIM_DEPTH</code></td><td><code>0</code> (incremented per shim hop, capped at 8)</td><td>Pass-through recursion guard. When <code>burn</code> is invoked on a non-burn binary (<code>burn node script.js</code>, <code>burn npm test</code>, etc.) it forwards to the underlying tool and increments this counter — hitting <code>8</code> aborts with a typed error instead of fork-bombing. Operators rarely set this manually; it exists so the shim layer can refuse cycles introduced by a misconfigured PATH or a wrapper script that re-invokes <code>burn</code>.</td></tr>
+          <tr><td><code>BURN_WORKER_DEPTH</code></td><td><code>0</code> (incremented per spawned worker, capped at 8)</td><td><code>worker_threads</code> recursion guard (mirrors <code>BURN_SHIM_DEPTH</code> for the worker model). Each spawned <code>new Worker(...)</code> child inherits the parent's depth + 1; hitting the ceiling refuses spawn with <code>E_DEPTH</code> instead of letting a runaway script exhaust system resources. Together with <code>WorkerConfig::max_concurrent</code> (default <code>32</code>) and the 16 MiB per-frame cap, this bounds the worst case a hostile or buggy script can do.</td></tr>
         </tbody>
       </table></div>
 
