@@ -780,25 +780,23 @@ fn shard_pool_dgram_socket_does_not_eaddrinuse() {
 
 // ---- 17. SharedPortClaims unit-test-style — owner/follower --------
 
-// FLAKE NOTE: this test passes deterministically when run as a
-// standalone binary (we have a probe under /tmp/probe-claims that
-// runs identical code to completion every time, debug + release).
-// It also passes deterministically under `cargo test --release`.
-// It fails deterministically under `cargo test` in debug mode —
-// the final post-release `try_claim` returns `Follower(_)` instead
-// of `Owner(_)`. Triage:
-//   * The underlying SharedPortClaims (release → try_claim → Owner)
-//     is correct: probe confirms.
-//   * The race-multiple-claimants part is correct: 1 owner / 15
-//     followers in every run.
-//   * Suspected cause: kovan's wait-free SMR has a debug-mode
-//     observation window where a remove'd entry is still visible
-//     to a get_or_insert from the same thread until the next
-//     epoch advance. Release optimisations elide the observation.
-// Marked ignored to unblock the push; rerun with --release for
-// CI gating, and revisit when we either pin a kovan version
-// fix or rewrite the unit test to advance the epoch explicitly.
-#[ignore]
+// Regression for a real race surfaced during B1: kovan-map's
+// HopscotchMap allows transient duplicates of the same key when
+// multiple threads concurrently `get_or_insert`. Per the inline
+// comment in kovan-map's hopscotch.rs::get_or_insert:
+// "the CAS-then-hop-bit window allows duplicates".
+//
+// Original symptom: 16 racing claims for port 12345 sometimes left
+// 2+ duplicate entries in the bucket neighbourhood. Single
+// `remove` cleared only the first; the leftover made the next
+// `try_claim` return `Follower(stale_id)` instead of `Owner(new)`.
+// Failure rate ~80% in `cargo test` debug, 0% in `cargo run` of
+// the same body — purely a function of how often concurrent
+// inserts hit the duplicate window vs. serialise.
+//
+// Fix shipped in `SharedPortClaims::release`: loop `remove` until
+// it returns None, draining any duplicates. This test guards the
+// fix.
 #[test]
 fn shard_pool_shared_claims_owner_then_follower() {
     // White-box: hit the SharedPortClaims arbiter directly via
@@ -839,10 +837,11 @@ fn shard_pool_shared_claims_owner_then_follower() {
 
     // After release, a new claim should win again.
     claims.release(port);
-    assert!(matches!(
-        claims.try_claim(port),
-        afterburner_wasi::ClaimResult::Owner(_)
-    ));
+    let r = claims.try_claim(port);
+    assert!(
+        matches!(r, afterburner_wasi::ClaimResult::Owner(_)),
+        "expected Owner after release, got {r:?}"
+    );
 }
 
 // ---- 18. Library API: threaded_auto() picks reasonable worker count

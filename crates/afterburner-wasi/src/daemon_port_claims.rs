@@ -100,8 +100,19 @@ impl SharedPortClaims {
     /// `server.close()` fires. Followers must NOT call this —
     /// they don't own the claim. Idempotent: removing a missing
     /// port is a no-op.
+    ///
+    /// Loops `remove` until it returns `None`. Reason: kovan-map's
+    /// `HopscotchMap` allows transient duplicates of the same key
+    /// when multiple threads concurrently `get_or_insert` the
+    /// same key (per the inline comment in `get_or_insert` source:
+    /// "the CAS-then-hop-bit window allows duplicates"). A single
+    /// `remove` clears only the first matching entry it finds; if
+    /// duplicates remain, the next `try_claim` (after release)
+    /// would see one of the leftover entries and return
+    /// `Follower(stale_id)` instead of `Owner(new_id)`. Looping
+    /// drains all duplicates so the port is genuinely free.
     pub fn release(&self, port: u16) {
-        self.claims.remove(&port);
+        while self.claims.remove(&port).is_some() {}
     }
 
     /// Look up the current owner id for a port, if any. Used by
