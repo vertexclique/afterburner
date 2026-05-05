@@ -71,9 +71,45 @@ const STDOUT_CAPACITY: usize = 1024 * 1024;
 
 /// Per-instance linear-memory ceiling enforced by the pool. Each thrust's
 /// `FuelGauge::memory_bytes` (via `ResourceLimiter`) is the per-call
-/// dynamic cap below this hard limit. Set generously so the plugin's
-/// Wizer image plus user-script allocations always fit.
-const MAX_LINEAR_MEMORY_BYTES: usize = 256 * 1024 * 1024;
+/// dynamic cap below this hard limit.
+///
+/// 1 GiB by default — comfortably fits the Wizer image (~5 MiB), the
+/// plenum polyfill bundle, and a long-running daemon-mode QuickJS Store
+/// driving frameworks like Express that keep per-request state alive
+/// across the whole listener lifetime.
+///
+/// Override at startup via `BURN_MAX_LINEAR_MEMORY` (accepts plain
+/// bytes or `<N>(K|M|G)` shorthand: `BURN_MAX_LINEAR_MEMORY=4G` →
+/// 4 GiB). Capped at 4 GiB because the wasm32 ABI has a hard 4 GiB
+/// linear-memory limit per Store; values above that are clamped.
+/// Override down (e.g. `=128M`) when running many concurrent
+/// instances on small hosts — the pool pre-reserves
+/// `MAX_LINEAR_MEMORY_BYTES * POOL_TOTAL_MEMORIES` of virtual address
+/// space (4 GiB × 128 = 512 GiB virtual at the defaults; resident only
+/// on first touch).
+const DEFAULT_MAX_LINEAR_MEMORY_BYTES: usize = 1024 * 1024 * 1024;
+const WASM32_MAX_LINEAR_MEMORY_BYTES: usize = 4 * 1024 * 1024 * 1024;
+
+fn max_linear_memory_bytes() -> usize {
+    let raw = match std::env::var("BURN_MAX_LINEAR_MEMORY") {
+        Ok(v) => v,
+        Err(_) => return DEFAULT_MAX_LINEAR_MEMORY_BYTES,
+    };
+    let s = raw.trim();
+    let (num_part, mult) = match s.chars().last() {
+        Some('K' | 'k') => (&s[..s.len() - 1], 1024usize),
+        Some('M' | 'm') => (&s[..s.len() - 1], 1024 * 1024),
+        Some('G' | 'g') => (&s[..s.len() - 1], 1024 * 1024 * 1024),
+        _ => (s, 1usize),
+    };
+    let parsed: usize = match num_part.trim().parse() {
+        Ok(n) => n,
+        Err(_) => return DEFAULT_MAX_LINEAR_MEMORY_BYTES,
+    };
+    parsed
+        .saturating_mul(mult)
+        .min(WASM32_MAX_LINEAR_MEMORY_BYTES)
+}
 
 /// Maximum concurrently-instantiated plugin instances. Pool reserves
 /// virtual-only address space; on a 64-bit host this is "free" until a
@@ -368,7 +404,7 @@ fn build_engine() -> Result<Engine> {
     let mut pool = PoolingAllocationConfig::default();
     pool.total_core_instances(POOL_TOTAL_MEMORIES);
     pool.total_memories(POOL_TOTAL_MEMORIES);
-    pool.max_memory_size(MAX_LINEAR_MEMORY_BYTES);
+    pool.max_memory_size(max_linear_memory_bytes());
     pool.linear_memory_keep_resident(LINEAR_MEMORY_KEEP_RESIDENT);
     pool.table_keep_resident(TABLE_KEEP_RESIDENT);
     pool.table_elements(POOL_TABLE_ELEMENTS);

@@ -35,6 +35,39 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// QuickJS V8-CallSite proto patch — adds the seven Node-shaped
+/// methods (`isEval`, `getEvalOrigin`, `isToplevel`, `isConstructor`,
+/// `getThis`, `getTypeName`, `getMethodName`) that rquickjs / Javy
+/// don't expose. depd / morgan / finalhandler probe these at module-
+/// load time; without the patch any Express middleware tree crashes
+/// with `TypeError: not a function`. Identical snippet to the one
+/// the WASM plugin installs at Wizer pre-init
+/// (see `crates/afterburner-plugin/src/globals/mod.rs`).
+const CALLSITE_PROTO_PATCH: &str = r#"
+(function patchCallSiteProto() {
+    var sample = {};
+    var prev = Error.prepareStackTrace;
+    Error.prepareStackTrace = function(_e, frames) { return frames; };
+    Error.captureStackTrace(sample);
+    var frames = sample.stack;
+    Error.prepareStackTrace = prev;
+    if (!Array.isArray(frames) || frames.length === 0) return;
+    var proto = Object.getPrototypeOf(frames[0]);
+    var stubs = {
+        isEval:        function() { return false; },
+        getEvalOrigin: function() { return undefined; },
+        isToplevel:    function() { return false; },
+        isConstructor: function() { return false; },
+        getThis:       function() { return undefined; },
+        getTypeName:   function() { return null; },
+        getMethodName: function() { return null; }
+    };
+    for (var name in stubs) {
+        if (typeof proto[name] !== 'function') proto[name] = stubs[name];
+    }
+})();
+"#;
+
 thread_local! {
     /// One rquickjs Runtime per client thread. Lazily initialized on
     /// first use. Wrapped in RefCell because we need `&mut` access to
@@ -137,6 +170,16 @@ impl ThreadRuntime {
             afterburner_node_compat::register_native_builtins(&ctx)?;
             ctx.eval::<(), _>(afterburner_node_compat::PLENUM_BUNDLE.as_bytes())
                 .map_err(|e| AfterburnerError::Engine(format!("plenum bundle eval: {e}")))?;
+            // Patch QuickJS's V8 CallSite prototype — same patch the
+            // WASM plugin installs at Wizer pre-init. Real npm packages
+            // (depd, morgan, finalhandler) call `callSite.isEval()` /
+            // `getEvalOrigin()` / `isToplevel()` etc. at module-load
+            // time; without the patch they crash with `not a function`.
+            // Native mode runs through rquickjs which has the same
+            // partial CallSite surface as the Javy runtime, so the
+            // same JS snippet applies.
+            ctx.eval::<(), _>(CALLSITE_PROTO_PATCH.as_bytes())
+                .map_err(|e| AfterburnerError::Engine(format!("callsite proto patch: {e}")))?;
             Ok(())
         })?;
 
