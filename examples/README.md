@@ -1,11 +1,15 @@
 # Afterburner — Examples
 
-Each subdirectory is a **fully standalone Cargo project** with its own
-`Cargo.toml`, `Cargo.lock`, and `[workspace]` root stanza. There is no
-shared workspace — you can `cp -r <example> ~/my-project` and it works
-in isolation against a pinned `afterburner` version.
+Two flavours of example here:
 
-To run any example:
+* **Library examples** — each is a fully standalone Cargo project with its
+  own `Cargo.toml`, `Cargo.lock`, and `[workspace]` root stanza. No shared
+  workspace; you can `cp -r <example> ~/my-project` and it builds in
+  isolation against a pinned `afterburner` version. Run with `cargo run`.
+* **CLI examples** — single `.ts` / `.js` files driven through the `burn`
+  binary itself. No Cargo project. Run with `burn <args> <script>`.
+
+## Library examples (cargo run)
 
 ```bash
 cd examples/<name>
@@ -23,6 +27,12 @@ cargo run
 | `streaming-crypto`   | `crypto.createHash` streaming over a large buffer.                       | defaults        |
 | `cache-backend-sqlite` | Custom `BurnCacheBackend` impl backed by a shared SQLite file. Two `Afterburner` instances using the same file share content-addressed scripts. | defaults        |
 
-Every example runs under the default Docker capability set. No
+Every library example runs under the default Docker capability set. No
 `SCHED_FIFO`, no signals, no privileged syscalls. Tests embedded in
 each example's `src/main.rs` double as smoke tests.
+
+## CLI examples (run via the `burn` binary)
+
+| example          | what it demonstrates                                                                |
+|------------------|-------------------------------------------------------------------------------------|
+| `cli-quickstart` | TypeScript HTTP server end-to-end: multi-shard daemon, per-worker state (`/counter`), capability gates, `node:http` + `node:crypto`. `burn -A app.ts`. |
