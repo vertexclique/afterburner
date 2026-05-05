@@ -47,7 +47,7 @@ let ab = Afterburner::builder()
         fs: FsAccess::ReadWrite(vec!["/var/data".into()]),
         ..Manifold::sealed()
     })
-    .threaded(8)  // 8-worker scheduler; hash-routed with steal-when-idle
+    .threaded(8)
     .build()?;
 ```
 
@@ -71,12 +71,12 @@ Pin a specific version with `BURN_VERSION`:
 
 ```sh
 # POSIX
-BURN_VERSION=v0.1.0 curl -fsSL https://afterburner.sh | sh
+BURN_VERSION=v0.1.1 curl -fsSL https://afterburner.sh | sh
 ```
 
 ```powershell
 # PowerShell
-$env:BURN_VERSION = 'v0.1.0'; iwr -useb https://afterburner.sh | iex
+$env:BURN_VERSION = 'v0.1.1'; iwr -useb https://afterburner.sh | iex
 ```
 
 Or grab a tarball directly from the [Releases page](https://github.com/vertexclique/afterburner/releases). Archives are named `burn-<version>-<target>.tar.gz` (or `.zip` for Windows) and ship with a `.sha256` next to them.
@@ -103,11 +103,56 @@ burn --allow-env=HOME,PATH launcher.js
 burn -A runall.js                          # grant everything
 ```
 
-See [`examples/`](./examples/) for standalone projects covering: single
+See [`examples/`](./examples/) for standalone projects covering single
 UDF, batched UDF, multi-worker scheduling, streaming crypto,
-`HostContext` + capability grants, rebuilding `burn` in 30 lines, and a
-**full axum HTTP server dispatching Express-style handlers to
-Afterburner** (`examples/express-app`).
+`HostContext` + capability grants, rebuilding `burn` in 30 lines, and the
+real Express app described below.
+
+## Run real Express, unmodified
+
+[`examples/express-app`](./examples/express-app) takes
+`express@^4.21` from `node_modules` and serves HTTP through axum +
+Afterburner. No mocked router, no rewritten npm package — `const
+express = require('express')` resolves the real CommonJS tree out of
+the example's `node_modules/express/`, and the JS app runs inside the
+Wasmtime + Javy QuickJS sandbox with capability-gated fs and crypto.
+
+```bash
+cd examples/express-app
+npm install                       # populates ./node_modules/express + deps
+cargo run --release
+# afterburner-example-express-app
+#   thrust workers: 8
+#   cwd: …/examples/express-app
+#   listening on http://127.0.0.1:3000
+```
+
+```bash
+curl http://127.0.0.1:3000/
+curl http://127.0.0.1:3000/health
+curl http://127.0.0.1:3000/hello/world
+curl -X POST -H 'Content-Type: application/json' \
+     -d '[1,2,3,4]' http://127.0.0.1:3000/sum
+```
+
+The five canonical Express patterns work end-to-end: route registration, path parameters, JSON bodies (pre-parsed at the host boundary, the same pattern serverless adapters use), `res.status(...).json(...)`, the 404 fallback (`app.use((req,res) => res.status(404)...)`), and the four-arg error handler. Express's ETag middleware computes SHA-1 over each response body — granted via `Manifold { crypto: true, ... }`.
+
+```rust
+use afterburner::{Afterburner, FsAccess, Manifold};
+
+let example_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+let ab = Afterburner::builder()
+    .manifold(Manifold {
+        fs: FsAccess::ReadOnly(vec![example_root.clone()]),
+        crypto: true,
+        ..Manifold::sealed()
+    })
+    .cwd(example_root)              // require('express') walks node_modules from here
+    .threaded(8)
+    .build()?;
+```
+
+`.cwd(path)` is the new builder switch that pins the require resolver to the example directory. Without it, `require('express')` walks from `/` and fails to find `node_modules/express` — same as Node would behave outside the project tree.
 
 ---
 
@@ -130,6 +175,8 @@ Afterburner** (`examples/express-app`).
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
+
+**Corporate use notice.** Any corporate entity — company, agency, fund, foundation, or any organisation operating commercially — that uses Afterburner (in production, in internal tooling, in a product, or in a service) **must email the maintainer** at `vertexclique@gmail.com` before adopting it. The maintainer reserves the right to refuse permission to use this project to specific entities, at the maintainer's sole discretion, regardless of the underlying Apache-2.0 grant. Individuals and non-commercial open-source use are not subject to this notice.
 
 ---
 
