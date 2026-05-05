@@ -33,7 +33,12 @@ use std::thread;
 use std::time::Instant;
 
 const COLS: usize = 32;
-const BATCH_SIZE: usize = 1_000;
+/// Default batch size for the headline columnar/batched scenarios.
+const DEFAULT_BATCH_SIZE: usize = 1_000;
+/// Phase 0.2 sweep — find the per-call-overhead plateau on the
+/// user's box. Each B value runs a full ROWS_BATCHED pass so the
+/// numbers are directly comparable.
+const BATCH_SWEEP: &[usize] = &[1_000, 2_000, 4_000, 8_000, 16_000, 32_000];
 
 // Per-row serial is ~500 rows/s on my Ryzen 7 5800H — 50K rows
 // finishes in ~90s, enough for a stable measurement.
@@ -129,6 +134,10 @@ fn bench_per_row_parallel(burn: &Afterburner, n: usize, submitters: usize) -> Re
 }
 
 fn bench_batched(burn: &Afterburner, n: usize) -> Result<()> {
+    bench_batched_with(burn, n, DEFAULT_BATCH_SIZE)
+}
+
+fn bench_batched_with(burn: &Afterburner, n: usize, batch_size: usize) -> Result<()> {
     let id = burn.register(
         "module.exports = (batch) => {
             const out = new Array(batch.length);
@@ -145,16 +154,29 @@ fn bench_batched(burn: &Afterburner, n: usize) -> Result<()> {
     let t0 = Instant::now();
     let mut start = 0;
     while start < rows.len() {
-        let end = (start + BATCH_SIZE).min(rows.len());
+        let end = (start + batch_size).min(rows.len());
         let batch = Value::Array(rows[start..end].to_vec());
         let _ = burn.run(&id, &batch).map_err(|e| anyhow::anyhow!("{e}"))?;
         start = end;
     }
-    report(&format!("batched (B={BATCH_SIZE}, 1 submitter)"), n, t0.elapsed());
+    report(
+        &format!("batched (B={batch_size}, 1 submitter)"),
+        n,
+        t0.elapsed(),
+    );
     Ok(())
 }
 
 fn bench_batched_parallel(burn: &Afterburner, n: usize, submitters: usize) -> Result<()> {
+    bench_batched_parallel_with(burn, n, submitters, DEFAULT_BATCH_SIZE)
+}
+
+fn bench_batched_parallel_with(
+    burn: &Afterburner,
+    n: usize,
+    submitters: usize,
+    batch_size: usize,
+) -> Result<()> {
     let id = burn.register(
         "module.exports = (batch) => {
             const out = new Array(batch.length);
@@ -171,7 +193,7 @@ fn bench_batched_parallel(burn: &Afterburner, n: usize, submitters: usize) -> Re
     // Pre-build batches so we measure dispatch+JS, not the
     // host-side batch construction.
     let batches: Vec<Value> = rows
-        .chunks(BATCH_SIZE)
+        .chunks(batch_size)
         .map(|c| Value::Array(c.to_vec()))
         .collect();
     let next = Arc::new(AtomicUsize::new(0));
@@ -197,7 +219,7 @@ fn bench_batched_parallel(burn: &Afterburner, n: usize, submitters: usize) -> Re
         }
     });
     report(
-        &format!("batched (B={BATCH_SIZE}, {submitters} submitters)"),
+        &format!("batched (B={batch_size}, {submitters} submitters)"),
         n,
         t0.elapsed(),
     );
@@ -205,6 +227,15 @@ fn bench_batched_parallel(burn: &Afterburner, n: usize, submitters: usize) -> Re
 }
 
 fn bench_columnar_parallel(burn: &Afterburner, n: usize, submitters: usize) -> Result<()> {
+    bench_columnar_parallel_with(burn, n, submitters, DEFAULT_BATCH_SIZE)
+}
+
+fn bench_columnar_parallel_with(
+    burn: &Afterburner,
+    n: usize,
+    submitters: usize,
+    batch_size: usize,
+) -> Result<()> {
     let id = burn.register(
         "module.exports = (batch) => {
             const len = batch.c0.length;
@@ -221,7 +252,7 @@ fn bench_columnar_parallel(burn: &Afterburner, n: usize, submitters: usize) -> R
     )?;
     let rows: Vec<Value> = (0..n).map(make_row).collect();
     let batches: Vec<Value> = rows
-        .chunks(BATCH_SIZE)
+        .chunks(batch_size)
         .map(|chunk| {
             let mut cols: Vec<Vec<Value>> = vec![Vec::with_capacity(chunk.len()); COLS];
             for r in chunk {
@@ -260,7 +291,7 @@ fn bench_columnar_parallel(burn: &Afterburner, n: usize, submitters: usize) -> R
         }
     });
     report(
-        &format!("columnar (B={BATCH_SIZE}, {submitters} submitters)"),
+        &format!("columnar (B={batch_size}, {submitters} submitters)"),
         n,
         t0.elapsed(),
     );
@@ -286,6 +317,11 @@ fn main() -> Result<()> {
     bench_batched(&burn, ROWS_BATCHED)?;
     bench_batched_parallel(&burn, ROWS_BATCHED, workers)?;
     bench_columnar_parallel(&burn, ROWS_BATCHED, workers)?;
+
+    println!("\nbatch-size sweep (columnar, {workers} submitters, {ROWS_BATCHED} rows):");
+    for &b in BATCH_SWEEP {
+        bench_columnar_parallel_with(&burn, ROWS_BATCHED, workers, b)?;
+    }
 
     Ok(())
 }

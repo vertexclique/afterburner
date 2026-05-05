@@ -148,6 +148,22 @@ pub struct WasmConfig {
     pub transpile_hook: Option<crate::host::TranspileFn>,
 }
 
+/// Cached payload for a registered script. Built once in `ignite` so
+/// `thrust` becomes a slice borrow + an instantiate.
+///
+/// `raw` is kept for diagnostics + future non-invoke consumers (e.g.
+/// the daemon path's `run_init_with_bytecode` if it ever shares this
+/// cache). `invoke_envelope_bytes` is the pre-serialized
+/// `{"mode":"invoke","bytecode_b64":"<...>"}` JSON the plugin's
+/// `invoke` mode reads off stdin — same for every thrust of this
+/// script, so the per-call hot path skips both base64 encoding and
+/// `serde_json::to_vec` on the envelope side.
+pub(crate) struct CompiledScript {
+    #[allow(dead_code)]
+    pub raw: Vec<u8>,
+    pub invoke_envelope_bytes: Vec<u8>,
+}
+
 pub struct WasmCombustor {
     engine: Engine,
     /// Source store keyed by SHA-256 of the user-facing source. `ignite`
@@ -155,13 +171,23 @@ pub struct WasmCombustor {
     /// `ScriptNotFound` retry path. The hot path reads from
     /// `bytecode_cache` directly.
     source_store: HopscotchMap<[u8; 32], String>,
-    /// Cached QuickJS bytecode keyed by the same hash. Populated by
-    /// `ignite` (which compiles via the plugin's `compile` mode) and
-    /// consumed by `thrust` (which ships the bytecode through the
-    /// plugin's `invoke` mode). Skipping per-call source compilation
-    /// drops the per-thrust cost from ~2 ms to ~150 µs and unlocks the
-    /// plan's 100 K/sec target on commodity 8-core hardware.
-    bytecode_cache: HopscotchMap<[u8; 32], Arc<Vec<u8>>>,
+    /// Cached compiled-script payloads keyed by source hash. Populated
+    /// by `ignite` (which compiles via the plugin's `compile` mode) and
+    /// consumed by `thrust` (which ships the pre-built `invoke`
+    /// envelope through the plugin). Skipping per-call source
+    /// compilation drops the per-thrust cost from ~2 ms to ~150 µs and
+    /// unlocks the plan's 100 K/sec target on commodity 8-core
+    /// hardware. The cached payload also pre-bakes the base64-encoded
+    /// bytecode + the entire `{"mode":"invoke",...}` JSON envelope, so
+    /// per-thrust work is just a slice borrow — no encode, no serde.
+    bytecode_cache: HopscotchMap<[u8; 32], Arc<CompiledScript>>,
+    /// Counter incremented every time `compile_to_bytecode` actually
+    /// invokes the plugin's compile mode. Used by tests to assert the
+    /// hot path is genuinely cached (register-once → N thrusts → 1
+    /// compile). Lives outside `bytecode_cache` so it survives
+    /// extinguish + re-ignite cycles and can distinguish "ignite was
+    /// idempotent" from "compile actually ran".
+    compile_count: Arc<std::sync::atomic::AtomicU64>,
     /// Pre-resolved plugin instantiation. Built once at `new()` from the
     /// module + linker; per-thrust we just call `instance_pre.instantiate(&mut store)`,
     /// which avoids re-walking imports and re-typechecking on every call.
@@ -218,6 +244,7 @@ impl WasmCombustor {
             engine,
             source_store: HopscotchMap::new(),
             bytecode_cache: HopscotchMap::new(),
+            compile_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             instance_pre: Arc::new(instance_pre),
             state_store,
             host_context: config.host_context,
@@ -235,9 +262,12 @@ impl WasmCombustor {
 
     /// Compile `source` to QuickJS bytecode by spinning up a one-shot
     /// plugin Store in `compile` mode. Result is the raw bytecode bytes
-    /// — `ignite` caches an `Arc<Vec<u8>>` of this so subsequent
-    /// thrusts skip the compile.
+    /// — `ignite` wraps these in an [`Arc<CompiledScript>`] (alongside
+    /// a pre-built invoke envelope) so subsequent thrusts skip the
+    /// compile entirely.
     fn compile_to_bytecode(&self, source: &str) -> Result<Vec<u8>> {
+        self.compile_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let envelope = serde_json::json!({
             "mode": "compile",
             "source": source,
@@ -496,10 +526,26 @@ impl Combustor for WasmCombustor {
         }
 
         // Cache miss: compile through the plugin, then stash both the
-        // source (for diagnostics + future retry) and the bytecode.
+        // source (for diagnostics + future retry) and the bytecode
+        // alongside a pre-built `invoke` envelope. Pre-building here
+        // hoists the per-thrust base64 encode and per-thrust envelope
+        // serde out of the hot path — every subsequent `thrust` for
+        // this script borrows the cached bytes directly.
         let bytecode = self.compile_to_bytecode(source)?;
+        let bytecode_b64 = B64.encode(&bytecode);
+        let invoke_envelope = serde_json::json!({
+            "mode": "invoke",
+            "bytecode_b64": bytecode_b64,
+        });
+        let invoke_envelope_bytes = serde_json::to_vec(&invoke_envelope)?;
         self.source_store.insert(hash, source.to_string());
-        self.bytecode_cache.insert(hash, Arc::new(bytecode));
+        self.bytecode_cache.insert(
+            hash,
+            Arc::new(CompiledScript {
+                raw: bytecode,
+                invoke_envelope_bytes,
+            }),
+        );
         ab_event!(
             Level::Info,
             "wasm.ignite.compiled",
@@ -515,29 +561,23 @@ impl Combustor for WasmCombustor {
 
     #[fastrace::trace(name = "WasmCombustor::thrust")]
     fn thrust(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<Value> {
-        let bytecode = self
+        let compiled = self
             .bytecode_cache
             .get(&id.hash)
             .ok_or(AfterburnerError::ScriptNotFound)?;
-        // Encode bytecode for transit via the JSON envelope. Using the
-        // base64 wire format so the plugin's stdin parser stays a
-        // single JSON-aware path. Encode cost is ~1 µs per KB, well
-        // under the per-thrust budget.
-        let bytecode_b64 = B64.encode(bytecode.as_ref());
-
-        // Input goes via `HostState::pending_input` (read by the
-        // `host_get_input` linker import) — not via the envelope. That
-        // lets the plugin's invoke mode skip the per-call preamble
-        // compile.
-        let envelope = serde_json::json!({
-            "mode": "invoke",
-            "bytecode_b64": bytecode_b64,
-        });
-        let envelope_bytes = serde_json::to_vec(&envelope)?;
+        // The invoke envelope (mode + base64 bytecode) was built once
+        // at `ignite` time and lives in `Arc<CompiledScript>`. Every
+        // thrust for the same script reads the same bytes — borrow
+        // and go. Saves ~40 µs/call (base64 encode of ~30 KB
+        // bytecode) + the per-call serde_json::to_vec on the envelope.
+        // Input still serializes per-call because it changes per-call;
+        // it goes via `HostState::pending_input` (read by the
+        // `host_get_input` linker import) — not via the envelope.
+        let envelope_bytes: &[u8] = &compiled.invoke_envelope_bytes;
         let input_bytes = serde_json::to_vec(input)?;
 
         let mut state = HostState::new_with_input(
-            &envelope_bytes,
+            envelope_bytes,
             input_bytes,
             limits.memory_bytes,
             STDOUT_CAPACITY,
@@ -926,6 +966,66 @@ mod tests {
             .thrust(&id, &json!(null), &FuelGauge::unlimited())
             .unwrap_err();
         assert!(matches!(err, AfterburnerError::ScriptNotFound));
+    }
+
+    #[test]
+    fn bytecode_cache_compiles_once_per_source() {
+        // Phase 0.1 regression: register a script once, thrust it many
+        // times, and confirm the plugin's `compile` mode runs exactly
+        // once. Catches a bytecode-cache miss the day it happens
+        // (would silently 100× slow down every thrust).
+        let c = make_combustor();
+        assert_eq!(c.compile_count.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        let id = c
+            .ignite("module.exports = (d) => ({ doubled: d.n * 2 })")
+            .unwrap();
+        assert_eq!(c.compile_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        for n in 0..32 {
+            let out = c
+                .thrust(&id, &json!({ "n": n }), &FuelGauge::unlimited())
+                .unwrap();
+            assert_eq!(out, json!({ "doubled": n * 2 }));
+        }
+        // After 32 thrusts the cache has done its job: still one compile.
+        assert_eq!(c.compile_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        // Re-igniting the same source must also hit the cache (no
+        // recompile) — content-addressed by hash.
+        let id2 = c
+            .ignite("module.exports = (d) => ({ doubled: d.n * 2 })")
+            .unwrap();
+        assert_eq!(id2.hash, id.hash);
+        assert_eq!(c.compile_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        // A different source compiles exactly once more.
+        let _id3 = c.ignite("module.exports = () => 42").unwrap();
+        assert_eq!(c.compile_count.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn invoke_envelope_is_prebuilt_at_ignite() {
+        // Phase 0.1: the cached `CompiledScript` must carry both the
+        // raw bytecode AND the pre-encoded invoke envelope. Catches a
+        // future refactor that accidentally re-introduces per-thrust
+        // base64 + serde.
+        let c = make_combustor();
+        let id = c.ignite("module.exports = () => 'ok'").unwrap();
+        let compiled = c.bytecode_cache.get(&id.hash).expect("cached");
+        assert!(!compiled.raw.is_empty(), "raw bytecode must be cached");
+        assert!(
+            !compiled.invoke_envelope_bytes.is_empty(),
+            "invoke envelope must be pre-built at ignite",
+        );
+        let env: serde_json::Value =
+            serde_json::from_slice(&compiled.invoke_envelope_bytes).unwrap();
+        assert_eq!(env["mode"], json!("invoke"));
+        assert!(env["bytecode_b64"].is_string());
+        // Sanity: the embedded b64 round-trips back to the raw bytes.
+        let b64 = env["bytecode_b64"].as_str().unwrap();
+        let decoded = B64.decode(b64).unwrap();
+        assert_eq!(decoded, compiled.raw);
     }
 
     #[test]
