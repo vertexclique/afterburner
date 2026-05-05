@@ -5,6 +5,7 @@
 //! QuickJS-in-WASM. Produces hard-sandboxed JS execution with fuel,
 //! memory, and wall-clock caps.
 
+pub mod columnar;
 #[cfg(feature = "daemon")]
 pub mod daemon_dgram;
 pub mod daemon_envelopes;
@@ -41,5 +42,9 @@ pub use daemon_shard_pool::{DaemonShardPool, ShardPoolConfig};
 #[cfg(feature = "daemon")]
 pub use daemon_tls::{DaemonTls, TlsEvent};
 pub use daemon_workers::{DaemonWorkers, WorkerConfig, WorkerEvent};
+pub use columnar::{
+    ColumnDtype, ColumnRef, ColumnarBatch, ColumnarOutput, OwnedColumn, decode_batch,
+    encode_batch,
+};
 pub use manifold_codec::manifold_to_cli_args;
 pub use wasm_engine::{WasmCombustor, WasmConfig};
