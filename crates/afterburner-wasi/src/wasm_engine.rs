@@ -149,19 +149,29 @@ pub struct WasmConfig {
 }
 
 /// Cached payload for a registered script. Built once in `ignite` so
-/// `thrust` becomes a slice borrow + an instantiate.
+/// per-call paths (`thrust`, `thrust_columnar`) become slice borrows
+/// + instantiate.
 ///
-/// `raw` is kept for diagnostics + future non-invoke consumers (e.g.
-/// the daemon path's `run_init_with_bytecode` if it ever shares this
-/// cache). `invoke_envelope_bytes` is the pre-serialized
-/// `{"mode":"invoke","bytecode_b64":"<...>"}` JSON the plugin's
-/// `invoke` mode reads off stdin — same for every thrust of this
-/// script, so the per-call hot path skips both base64 encoding and
-/// `serde_json::to_vec` on the envelope side.
+/// `raw` is the bytecode for the regular JSON-shaped UDF wrapper
+/// (compiled by the plugin's `compile` mode); `columnar_raw` is the
+/// bytecode for the columnar wrapper (compiled by the plugin's
+/// `compile-columnar` mode). Both are kept for diagnostics + future
+/// non-invoke consumers. The pre-serialised invoke envelopes —
+/// `invoke_envelope_bytes` (regular) and `columnar_invoke_envelope_bytes`
+/// (columnar) — are the hot-path payload that
+/// `Combustor::thrust` / `WasmCombustor::thrust_columnar` borrow
+/// directly, so per-call work is just a slice borrow. Building all
+/// four eagerly at register time costs one extra plugin compile
+/// (~2 ms per registration) and ~12 KB extra in cache per script;
+/// in exchange every per-call path skips both base64 encoding and
+/// `serde_json::to_vec` on the envelope.
 pub(crate) struct CompiledScript {
     #[allow(dead_code)]
     pub raw: Vec<u8>,
+    #[allow(dead_code)]
+    pub columnar_raw: Vec<u8>,
     pub invoke_envelope_bytes: Vec<u8>,
+    pub columnar_invoke_envelope_bytes: Vec<u8>,
 }
 
 pub struct WasmCombustor {
@@ -260,16 +270,28 @@ impl WasmCombustor {
         self.transpile_hook.clone()
     }
 
-    /// Compile `source` to QuickJS bytecode by spinning up a one-shot
-    /// plugin Store in `compile` mode. Result is the raw bytecode bytes
-    /// — `ignite` wraps these in an [`Arc<CompiledScript>`] (alongside
-    /// a pre-built invoke envelope) so subsequent thrusts skip the
-    /// compile entirely.
+    /// Compile `source` for the JSON-shaped UDF path by spinning up a
+    /// one-shot plugin Store in `compile` mode. Result is the raw
+    /// bytecode for the input-via-`__AB_GET_INPUT__` wrapper.
     fn compile_to_bytecode(&self, source: &str) -> Result<Vec<u8>> {
+        self.compile_to_bytecode_with_mode(source, "compile")
+    }
+
+    /// Compile `source` for the columnar UDF path. Same shape as
+    /// [`Self::compile_to_bytecode`] but uses the plugin's
+    /// `compile-columnar` mode, which wraps the source with
+    /// `__ab_columnar_dispatch(module.exports)` so the cached
+    /// bytecode is wired to read column buffers + write the reply
+    /// blob via the host_columnar_reply path.
+    fn compile_columnar_to_bytecode(&self, source: &str) -> Result<Vec<u8>> {
+        self.compile_to_bytecode_with_mode(source, "compile-columnar")
+    }
+
+    fn compile_to_bytecode_with_mode(&self, source: &str, mode: &str) -> Result<Vec<u8>> {
         self.compile_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let envelope = serde_json::json!({
-            "mode": "compile",
+            "mode": mode,
             "source": source,
         });
         let envelope_bytes = serde_json::to_vec(&envelope)?;
@@ -454,6 +476,165 @@ impl WasmCombustor {
             daemon_http,
         )
     }
+
+    /// Phase 1 columnar UDF path. Skips the JSON encode/decode the
+    /// regular [`Combustor::thrust`] path pays per call: the host
+    /// encodes the [`ColumnarBatch`] into one contiguous binary blob
+    /// (one `memcpy` per input column), the plugin's columnar-invoke
+    /// mode reads the blob through the existing `host_get_input`
+    /// channel, and the JS-side polyfill exposes each column as a
+    /// TypedArray *view* into wasm linear memory — zero copy on the
+    /// guest side. After the user UDF returns, the polyfill writes
+    /// the result blob via `host_columnar_reply` and the host decodes
+    /// it (one `memcpy` per output column) into [`ColumnarOutput`].
+    ///
+    /// **Total data movement per call:** one host→guest `memcpy` per
+    /// input column + one guest→host `memcpy` per output column. No
+    /// JSON, no base64, no varint, no Arrow framing. The unavoidable
+    /// boundary copies are the only ones; everything else is in-place.
+    ///
+    /// **Sandbox model:** identical to [`Combustor::thrust`] — fresh
+    /// Store from the pool, fresh linmem, fuel + epoch + memory cap
+    /// enforced exactly as today. The columnar path adds *no* new
+    /// capability gates; the user UDF executes under the same
+    /// `Manifold` it would for a JSON-shaped call.
+    ///
+    /// **Out of scope for Phase 1:** variable-width (Utf8 / Bytea /
+    /// Jsonb) and 16-byte fixed (Decimal128 / Uuid / Interval) dtypes.
+    /// `encode_batch` returns [`AfterburnerError::Engine`] if a column
+    /// uses one of those tags; Phase 1.5 / Phase 2 add them.
+    #[fastrace::trace(name = "WasmCombustor::thrust_columnar")]
+    pub fn thrust_columnar(
+        &self,
+        id: &ScriptId,
+        batch: &crate::columnar::ColumnarBatch<'_>,
+        limits: &FuelGauge,
+    ) -> Result<crate::columnar::ColumnarOutput> {
+        let encoded = crate::columnar::encode_batch(batch)?;
+        let reply = self.thrust_columnar_bytes_inner(id, encoded.bytes, limits)?;
+        crate::columnar::decode_batch(&reply)
+    }
+
+    /// Byte-level columnar UDF entry point. Takes the pre-encoded
+    /// host blob, returns the guest's reply blob — neither side does
+    /// `encode_batch` / `decode_batch`. Used by the `Combustor` trait
+    /// override (so the type-erased `Box<dyn Combustor>` shape works)
+    /// and as the inner implementation of [`Self::thrust_columnar`].
+    fn thrust_columnar_bytes_inner(
+        &self,
+        id: &ScriptId,
+        encoded_input: Vec<u8>,
+        limits: &FuelGauge,
+    ) -> Result<Vec<u8>> {
+        let compiled = self
+            .bytecode_cache
+            .get(&id.hash)
+            .ok_or(AfterburnerError::ScriptNotFound)?;
+
+        // The boundary `memcpy` (host slice → guest linmem) happens
+        // inside `HostState::new_with_input` when it stashes the bytes
+        // into `pending_input`; the guest copies from there into linmem
+        // via `host_get_input`. There is no third copy in this path.
+        let envelope_bytes: &[u8] = &compiled.columnar_invoke_envelope_bytes;
+
+        let mut state = HostState::new_with_input(
+            envelope_bytes,
+            encoded_input,
+            limits.memory_bytes,
+            STDOUT_CAPACITY,
+            limits.manifold.clone(),
+            self.state_store.clone(),
+            self.host_context.clone(),
+        );
+        state.transpile_hook = self.transpile_hook.clone();
+        let mut store = Store::new(&self.engine, state);
+        store.limiter(|s| &mut s.limits);
+
+        let fuel = limits.fuel.unwrap_or(u64::MAX);
+        store
+            .set_fuel(fuel)
+            .map_err(|e| AfterburnerError::Engine(format!("set_fuel: {e}")))?;
+        if let Some(ms) = limits.timeout_ms {
+            let ticks = ms.div_ceil(TICK_PERIOD_MS).max(1);
+            store.set_epoch_deadline(ticks);
+        } else {
+            store.set_epoch_deadline(u64::MAX / 2);
+        }
+
+        let instance = self
+            .instance_pre
+            .instantiate(&mut store)
+            .map_err(|e| AfterburnerError::Engine(format!("plugin instantiate: {e}")))?;
+        let start = instance
+            .get_typed_func::<(), ()>(&mut store, "_start")
+            .map_err(|e| AfterburnerError::Engine(format!("_start lookup: {e}")))?;
+        let call_result = start.call(&mut store, ());
+
+        // Map traps the same way `thrust` does so the surface is
+        // consistent across the two UDF paths.
+        if let Err(trap) = call_result {
+            if let Some(exit) = trap.downcast_ref::<I32Exit>() {
+                if exit.0 != 0 {
+                    ab_event!(
+                        Level::Warn,
+                        "wasm.thrust_columnar.nonzero_exit",
+                        "code" => exit.0,
+                    );
+                    let msg = format_trap_with_stderr(
+                        &format!("script exited with non-zero code {}", exit.0),
+                        &mut store,
+                    );
+                    return Err(AfterburnerError::WasmTrap(msg));
+                }
+            } else if let Some(t) = trap.downcast_ref::<Trap>() {
+                match t {
+                    Trap::Interrupt => {
+                        ab_event!(Level::Warn, "wasm.thrust_columnar.timeout");
+                        return Err(AfterburnerError::Timeout);
+                    }
+                    Trap::OutOfFuel => {
+                        ab_event!(Level::Warn, "wasm.thrust_columnar.fuel_exhausted");
+                        return Err(AfterburnerError::FuelExhausted);
+                    }
+                    other => {
+                        let msg = format_trap_with_stderr(&format!("{other}"), &mut store);
+                        ab_event!(Level::Warn, "wasm.thrust_columnar.trap", "kind" => other);
+                        return Err(AfterburnerError::WasmTrap(msg));
+                    }
+                }
+            } else {
+                let chain: Vec<String> = trap.chain().map(|e| format!("{e}")).collect();
+                let full = chain.join(" => ");
+                if full.contains("memory minimum size") || full.contains("memory size") {
+                    ab_event!(Level::Warn, "wasm.thrust_columnar.memory_limit");
+                    return Err(AfterburnerError::MemoryLimit);
+                }
+                let msg = format_trap_with_stderr(&full, &mut store);
+                return Err(AfterburnerError::WasmTrap(msg));
+            }
+        }
+
+        // Drain the reply set by the `host_columnar_reply` import.
+        // Missing reply means the plugin's `_start` returned cleanly
+        // without writing back — most commonly because the plugin
+        // .wasm doesn't ship a `columnar-invoke` mode handler.
+        // Surface as a clean diagnostic instead of an empty Vec, since
+        // the caller can't distinguish "0 rows out" from "guest never
+        // replied".
+        let reply = store
+            .data_mut()
+            .pending_columnar_reply
+            .take()
+            .ok_or_else(|| {
+                AfterburnerError::Engine(
+                    "columnar-invoke: guest returned without calling host_columnar_reply \
+                     (the plugin .wasm probably doesn't ship a columnar-invoke handler — \
+                     rebuild via crates/afterburner-plugin/build.sh)"
+                        .to_string(),
+                )
+            })?;
+        Ok(reply)
+    }
 }
 
 impl Drop for WasmCombustor {
@@ -538,12 +719,29 @@ impl Combustor for WasmCombustor {
             "bytecode_b64": bytecode_b64,
         });
         let invoke_envelope_bytes = serde_json::to_vec(&invoke_envelope)?;
+
+        // Columnar wrapper compile — produces a separate bytecode
+        // that wires `module.exports` to `__ab_columnar_dispatch`.
+        // Same source, different wrapper, different bytecode hash.
+        // Eager build because the per-call path needs both envelopes
+        // pre-built; lazy compilation would put a 2 ms latency spike
+        // on the first columnar call after register, which is the
+        // worst time for one.
+        let columnar_bytecode = self.compile_columnar_to_bytecode(source)?;
+        let columnar_bytecode_b64 = B64.encode(&columnar_bytecode);
+        let columnar_envelope = serde_json::json!({
+            "mode": "columnar-invoke",
+            "bytecode_b64": columnar_bytecode_b64,
+        });
+        let columnar_invoke_envelope_bytes = serde_json::to_vec(&columnar_envelope)?;
         self.source_store.insert(hash, source.to_string());
         self.bytecode_cache.insert(
             hash,
             Arc::new(CompiledScript {
                 raw: bytecode,
+                columnar_raw: columnar_bytecode,
                 invoke_envelope_bytes,
+                columnar_invoke_envelope_bytes,
             }),
         );
         ab_event!(
@@ -670,6 +868,25 @@ impl Combustor for WasmCombustor {
         self.source_store.remove(&id.hash);
         self.bytecode_cache.remove(&id.hash);
         ab_event!(Level::Info, "wasm.extinguish", "hash" => hex8(&id.hash));
+    }
+
+    /// Combustor-trait override that delegates to the inherent
+    /// byte-level path. The `BurnCache` (and therefore the public
+    /// `Afterburner` facade) calls this via `Box<dyn Combustor>` —
+    /// the typed
+    /// [`Self::thrust_columnar`] convenience is for direct callers.
+    fn thrust_columnar_bytes(
+        &self,
+        id: &ScriptId,
+        encoded: &[u8],
+        limits: &FuelGauge,
+    ) -> Result<Vec<u8>> {
+        // The inner takes ownership of the encoded blob (the wasm-side
+        // path stashes it into HostState's pending_input). We clone
+        // here because the trait method gives us a borrow; cloning is
+        // the unavoidable boundary alloc + memcpy that gets the bytes
+        // into a Vec for the host-state stash.
+        self.thrust_columnar_bytes_inner(id, encoded.to_vec(), limits)
     }
 
     #[fastrace::trace(name = "WasmCombustor::run_script")]
@@ -970,17 +1187,20 @@ mod tests {
 
     #[test]
     fn bytecode_cache_compiles_once_per_source() {
-        // Phase 0.1 regression: register a script once, thrust it many
-        // times, and confirm the plugin's `compile` mode runs exactly
-        // once. Catches a bytecode-cache miss the day it happens
-        // (would silently 100× slow down every thrust).
+        // Phase 0.1 + Phase 1.4 regression: register a script once,
+        // thrust it many times, and confirm the plugin's `compile`
+        // modes run exactly twice per registration (regular invoke +
+        // columnar). Catches a bytecode-cache miss the day it
+        // happens (would silently 100× slow down every thrust).
         let c = make_combustor();
         assert_eq!(c.compile_count.load(std::sync::atomic::Ordering::Relaxed), 0);
 
         let id = c
             .ignite("module.exports = (d) => ({ doubled: d.n * 2 })")
             .unwrap();
-        assert_eq!(c.compile_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+        // Two compiles per ignite: one for the regular UDF wrapper,
+        // one for the columnar wrapper (Phase 1.4).
+        assert_eq!(c.compile_count.load(std::sync::atomic::Ordering::Relaxed), 2);
 
         for n in 0..32 {
             let out = c
@@ -988,8 +1208,8 @@ mod tests {
                 .unwrap();
             assert_eq!(out, json!({ "doubled": n * 2 }));
         }
-        // After 32 thrusts the cache has done its job: still one compile.
-        assert_eq!(c.compile_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+        // After 32 thrusts the cache has done its job: still two compiles.
+        assert_eq!(c.compile_count.load(std::sync::atomic::Ordering::Relaxed), 2);
 
         // Re-igniting the same source must also hit the cache (no
         // recompile) — content-addressed by hash.
@@ -997,23 +1217,36 @@ mod tests {
             .ignite("module.exports = (d) => ({ doubled: d.n * 2 })")
             .unwrap();
         assert_eq!(id2.hash, id.hash);
-        assert_eq!(c.compile_count.load(std::sync::atomic::Ordering::Relaxed), 1);
-
-        // A different source compiles exactly once more.
-        let _id3 = c.ignite("module.exports = () => 42").unwrap();
         assert_eq!(c.compile_count.load(std::sync::atomic::Ordering::Relaxed), 2);
+
+        // A different source compiles exactly twice more (regular + columnar).
+        let _id3 = c.ignite("module.exports = () => 42").unwrap();
+        assert_eq!(c.compile_count.load(std::sync::atomic::Ordering::Relaxed), 4);
     }
 
     #[test]
     fn invoke_envelope_is_prebuilt_at_ignite() {
-        // Phase 0.1: the cached `CompiledScript` must carry both the
-        // raw bytecode AND the pre-encoded invoke envelope. Catches a
-        // future refactor that accidentally re-introduces per-thrust
-        // base64 + serde.
+        // Phase 0.1 + Phase 1.4: the cached `CompiledScript` must
+        // carry both the raw bytecodes AND both pre-encoded invoke
+        // envelopes (regular + columnar). Catches a future refactor
+        // that accidentally re-introduces per-thrust base64 + serde,
+        // or one that conflates the two compile paths.
         let c = make_combustor();
         let id = c.ignite("module.exports = () => 'ok'").unwrap();
         let compiled = c.bytecode_cache.get(&id.hash).expect("cached");
         assert!(!compiled.raw.is_empty(), "raw bytecode must be cached");
+        assert!(
+            !compiled.columnar_raw.is_empty(),
+            "columnar bytecode must be cached",
+        );
+        // The two bytecodes are different — different wrappers around
+        // the same user source produce different compiled bodies.
+        assert_ne!(
+            compiled.raw, compiled.columnar_raw,
+            "regular + columnar bytecodes must differ",
+        );
+
+        // Regular invoke envelope round-trip.
         assert!(
             !compiled.invoke_envelope_bytes.is_empty(),
             "invoke envelope must be pre-built at ignite",
@@ -1021,11 +1254,196 @@ mod tests {
         let env: serde_json::Value =
             serde_json::from_slice(&compiled.invoke_envelope_bytes).unwrap();
         assert_eq!(env["mode"], json!("invoke"));
-        assert!(env["bytecode_b64"].is_string());
-        // Sanity: the embedded b64 round-trips back to the raw bytes.
         let b64 = env["bytecode_b64"].as_str().unwrap();
-        let decoded = B64.decode(b64).unwrap();
-        assert_eq!(decoded, compiled.raw);
+        assert_eq!(B64.decode(b64).unwrap(), compiled.raw);
+
+        // Columnar invoke envelope round-trip.
+        assert!(
+            !compiled.columnar_invoke_envelope_bytes.is_empty(),
+            "columnar invoke envelope must be pre-built at ignite",
+        );
+        let cenv: serde_json::Value =
+            serde_json::from_slice(&compiled.columnar_invoke_envelope_bytes).unwrap();
+        assert_eq!(cenv["mode"], json!("columnar-invoke"));
+        let cb64 = cenv["bytecode_b64"].as_str().unwrap();
+        assert_eq!(B64.decode(cb64).unwrap(), compiled.columnar_raw);
+    }
+
+    #[test]
+    fn thrust_columnar_int32_sum_two_columns_e2e() {
+        // Phase 1.4 end-to-end smoke test for the columnar UDF path.
+        // Two Int32 input columns, the UDF sums them per-row and emits
+        // an Int32 result column. Exercises every link in the chain:
+        // host encode → linmem write → guest typed-array view → user
+        // UDF compute → guest reply blob → linmem read → host decode.
+        use crate::columnar::{ColumnDtype, ColumnRef, ColumnarBatch};
+        let c = make_combustor();
+        let id = c
+            .ignite(
+                r#"module.exports = (batch) => {
+                    const c0 = batch.columns.c0;
+                    const c1 = batch.columns.c1;
+                    const out = new Int32Array(batch.row_count);
+                    for (let i = 0; i < batch.row_count; i++) out[i] = c0[i] + c1[i];
+                    return { row_count: batch.row_count, columns: { sum: out } };
+                };"#,
+            )
+            .unwrap();
+
+        let c0_data: Vec<u8> = [1i32, 2, 3, 4, 5]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let c1_data: Vec<u8> = [10i32, 20, 30, 40, 50]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let mut batch = ColumnarBatch::new(5);
+        batch.push(ColumnRef {
+            name: "c0",
+            dtype: ColumnDtype::Int32,
+            data: &c0_data,
+            validity: None,
+        });
+        batch.push(ColumnRef {
+            name: "c1",
+            dtype: ColumnDtype::Int32,
+            data: &c1_data,
+            validity: None,
+        });
+
+        let out = c
+            .thrust_columnar(&id, &batch, &FuelGauge::unlimited())
+            .unwrap();
+        assert_eq!(out.row_count, 5);
+        assert_eq!(out.columns.len(), 1);
+        assert_eq!(out.columns[0].name, "sum");
+        assert_eq!(out.columns[0].dtype, ColumnDtype::Int32);
+        let sums: Vec<i32> = out.columns[0]
+            .data
+            .chunks_exact(4)
+            .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(sums, vec![11, 22, 33, 44, 55]);
+    }
+
+    #[test]
+    fn thrust_columnar_float64_sum_of_columns_e2e() {
+        // Phase 1.4: 32 Float64 columns × 64 rows, the canonical
+        // analytics workload shape. UDF computes sum of all columns
+        // per row. The bench's Float64 sum-of-columns scenario is
+        // exactly this shape (just with more rows + parallel
+        // submitters).
+        use crate::columnar::{ColumnDtype, ColumnRef, ColumnarBatch};
+        const COLS: usize = 32;
+        const ROWS: usize = 64;
+        let c = make_combustor();
+        let id = c
+            .ignite(
+                r#"module.exports = (batch) => {
+                    const n = batch.row_count;
+                    const out = new Float64Array(n);
+                    for (let i = 0; i < n; i++) {
+                        let s = 0;
+                        for (let j = 0; j < 32; j++) s += batch.columns['c' + j][i];
+                        out[i] = s;
+                    }
+                    return { row_count: n, columns: { sum: out } };
+                };"#,
+            )
+            .unwrap();
+
+        let mut col_bufs: Vec<Vec<u8>> = Vec::with_capacity(COLS);
+        for j in 0..COLS {
+            let buf: Vec<u8> = (0..ROWS)
+                .flat_map(|i| (((i + 1) * (j + 1)) as f64).to_le_bytes())
+                .collect();
+            col_bufs.push(buf);
+        }
+        let mut batch = ColumnarBatch::new(ROWS as u32);
+        let names: Vec<String> = (0..COLS).map(|j| format!("c{j}")).collect();
+        for (j, buf) in col_bufs.iter().enumerate() {
+            batch.push(ColumnRef {
+                name: names[j].as_str(),
+                dtype: ColumnDtype::Float64,
+                data: buf,
+                validity: None,
+            });
+        }
+
+        let out = c
+            .thrust_columnar(&id, &batch, &FuelGauge::unlimited())
+            .unwrap();
+        assert_eq!(out.row_count, ROWS as u32);
+        assert_eq!(out.columns.len(), 1);
+        assert_eq!(out.columns[0].dtype, ColumnDtype::Float64);
+        let sums: Vec<f64> = out.columns[0]
+            .data
+            .chunks_exact(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        // Row i's sum is sum_{j=1..=32} (i+1)*j  = (i+1) * (32*33/2) = 528*(i+1).
+        for (i, s) in sums.iter().enumerate() {
+            let expected = 528.0 * (i + 1) as f64;
+            assert!(
+                (s - expected).abs() < 1e-9,
+                "row {i} got {s}, expected {expected}",
+            );
+        }
+    }
+
+    #[test]
+    fn thrust_columnar_unknown_script_id() {
+        // Calling with a fresh-but-unregistered ScriptId should error
+        // cleanly (matches `thrust`'s behaviour for the same case).
+        use crate::columnar::{ColumnDtype, ColumnRef, ColumnarBatch};
+        let c = make_combustor();
+        let bogus = ScriptId {
+            hash: [0u8; 32],
+            mode: EngineMode::Wasm,
+        };
+        let data = vec![0u8; 4];
+        let mut batch = ColumnarBatch::new(1);
+        batch.push(ColumnRef {
+            name: "c0",
+            dtype: ColumnDtype::Int32,
+            data: &data,
+            validity: None,
+        });
+        let err = c
+            .thrust_columnar(&bogus, &batch, &FuelGauge::unlimited())
+            .unwrap_err();
+        assert!(matches!(err, AfterburnerError::ScriptNotFound));
+    }
+
+    #[test]
+    fn thrust_columnar_phase1_unsupported_dtype_clean_error() {
+        // Decimal128 is reserved-but-deferred for Phase 2; passing it
+        // must surface a clean Engine error from `encode_batch`, not
+        // a guest-side trap. Catches a regression where the
+        // unsupported-dtype guard is bypassed.
+        use crate::columnar::{ColumnDtype, ColumnRef, ColumnarBatch};
+        let c = make_combustor();
+        let id = c
+            .ignite("module.exports = (b) => ({ row_count: 0, columns: {} })")
+            .unwrap();
+        let data = vec![0u8; 16];
+        let mut batch = ColumnarBatch::new(1);
+        batch.push(ColumnRef {
+            name: "amount",
+            dtype: ColumnDtype::Decimal128,
+            data: &data,
+            validity: None,
+        });
+        let err = c
+            .thrust_columnar(&id, &batch, &FuelGauge::unlimited())
+            .unwrap_err();
+        match err {
+            AfterburnerError::Engine(msg) => {
+                assert!(msg.contains("Decimal128"), "got {msg}")
+            }
+            _ => panic!("expected Engine error, got {err:?}"),
+        }
     }
 
     #[test]

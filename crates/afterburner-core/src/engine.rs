@@ -51,6 +51,31 @@ pub trait Combustor: Send + Sync {
     /// call, `thrust` with the same `id` returns `ScriptNotFound`.
     fn extinguish(&self, id: &ScriptId);
 
+    /// Columnar UDF path. The combustor receives a pre-encoded blob
+    /// (host-side `BatchHeader` + `ColumnHeader[]` + per-column data)
+    /// and returns a reply blob in the same shape. The encoder /
+    /// decoder live in `afterburner-wasi`'s `columnar` module so this
+    /// trait stays vendor-neutral; the only thing crossing the trait
+    /// boundary is opaque byte slices.
+    ///
+    /// Default impl errors — backends that don't support the columnar
+    /// path inherit it and surface a clean diagnostic. Currently only
+    /// `WasmCombustor` overrides; `NativeCombustor` and
+    /// `AdaptiveCombustor` route through the wasm path implicitly via
+    /// their stored `WasmCombustor` reference (Adaptive) or simply
+    /// error (Native — script mode + columnar are wasm-only).
+    fn thrust_columnar_bytes(
+        &self,
+        id: &ScriptId,
+        encoded: &[u8],
+        limits: &FuelGauge,
+    ) -> Result<Vec<u8>> {
+        let _ = (id, encoded, limits);
+        Err(AfterburnerError::Engine(
+            "columnar UDF path not implemented for this backend".into(),
+        ))
+    }
+
     /// Script mode: run `source` as top-level code (no UDF envelope).
     /// `invocation` carries `process.argv` / `process.env` values that
     /// the backend wires into the JS runtime before the user code

@@ -421,6 +421,22 @@ unsafe extern "C" {
     // `globals::install`.
     pub fn host_get_input(out_ptr: *mut u8, out_cap: u32) -> i32;
 
+    // ---- columnar UDF path -----------------------------------------
+    //
+    // Length getter for `pending_input` so the columnar polyfill can
+    // allocate exactly the right linmem buffer in one shot. Returns
+    // the byte length, or `-1` if the buffer exceeds `i32::MAX`
+    // (would be a misconfiguration on the host side).
+    pub fn host_get_input_len() -> i32;
+
+    // After the user UDF returns, the polyfill writes the result blob
+    // into linmem and calls this to hand it to the host. The host
+    // copies the bytes out of linmem into `pending_columnar_reply`
+    // and `WasmCombustor::thrust_columnar` decodes via
+    // `crate::columnar::decode_batch` after `_start` returns.
+    // Returns 0 on success, negative error code otherwise.
+    pub fn host_columnar_reply(blob_ptr: *const u8, blob_len: u32) -> i32;
+
     // ---- daemon envelope (long-lived Store re-entry) ----------------
     //
     // The daemon path reuses the same Wasmtime Store across many

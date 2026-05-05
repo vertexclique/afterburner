@@ -64,6 +64,12 @@ pub struct HostState {
     /// each `daemon_step` invocation; plugin reads via the
     /// `host_get_envelope` import.
     pub pending_envelope: Vec<u8>,
+    /// Set by the columnar-invoke plugin mode via the
+    /// `host_columnar_reply` import after the user UDF returns.
+    /// Carries the result blob the host then decodes via
+    /// [`crate::columnar::decode_batch`] in `thrust_columnar`. `None`
+    /// means the call hasn't completed (or wasn't a columnar call).
+    pub pending_columnar_reply: Option<Vec<u8>>,
     /// Optional daemon HTTP coordinator. `Some` only in daemon mode —
     /// owns the axum listeners + per-req reply channels. `None` for
     /// all one-shot thrust paths so UDF/script callers don't pay the
@@ -172,6 +178,7 @@ impl HostState {
             last_error: String::new(),
             pending_input: Vec::new(),
             pending_envelope: Vec::new(),
+            pending_columnar_reply: None,
             daemon_http: None,
             daemon_workers: None,
             #[cfg(feature = "daemon")]

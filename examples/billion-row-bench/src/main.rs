@@ -25,6 +25,7 @@
 //!    on the JS side.
 
 use afterburner::Afterburner;
+use afterburner::wasi::{ColumnDtype, ColumnRef, ColumnarBatch};
 use anyhow::Result;
 use serde_json::Value;
 use std::sync::Arc;
@@ -298,6 +299,110 @@ fn bench_columnar_parallel_with(
     Ok(())
 }
 
+/// Phase 1 — typed columnar API (`Afterburner::run_columnar`). Same
+/// 32-Float64-column sum-of-columns shape as
+/// [`bench_columnar_parallel`], but the data path is now binary
+/// blob → wasm linmem → JS-side `Float64Array` view → user UDF →
+/// reply blob. No JSON encode/decode anywhere in the per-call path.
+///
+/// Pre-builds one `ColumnarBatch`-shaped `Vec<u8>` per chunk so the
+/// timer measures dispatch+JS, not the host-side encode (the
+/// encode is in-process memcpy, not the work we're benchmarking).
+fn bench_columnar_typed_parallel(
+    burn: &Afterburner,
+    n: usize,
+    submitters: usize,
+    batch_size: usize,
+) -> Result<()> {
+    let id = burn.register(
+        "module.exports = (b) => {
+            const n = b.row_count;
+            const out = new Float64Array(n);
+            for (let i = 0; i < n; i++) {
+                let s = 0;
+                for (let j = 0; j < 32; j++) s += b.columns['c' + j][i];
+                out[i] = s;
+            }
+            return { row_count: n, columns: { sum: out } };
+        };",
+    )?;
+
+    // Build column buffers row-major-by-row, then transpose into
+    // column-major byte buffers per chunk.
+    let chunks = n.div_ceil(batch_size);
+    // For each chunk: 32 column buffers, each `batch_size × 8` bytes.
+    let chunk_bufs: Vec<Vec<Vec<u8>>> = (0..chunks)
+        .map(|chunk_idx| {
+            let row_start = chunk_idx * batch_size;
+            let row_end = (row_start + batch_size).min(n);
+            let chunk_rows = row_end - row_start;
+            let mut cols: Vec<Vec<u8>> = (0..COLS)
+                .map(|_| Vec::with_capacity(chunk_rows * 8))
+                .collect();
+            for row_idx in row_start..row_end {
+                for c in 0..COLS {
+                    let v = ((row_idx as i64 * (c as i64 + 1)) % 100_000) as f64;
+                    cols[c].extend_from_slice(&v.to_le_bytes());
+                }
+            }
+            cols
+        })
+        .collect();
+    let names: Vec<String> = (0..COLS).map(|c| format!("c{c}")).collect();
+    let next = Arc::new(AtomicUsize::new(0));
+
+    let t0 = Instant::now();
+    thread::scope(|s| -> Result<()> {
+        let mut handles = Vec::with_capacity(submitters);
+        for _ in 0..submitters {
+            let chunk_bufs = &chunk_bufs;
+            let names = &names;
+            let next = Arc::clone(&next);
+            let id = id.clone();
+            let burn = burn;
+            handles.push(s.spawn(move || -> Result<()> {
+                loop {
+                    let idx = next.fetch_add(1, Ordering::Relaxed);
+                    if idx >= chunk_bufs.len() {
+                        return Ok(());
+                    }
+                    let cols = &chunk_bufs[idx];
+                    let chunk_rows = (cols[0].len() / 8) as u32;
+                    let mut batch = ColumnarBatch::new(chunk_rows);
+                    for c in 0..COLS {
+                        batch.push(ColumnRef {
+                            name: names[c].as_str(),
+                            dtype: ColumnDtype::Float64,
+                            data: &cols[c],
+                            validity: None,
+                        });
+                    }
+                    let _ = burn
+                        .run_columnar(&id, &batch)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                }
+            }));
+        }
+        // Drain submitter results — surface the first error instead
+        // of silently dropping them. The earlier scenarios in this
+        // bench fan out and ignore submitter results; that pattern
+        // hid a "Mode::Wasm not selected, run_columnar errors out
+        // immediately" misconfiguration as a 337M-rows/sec phantom
+        // number. Don't repeat that.
+        for h in handles {
+            h.join()
+                .map_err(|_| anyhow::anyhow!("submitter panicked"))??;
+        }
+        Ok(())
+    })?;
+    report(
+        &format!("columnar-typed (B={batch_size}, {submitters} submitters)"),
+        n,
+        t0.elapsed(),
+    );
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let workers = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -318,10 +423,113 @@ fn main() -> Result<()> {
     bench_batched_parallel(&burn, ROWS_BATCHED, workers)?;
     bench_columnar_parallel(&burn, ROWS_BATCHED, workers)?;
 
-    println!("\nbatch-size sweep (columnar, {workers} submitters, {ROWS_BATCHED} rows):");
+    println!("\nbatch-size sweep (columnar JSON, {workers} submitters, {ROWS_BATCHED} rows):");
     for &b in BATCH_SWEEP {
         bench_columnar_parallel_with(&burn, ROWS_BATCHED, workers, b)?;
     }
 
+    // Phase 1 typed columnar API — `run_columnar` over a binary
+    // `ColumnarBatch`. Force `Mode::Wasm` (NOT adaptive — adaptive's
+    // `Combustor` impl doesn't yet route the columnar trait method
+    // to its inner WasmCombustor, so it'd inherit the trait default
+    // and silently error out with "not implemented for this backend"
+    // in the spawned threads). And single-threaded — `run_columnar`
+    // requires it (the threaded scheduler also doesn't route the
+    // columnar method). The wasmtime pool inside `WasmCombustor` is
+    // thread-safe, so N submitters issuing concurrent `run_columnar`
+    // calls all execute in parallel.
+    let burn_st = Afterburner::builder().mode(afterburner::Mode::Wasm).build()?;
+    println!("\nPhase 1 typed-columnar API (run_columnar):");
+    bench_columnar_typed_parallel(&burn_st, ROWS_BATCHED, workers, DEFAULT_BATCH_SIZE)?;
+
+    println!(
+        "\nbatch-size sweep (columnar-typed, {workers} submitters, {ROWS_BATCHED} rows):"
+    );
+    for &b in BATCH_SWEEP {
+        bench_columnar_typed_parallel(&burn_st, ROWS_BATCHED, workers, b)?;
+    }
+
+    // Compute-light UDF (single Float64 column → doubled). The
+    // 32-col sum-of-columns scenario above is *compute-bound* in
+    // QuickJS interpretation — 524K element loads + adds + stores
+    // per call at QuickJS-speed dominates the boundary savings.
+    // This shape isolates the boundary cost itself: trivial JS work,
+    // so the numbers reflect almost pure dispatch + JSON-vs-blob
+    // boundary cost.
+    println!("\ncompute-light UDF (1 Float64 col, doubled):");
+    bench_columnar_typed_double(&burn_st, ROWS_BATCHED, workers, 16_000)?;
+
+    Ok(())
+}
+
+fn bench_columnar_typed_double(
+    burn: &Afterburner,
+    n: usize,
+    submitters: usize,
+    batch_size: usize,
+) -> Result<()> {
+    let id = burn.register(
+        "module.exports = (b) => {
+            const n = b.row_count;
+            const x = b.columns.x;
+            const out = new Float64Array(n);
+            for (let i = 0; i < n; i++) out[i] = x[i] * 2;
+            return { row_count: n, columns: { y: out } };
+        };",
+    )?;
+    let chunks = n.div_ceil(batch_size);
+    let chunk_bufs: Vec<Vec<u8>> = (0..chunks)
+        .map(|chunk_idx| {
+            let row_start = chunk_idx * batch_size;
+            let row_end = (row_start + batch_size).min(n);
+            let mut buf = Vec::with_capacity((row_end - row_start) * 8);
+            for row_idx in row_start..row_end {
+                buf.extend_from_slice(&((row_idx as f64) * 1.5).to_le_bytes());
+            }
+            buf
+        })
+        .collect();
+    let next = Arc::new(AtomicUsize::new(0));
+
+    let t0 = Instant::now();
+    thread::scope(|s| -> Result<()> {
+        let mut handles = Vec::with_capacity(submitters);
+        for _ in 0..submitters {
+            let chunk_bufs = &chunk_bufs;
+            let next = Arc::clone(&next);
+            let id = id.clone();
+            let burn = burn;
+            handles.push(s.spawn(move || -> Result<()> {
+                loop {
+                    let idx = next.fetch_add(1, Ordering::Relaxed);
+                    if idx >= chunk_bufs.len() {
+                        return Ok(());
+                    }
+                    let buf = &chunk_bufs[idx];
+                    let chunk_rows = (buf.len() / 8) as u32;
+                    let mut batch = ColumnarBatch::new(chunk_rows);
+                    batch.push(ColumnRef {
+                        name: "x",
+                        dtype: ColumnDtype::Float64,
+                        data: buf,
+                        validity: None,
+                    });
+                    let _ = burn
+                        .run_columnar(&id, &batch)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                }
+            }));
+        }
+        for h in handles {
+            h.join()
+                .map_err(|_| anyhow::anyhow!("submitter panicked"))??;
+        }
+        Ok(())
+    })?;
+    report(
+        &format!("columnar-typed-1col×2 (B={batch_size}, {submitters} submitters)"),
+        n,
+        t0.elapsed(),
+    );
     Ok(())
 }

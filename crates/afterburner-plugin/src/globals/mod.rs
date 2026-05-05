@@ -14,6 +14,7 @@
 //!    which builds `require()` and the Node-stdlib modules on top of
 //!    the bridges — so the bridges MUST exist first.
 
+mod columnar;
 mod crypto;
 mod fs;
 mod misc;
@@ -88,10 +89,18 @@ pub fn install(ctx: Ctx<'_>) {
     fs::install(&globals);
     crypto::install(&globals);
     misc::install(&globals);
+    columnar::install(&globals);
 
     // Eval the plenum bundle so Wizer preinit captures `require()` and
     // every Tier-1 polyfill into the snapshot.
     let _ = ctx.eval::<(), _>(PLENUM_BUNDLE);
+
+    // Columnar UDF dispatcher — JS-side helper that reads the input
+    // blob via `__AB_GET_COLUMNAR_INPUT__`, builds typed views over
+    // linmem, dispatches the user UDF, and posts the reply. Installed
+    // after the plenum bundle so it can rely on `TextEncoder` /
+    // `TextDecoder` (from the encoding polyfill).
+    columnar::install_dispatcher_js(ctx.clone());
 
     // Patch the V8-style CallSite prototype after the plenum bundle so
     // the snapshot also captures the Node-shaped CallSite methods. The

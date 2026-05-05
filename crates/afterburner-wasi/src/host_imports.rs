@@ -51,6 +51,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_last_error(linker)?;
     wrap_input(linker)?;
     wrap_envelope(linker)?;
+    wrap_columnar(linker)?;
     wrap_http_server(linker)?;
     wrap_transpile(linker)?;
     wrap_shadow_bcrypt(linker)?;
@@ -2112,6 +2113,82 @@ fn wrap_input(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
             },
         )
         .map_err(link_err)?;
+    Ok(())
+}
+
+// ---- columnar UDF path --------------------------------------------------
+//
+// The columnar UDF path (`WasmCombustor::thrust_columnar`) feeds the
+// guest a binary blob — `BatchHeader` + `ColumnHeader[]` + per-column
+// data + validity + names — written into `HostState::pending_input`
+// (the same channel the JSON invoke path uses). The plugin's
+// `columnar-invoke` mode reads this through the existing
+// `host_get_input` import, then uses `host_get_input_len` to know
+// the exact size up-front so the JS polyfill can allocate one
+// linmem buffer of the right size and avoid the retry loop the
+// JSON path tolerates (because JSON inputs are typically tiny).
+//
+// After the user UDF returns, the polyfill builds the result blob
+// inside the guest's linmem and calls `host_columnar_reply` to
+// hand the bytes to the host. The host stashes them in
+// `HostState::pending_columnar_reply`; `thrust_columnar` reads
+// the reply after `_start` returns and decodes via
+// `crate::columnar::decode_batch`.
+//
+// All of this stays inside the Wasmtime sandbox: the only data
+// crossing the boundary is one `memcpy` per input column (host →
+// linmem at register time of the call) plus one `memcpy` per
+// result column (linmem → host at reply time). No JSON, no base64,
+// no encoding — just typed contiguous bytes with offset descriptors.
+fn wrap_columnar(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    // Length getter — the polyfill calls this *before* it allocates
+    // the destination buffer in linmem so it picks exactly the right
+    // capacity in one shot. Saves the JSON-style "guess, retry on
+    // E_BUF_TOO_SMALL" loop on a path where the input is hundreds of
+    // KB and getting the size wrong wastes meaningful cycles.
+    linker
+        .func_wrap(
+            NS,
+            "host_get_input_len",
+            |caller: Caller<'_, HostState>| -> i32 {
+                let n = caller.data().pending_input.len();
+                // i32 caps at 2 GiB; per-Store linmem is also bounded
+                // (max 4 GiB by wasm32 spec, default 1 GiB). A blob
+                // bigger than i32::MAX would be a misconfiguration —
+                // surface it as -1 so the polyfill can error cleanly.
+                i32::try_from(n).unwrap_or(-1)
+            },
+        )
+        .map_err(link_err)?;
+
+    // Reply receiver — guest writes its result blob into linmem at
+    // (blob_ptr, blob_len), then calls this so the host copies the
+    // bytes into `pending_columnar_reply`. The host can't share-borrow
+    // pending_columnar_reply during the read because we hold a
+    // mutable borrow of memory; clone-then-stash is the same pattern
+    // the JSON stdout drain uses.
+    linker
+        .func_wrap(
+            NS,
+            "host_columnar_reply",
+            |mut caller: Caller<'_, HostState>, blob_ptr: i32, blob_len: i32| -> i32 {
+                if blob_len < 0 {
+                    record(&mut caller, "columnar reply: negative blob_len");
+                    return E_OTHER;
+                }
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(bytes) = read_bytes(&memory, &caller, blob_ptr, blob_len) else {
+                    record(&mut caller, "columnar reply: blob slice out of bounds");
+                    return E_OTHER;
+                };
+                caller.data_mut().pending_columnar_reply = Some(bytes);
+                0
+            },
+        )
+        .map_err(link_err)?;
+
     Ok(())
 }
 

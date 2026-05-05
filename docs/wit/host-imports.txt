@@ -16,6 +16,7 @@
 # when adding new imports so reviewers can see the shape.
 
 host_child_process_exec_sync
+host_columnar_reply
 host_crypto_aes_cbc_decrypt
 host_crypto_aes_cbc_encrypt
 host_crypto_aes_gcm_decrypt
@@ -65,6 +66,7 @@ host_fs_write_file_sync
 host_get_env
 host_get_envelope
 host_get_input
+host_get_input_len
 host_http_close
 host_http_listen
 host_http_reply

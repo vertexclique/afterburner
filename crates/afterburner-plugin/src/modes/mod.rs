@@ -13,7 +13,9 @@
 //! | `"daemon-event"`   | `{ mode, event: {kind, ...} }`                                 | side-effect only (reply via `__host_http_reply`) |
 //! | (omitted)          | `{ source, input }`                                            | wrapped script's JSON output |
 
+pub mod columnar_invoke;
 pub mod compile;
+pub mod compile_columnar;
 pub mod compile_script;
 pub mod daemon_event;
 pub mod daemon_init;
@@ -28,7 +30,9 @@ pub fn dispatch(envelope: &serde_json::Value) {
     match mode {
         Some("compile") => compile::run(envelope),
         Some("compile-script") => compile_script::run(envelope),
+        Some("compile-columnar") => compile_columnar::run(envelope),
         Some("invoke") => invoke::run(envelope),
+        Some("columnar-invoke") => columnar_invoke::run(envelope),
         Some("script") => script::run(envelope),
         Some("daemon-init") => daemon_init::run(envelope),
         Some("daemon-event") => daemon_event::run(envelope),

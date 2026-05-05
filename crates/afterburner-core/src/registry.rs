@@ -298,6 +298,22 @@ impl BurnCache {
         Ok(out)
     }
 
+    /// Columnar UDF entry point. Forwards the pre-encoded blob to the
+    /// underlying combustor via the trait method, which knows how to
+    /// dispatch into the wasm path. Decoding the reply blob back into
+    /// host-side `ColumnarOutput` is the caller's responsibility — the
+    /// `Afterburner::run_columnar` facade wraps this with the
+    /// `encode_batch` / `decode_batch` pair from `afterburner-wasi`.
+    #[fastrace::trace(name = "BurnCache::execute_columnar_bytes")]
+    pub fn execute_columnar_bytes(
+        &self,
+        id: &ScriptId,
+        encoded: &[u8],
+        limits: &FuelGauge,
+    ) -> Result<Vec<u8>> {
+        self.engine.thrust_columnar_bytes(id, encoded, limits)
+    }
+
     /// Remove a compiled script from the cache. The engine's `extinguish`
     /// is also called so backend-owned resources (wasmtime modules,
     /// rquickjs source buffers) are released.

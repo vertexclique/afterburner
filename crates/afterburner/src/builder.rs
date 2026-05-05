@@ -203,6 +203,67 @@ impl Afterburner {
         }
     }
 
+    /// Run a registered script against a typed [`ColumnarBatch`] and
+    /// receive the result columns directly — no JSON parse / stringify
+    /// on either side. Phase 1 of the UDF perf push: the data path
+    /// is `host slice → wasm linmem → JS-side TypedArray view → user
+    /// UDF → JS-side TypedArray result → wasm linmem → host slice`,
+    /// with exactly two `memcpy`s (the unavoidable host↔guest
+    /// boundary copies) and no other data movement.
+    ///
+    /// **Sandbox properties** are identical to [`run`](Self::run): a
+    /// fresh Wasmtime Store per call, fuel + epoch + memory caps
+    /// enforced, capability gates honoured. The columnar payload is
+    /// just bytes flowing through host imports — no new attack
+    /// surface beyond the existing `host_get_input` channel.
+    ///
+    /// **Phase 1 dtype scope:** `Bool` / `Int8`–`Int64` / `UInt8`–
+    /// `UInt64` / `Float32` / `Float64` / `Date32` / `Timestamp`. All
+    /// fixed-width. Variable-width (`Utf8` / `Bytea` / `Jsonb`) and
+    /// 16-byte (`Decimal128` / `Uuid` / `Interval`) tags exist in the
+    /// enum but surface a clean
+    /// [`AfterburnerError::Engine`] from `encode_batch`; Phase 1.5 /
+    /// Phase 2 add support.
+    ///
+    /// Available only when the `wasm` feature is enabled — the
+    /// columnar path is sandbox-only by design (the native /
+    /// `rquickjs` backend has no TypedArray-over-linmem mechanism;
+    /// users on `native`-only builds get the JSON-shaped
+    /// [`run`](Self::run) instead).
+    #[cfg(feature = "wasm")]
+    pub fn run_columnar(
+        &self,
+        id: &ScriptId,
+        batch: &afterburner_wasi::ColumnarBatch<'_>,
+    ) -> Result<afterburner_wasi::ColumnarOutput> {
+        self.run_columnar_with(id, batch, &self.defaults)
+    }
+
+    /// Like [`run_columnar`](Self::run_columnar) but with explicit
+    /// per-call limits.
+    #[cfg(feature = "wasm")]
+    pub fn run_columnar_with(
+        &self,
+        id: &ScriptId,
+        batch: &afterburner_wasi::ColumnarBatch<'_>,
+        limits: &FuelGauge,
+    ) -> Result<afterburner_wasi::ColumnarOutput> {
+        let encoded = afterburner_wasi::encode_batch(batch)?;
+        let reply = match &self.engine {
+            EngineHolder::Cache(c) => c.execute_columnar_bytes(id, &encoded.bytes, limits)?,
+            #[cfg(feature = "thrust")]
+            EngineHolder::Thrust(_) => {
+                return Err(AfterburnerError::Engine(
+                    "run_columnar requires a single-threaded engine; \
+                     construct `Afterburner::builder()` without .threaded() \
+                     for the columnar UDF path"
+                        .into(),
+                ));
+            }
+        };
+        afterburner_wasi::decode_batch(&reply)
+    }
+
     /// Apply the same script across a JSON array of records, returning
     /// an array of outputs. Equivalent to `run` over each element.
     pub fn run_batch(&self, id: &ScriptId, input: &Value) -> Result<Value> {

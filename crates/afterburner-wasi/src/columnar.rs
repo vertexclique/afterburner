@@ -420,23 +420,30 @@ pub fn encode_batch(batch: &ColumnarBatch<'_>) -> Result<EncodedBatch, Afterburn
     let mut headers: Vec<ColumnHeader> = Vec::with_capacity(column_count);
     let mut column_data_offsets: Vec<u32> = Vec::with_capacity(column_count);
     for col in &batch.columns {
+        // Align to 8 BEFORE writing this column's data buffer.
+        // Required because `new Float64Array(buf, off, len)` (and
+        // every other 8-byte typed view) checks that the **buffer-
+        // relative** offset is a multiple of 8 — QuickJS rejects
+        // anything else with `RangeError: invalid offset`. Aligning
+        // only after the data + before the next column's data isn't
+        // enough: the previous column's 4-byte-aligned name may
+        // leave the cursor at a non-8-aligned position.
+        cursor = align_up(cursor, 8);
         let data_offset = u32_from_usize(cursor)?;
         cursor += col.data.len();
-        cursor = align_up(cursor, 8);
         column_data_offsets.push(data_offset);
 
         let validity_offset = if let Some(bm) = col.validity {
             let v = u32_from_usize(cursor)?;
             cursor += bm.len();
-            cursor = align_up(cursor, 8);
             v
         } else {
             0
         };
 
+        // Names are arbitrary UTF-8; 1-byte alignment suffices.
         let name_offset = u32_from_usize(cursor)?;
         cursor += col.name.len();
-        cursor = align_up(cursor, 4);
         let name_len = u32_from_usize(col.name.len())?;
 
         headers.push(ColumnHeader {
@@ -843,22 +850,36 @@ mod tests {
 
     #[test]
     fn encoded_offsets_are_eight_byte_aligned() {
-        // Cache-friendly access pattern requires 8-aligned starts so
-        // the JS-side `new Float64Array(buf, off, len)` doesn't throw.
+        // QuickJS's `new Float64Array(buf, off, len)` rejects with
+        // `RangeError: invalid offset` if `off & 7 != 0`. The encoder
+        // must guarantee 8-aligned starts for *every* column data
+        // buffer in the blob, even when previous columns had short
+        // (≤ 7-byte) names that would otherwise leave the cursor
+        // mid-word.
         let f64_data: Vec<u8> = [1.0f64, 2.0, 3.0]
             .iter()
             .flat_map(|v| v.to_le_bytes())
             .collect();
         let mut batch = ColumnarBatch::new(3);
-        batch.push(ColumnRef {
-            name: "f",
-            dtype: ColumnDtype::Float64,
-            data: &f64_data,
-            validity: None,
-        });
+        // Six Float64 columns with 2-character names — exactly the
+        // shape that broke the previous encoder (each "cN" name was
+        // 4-byte aligned at the end, leaving the next column's data
+        // offset at +4 mod 8).
+        for n in ["c0", "c1", "c2", "c3", "c4", "c5"] {
+            batch.push(ColumnRef {
+                name: n,
+                dtype: ColumnDtype::Float64,
+                data: &f64_data,
+                validity: None,
+            });
+        }
         let encoded = encode_batch(&batch).unwrap();
-        for off in &encoded.column_data_offsets {
-            assert_eq!(*off as usize % 8, 0, "column data offset {} must be 8-aligned", off);
+        for (i, off) in encoded.column_data_offsets.iter().enumerate() {
+            assert_eq!(
+                *off as usize % 8,
+                0,
+                "column[{i}] data offset {off} must be 8-aligned",
+            );
         }
     }
 

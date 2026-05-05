@@ -61,6 +61,29 @@ pub fn wrap_user_source_with_input_global(user: &str) -> String {
     )
 }
 
+/// Columnar-invoke wrapper. Phase 1 of the UDF-perf push — identical
+/// shape to [`wrap_user_source_with_input_global`] except the result
+/// dispatch goes through the JS-side `__ab_columnar_dispatch` helper
+/// (installed at modify_runtime time by
+/// `globals::columnar::install_dispatcher_js`) instead of via
+/// `__AB_GET_INPUT__` + `JSON.parse` / `JSON.stringify` to stdout.
+///
+/// Synchronous in Phase 1 — the dispatcher throws a clean error if
+/// the user UDF returns a Promise. Async columnar UDFs are deferred
+/// to Phase 1.5+. The vast majority of analytical columnar UDFs are
+/// pure compute and sync, so this is the right default.
+pub fn wrap_user_source_columnar(user: &str) -> String {
+    let user_lit = js_string_literal(user);
+    format!(
+        r#"
+        const __ab_module = {{ exports: undefined }};
+        const __ab_user = new Function('module', 'exports', 'require', {user_lit});
+        __ab_user(__ab_module, __ab_module.exports, globalThis.require);
+        __ab_columnar_dispatch(__ab_module.exports);
+        "#
+    )
+}
+
 /// Envelope for script mode. The user source runs as top-level code
 /// inside a Node-style CommonJS wrapper (`module` / `exports` /
 /// `require` bound as parameters). Unlike the UDF wrappers above, we
