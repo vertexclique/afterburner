@@ -241,19 +241,56 @@ jobs:
           {
             echo "# burn ${tag}"
             echo
-            echo "Sandboxed JavaScript runtime CLI. Drop-in for Node-style scripts, runs untrusted JS in a Wasmtime sandbox."
+            echo "BURN: Sandboxed JavaScript runtime. Drop-in for Node-style scripts, runs untrusted JS in a sandbox."
             echo
             echo "## Install"
+            echo
+            echo "The one-liner installer auto-detects your OS + architecture, fetches + verifies the right binary, and updates your \$PATH:"
+            echo
+            echo '```sh'
+            echo "# Linux + macOS"
+            echo "curl -fsSL https://afterburner.sh | sh"
+            echo "# Windows (PowerShell)"
+            echo "iwr -useb https://afterburner.sh | iex"
+            echo '```'
+            echo
+            echo "### Manual install"
+            echo
+            echo "Or grab a tarball directly. Linux + macOS:"
             echo
             echo '```sh'
             echo "# Linux x86_64"
             echo "curl -L https://github.com/${{ github.repository }}/releases/download/${tag}/burn-${tag#v}-x86_64-unknown-linux-gnu.tar.gz | tar xz"
             echo "sudo mv burn-${tag#v}-x86_64-unknown-linux-gnu/burn /usr/local/bin/"
             echo
-            echo "# macOS arm64"
+            echo "# Linux aarch64"
+            echo "curl -L https://github.com/${{ github.repository }}/releases/download/${tag}/burn-${tag#v}-aarch64-unknown-linux-gnu.tar.gz | tar xz"
+            echo "sudo mv burn-${tag#v}-aarch64-unknown-linux-gnu/burn /usr/local/bin/"
+            echo
+            echo "# macOS arm64 (Apple Silicon)"
             echo "curl -L https://github.com/${{ github.repository }}/releases/download/${tag}/burn-${tag#v}-aarch64-apple-darwin.tar.gz | tar xz"
             echo "sudo mv burn-${tag#v}-aarch64-apple-darwin/burn /usr/local/bin/"
             echo '```'
+            echo
+            echo "Windows x86_64 (PowerShell):"
+            echo
+            echo '```powershell'
+            echo "# Download + extract + install to %USERPROFILE%\\.local\\bin"
+            echo "\$ver = \"${tag#v}\""
+            echo "\$url = \"https://github.com/${{ github.repository }}/releases/download/${tag}/burn-\$ver-x86_64-pc-windows-msvc.zip\""
+            echo "\$dst = Join-Path \$env:USERPROFILE \".local\\bin\""
+            echo "New-Item -ItemType Directory -Force -Path \$dst | Out-Null"
+            echo "Invoke-WebRequest -UseBasicParsing -Uri \$url -OutFile burn.zip"
+            echo "Expand-Archive -Path burn.zip -DestinationPath . -Force"
+            echo "Move-Item -Force \"burn-\$ver-x86_64-pc-windows-msvc\\burn.exe\" \"\$dst\\burn.exe\""
+            echo "Remove-Item -Recurse -Force burn.zip,\"burn-\$ver-x86_64-pc-windows-msvc\""
+            echo "# Add \$dst to PATH for the current session (persistent: System Properties > Environment Variables)"
+            echo "\$env:Path = \"\$dst;\$env:Path\""
+            echo '```'
+            echo
+            echo "Windows ARM64: install the x86_64 build above — Windows 11 ARM64 ships with transparent x64 emulation, so the x86_64 binary runs unmodified."
+            echo
+            echo "Intel macOS: not in the release matrix (GitHub's macos-13 runner is end-of-life). Build from source — see the repo README."
             echo
             echo "## Verify"
             echo
