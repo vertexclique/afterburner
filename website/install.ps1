@@ -28,6 +28,16 @@ $arch = switch -Regex ($archEnv) {
     'ARM64|aarch64' { 'aarch64' }
     default { throw "burn install: unsupported architecture '$archEnv'" }
 }
+
+# `aarch64-pc-windows-msvc` is not in the release matrix — the
+# rustls Ring crypto backend lacks aarch64-windows assembly.
+# Windows 11 on ARM64 ships with transparent x64 emulation, so the
+# x86_64 binary runs unmodified. Fall back to x86_64 with a note.
+$fallbackNote = $null
+if ($arch -eq 'aarch64') {
+    $arch = 'x86_64'
+    $fallbackNote = 'ARM Windows: installing the x86_64 build (runs under Windows 11 x64 emulation).'
+}
 $target = "$arch-pc-windows-msvc"
 
 # ----- resolve tag -------------------------------------------------------
@@ -44,6 +54,7 @@ $asset = "$stem.zip"
 $url = "https://github.com/$repo/releases/download/$tag/$asset"
 
 Write-Host "burn install: $tag -> $target"
+if ($fallbackNote) { Write-Host "  note: $fallbackNote" }
 Write-Host "  fetching $url"
 
 # ----- download + verify -------------------------------------------------
@@ -52,11 +63,36 @@ New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 
 try {
     $zipPath = Join-Path $tmp $asset
-    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $zipPath
+
+    # Show a progress bar during the multi-MB archive download. By
+    # default `Invoke-WebRequest -UseBasicParsing` shows percent-
+    # complete in the host; older PowerShell versions can stall the
+    # transfer if `$ProgressPreference` is left at default ('Continue')
+    # because of console-redraw cost — that's why some installers
+    # *disable* it. Trade-off: the bar slows IWR ~5× on PS 5.1 but
+    # gives the user visual feedback the download is alive.
+    # PS 7+ doesn't have this slowdown.
+    $oldProgress = $ProgressPreference
+    try {
+        if ($PSVersionTable.PSVersion.Major -lt 7) {
+            # PS 5.1: keep progress visible (worth the slowdown for UX).
+            $ProgressPreference = 'Continue'
+        }
+        Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $zipPath
+    } finally {
+        $ProgressPreference = $oldProgress
+    }
 
     $shaPath = "$zipPath.sha256"
     try {
-        Invoke-WebRequest -UseBasicParsing -Uri "$url.sha256" -OutFile $shaPath
+        # Silent for the tiny .sha256 file — the bar would just flash.
+        $oldProgress = $ProgressPreference
+        $ProgressPreference = 'SilentlyContinue'
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri "$url.sha256" -OutFile $shaPath
+        } finally {
+            $ProgressPreference = $oldProgress
+        }
         $expected = (Get-Content $shaPath | Select-Object -First 1).Split()[0].ToLower()
         $actual = (Get-FileHash -Algorithm SHA256 $zipPath).Hash.ToLower()
         if ($expected -ne $actual) {
@@ -81,15 +117,64 @@ try {
     $binDst = Join-Path $installDir 'burn.exe'
     Copy-Item -Force $binSrc $binDst
 
-    Write-Host "`n  installed: $binDst"
-
-    # PATH advisory
-    $pathDirs = $env:Path -split ';' | ForEach-Object { $_.TrimEnd('\') }
-    if ($pathDirs -notcontains $installDir.TrimEnd('\')) {
-        Write-Host "  note: $installDir is not on `$env:Path -- add it via System Properties > Environment Variables, or for the current session:"
-        Write-Host "    `$env:Path += ';$installDir'"
+    # ----- PATH update ----------------------------------------------------
+    #
+    # If $installDir isn't on the user's persistent PATH (the
+    # `User`-scope environment variable, NOT just the current
+    # session's $env:Path), prepend it. Mirrors what bun, rustup,
+    # scoop, and uv do on Windows.
+    #
+    # We update User scope (not Machine) so the install never needs
+    # admin elevation. New shells will pick it up; the current
+    # session also gets $env:Path updated for immediate use.
+    #
+    # Set $env:BURN_INSTALL_NO_PATH=1 to skip — for users who manage
+    # PATH via dotfiles or a shell profile of their own.
+    $pathUpdated = $false
+    if (-not $env:BURN_INSTALL_NO_PATH) {
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        if ($null -eq $userPath) { $userPath = '' }
+        $userDirs = $userPath.Split(';') | Where-Object { $_ -ne '' } | ForEach-Object { $_.TrimEnd('\') }
+        $needle = $installDir.TrimEnd('\')
+        if ($userDirs -notcontains $needle) {
+            $newPath = if ($userPath) { "$installDir;$userPath" } else { $installDir }
+            [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+            $env:Path = "$installDir;$env:Path"
+            $pathUpdated = $true
+        }
     }
-    Write-Host '  run: burn --version'
+
+    # ----- summary --------------------------------------------------------
+    #
+    # Mirrors bun's tone: success line, blank, what we did to PATH,
+    # blank, "to get started, run". The "restart your shell" note
+    # is the Windows analogue of `source ~/.bashrc` — env vars set
+    # via SetEnvironmentVariable propagate via WM_SETTINGCHANGE,
+    # which existing terminal sessions don't always re-read.
+
+    Write-Host ""
+    Write-Host "burn was installed successfully to $binDst"
+    if ($pathUpdated) {
+        Write-Host ""
+        Write-Host "Added `"$installDir`" to your User PATH"
+        Write-Host ""
+        Write-Host "To get started, open a new terminal and run:"
+        Write-Host ""
+        Write-Host "  burn --version"
+    } else {
+        $sessionDirs = $env:Path.Split(';') | Where-Object { $_ -ne '' } | ForEach-Object { $_.TrimEnd('\') }
+        if ($sessionDirs -contains $installDir.TrimEnd('\')) {
+            Write-Host ""
+            Write-Host "To get started, run:"
+            Write-Host ""
+            Write-Host "  burn --version"
+        } else {
+            Write-Host ""
+            Write-Host "Note: $installDir is not on `$env:Path. Either add it via"
+            Write-Host "      System Properties > Environment Variables, or run"
+            Write-Host "      $binDst --version directly."
+        }
+    }
 } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
