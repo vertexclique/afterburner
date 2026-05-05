@@ -132,7 +132,20 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          # Include `matrix.os` in the cache key so a cache built on
+          # one runner image can't hit on another. Without this, the
+          # transition from ubuntu-latest (24.04, glibc 2.39) to
+          # ubuntu-22.04 (glibc 2.35) produced a poisoned cache: the
+          # ubuntu-22.04 build got a full cache hit on the
+          # ubuntu-latest target-dir, skipped recompiling wasmtime,
+          # and then rustc compiled afterburner-wasi without
+          # --extern wasmtime=… (the cached metadata referenced a
+          # wasmtime build that no longer existed in this run's
+          # target/), failing with "can't find crate for `wasmtime`".
+          # Pinning the runner OS into the key prevents that
+          # cross-runner cache hit and forces a clean rebuild on
+          # any future runner switch.
+          key: ${{ matrix.target }}-${{ matrix.os }}
 
       - name: Build burn (cli-release profile, full features)
         shell: bash
