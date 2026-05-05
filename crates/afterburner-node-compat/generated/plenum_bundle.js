@@ -7745,6 +7745,22 @@ __register_module('stream', function(module, exports, require) {
         return stream;
     }
 
+    // Legacy `Stream` base class — Node's `require('stream')` returns
+    // a *callable* function (the legacy `Stream` constructor) with the
+    // modern subclasses + helpers attached as own properties. Real npm
+    // packages depend on the dual shape: `send/index.js` does
+    // `util.inherits(SendStream, Stream)`, which fails our explicit
+    // `superCtor must be a function` guard if `Stream` is a plain
+    // object. Keep the existing `exports` namespace populated for
+    // call-sites that use `require('stream').Readable` etc.; swap
+    // `module.exports` to the constructor.
+    function Stream() {
+        EventEmitter.call(this);
+    }
+    Stream.prototype = Object.create(EventEmitter.prototype);
+    Stream.prototype.constructor = Stream;
+    Stream.prototype.pipe = Readable.prototype.pipe;
+
     exports.Readable       = Readable;
     exports.Writable       = Writable;
     exports.Duplex         = Duplex;
@@ -7754,9 +7770,20 @@ __register_module('stream', function(module, exports, require) {
     exports.finished       = finished;
     exports.compose        = compose;
     exports.addAbortSignal = addAbortSignal;
+    exports.Stream         = Stream;
 
-    // Default export for `import stream from 'node:stream'`.
-    module.exports = exports;
+    Stream.Readable        = Readable;
+    Stream.Writable        = Writable;
+    Stream.Duplex          = Duplex;
+    Stream.Transform       = Transform;
+    Stream.PassThrough     = PassThrough;
+    Stream.pipeline        = pipeline;
+    Stream.finished        = finished;
+    Stream.compose         = compose;
+    Stream.addAbortSignal  = addAbortSignal;
+    Stream.Stream          = Stream;
+
+    module.exports = Stream;
 });
 
 // ---- string_decoder.js ----
