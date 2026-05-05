@@ -29,6 +29,125 @@
         };
     }
 
+    // `TextEncoder` / `TextDecoder` — Web globals. Javy ships them when
+    // built with `text_encoding(true)` (our WASM plugin does); native
+    // rquickjs doesn't. Real npm packages (Express deps, undici, etc.)
+    // probe these at module-load time and crash with `ReferenceError`
+    // without them.
+    //
+    // Implementation note: do NOT route through `Buffer.toString` /
+    // `Buffer.from(str, 'utf8')` here. Buffer's UTF-8 codec routes
+    // back through these globals in some plenum paths, producing an
+    // infinite recursion. The pure-JS encoder/decoder below is
+    // self-contained and handles BMP + surrogate-paired astral
+    // codepoints. Replacement char (`�`) for malformed sequences
+    // when not in `fatal` mode (matches WHATWG spec).
+    if (typeof globalThis.TextEncoder !== 'function') {
+        globalThis.TextEncoder = function TextEncoder() {
+            this.encoding = 'utf-8';
+        };
+        globalThis.TextEncoder.prototype.encode = function(input) {
+            var s = input === undefined ? '' : String(input);
+            // Worst case: 4 bytes per code unit (surrogate pair → 4-byte UTF-8).
+            var out = new Uint8Array(s.length * 4);
+            var n = 0;
+            for (var i = 0; i < s.length; i++) {
+                var c = s.charCodeAt(i);
+                if (c >= 0xD800 && c <= 0xDBFF && i + 1 < s.length) {
+                    var c2 = s.charCodeAt(i + 1);
+                    if (c2 >= 0xDC00 && c2 <= 0xDFFF) {
+                        var cp = 0x10000 + (((c & 0x3FF) << 10) | (c2 & 0x3FF));
+                        out[n++] = 0xF0 | (cp >> 18);
+                        out[n++] = 0x80 | ((cp >> 12) & 0x3F);
+                        out[n++] = 0x80 | ((cp >> 6) & 0x3F);
+                        out[n++] = 0x80 | (cp & 0x3F);
+                        i++;
+                        continue;
+                    }
+                }
+                if (c < 0x80) {
+                    out[n++] = c;
+                } else if (c < 0x800) {
+                    out[n++] = 0xC0 | (c >> 6);
+                    out[n++] = 0x80 | (c & 0x3F);
+                } else {
+                    out[n++] = 0xE0 | (c >> 12);
+                    out[n++] = 0x80 | ((c >> 6) & 0x3F);
+                    out[n++] = 0x80 | (c & 0x3F);
+                }
+            }
+            return out.slice(0, n);
+        };
+        globalThis.TextEncoder.prototype.encodeInto = function(source, dest) {
+            var encoded = this.encode(source);
+            var n = Math.min(encoded.length, dest.length);
+            for (var i = 0; i < n; i++) dest[i] = encoded[i];
+            return { read: source.length, written: n };
+        };
+    }
+    if (typeof globalThis.TextDecoder !== 'function') {
+        globalThis.TextDecoder = function TextDecoder(label, options) {
+            var enc = (label || 'utf-8').toLowerCase();
+            if (enc === 'utf8') enc = 'utf-8';
+            this.encoding = enc;
+            this.fatal = !!(options && options.fatal);
+            this.ignoreBOM = !!(options && options.ignoreBOM);
+        };
+        globalThis.TextDecoder.prototype.decode = function(input, _options) {
+            if (input === undefined) return '';
+            var bytes;
+            if (input instanceof Uint8Array) {
+                bytes = input;
+            } else if (input instanceof ArrayBuffer) {
+                bytes = new Uint8Array(input);
+            } else if (input && typeof input.byteLength === 'number') {
+                bytes = new Uint8Array(
+                    input.buffer || input,
+                    input.byteOffset || 0,
+                    input.byteLength
+                );
+            } else {
+                return '';
+            }
+            // Pure-JS UTF-8 decode. Doesn't route through Buffer to
+            // avoid recursion when Buffer's own codec calls back here.
+            var s = '';
+            var i = 0;
+            while (i < bytes.length) {
+                var b1 = bytes[i++];
+                if (b1 < 0x80) {
+                    s += String.fromCharCode(b1);
+                } else if (b1 < 0xC0) {
+                    s += '�';
+                } else if (b1 < 0xE0) {
+                    var b2 = bytes[i++] || 0;
+                    s += String.fromCharCode(((b1 & 0x1F) << 6) | (b2 & 0x3F));
+                } else if (b1 < 0xF0) {
+                    var b2c = bytes[i++] || 0;
+                    var b3 = bytes[i++] || 0;
+                    s += String.fromCharCode(
+                        ((b1 & 0x0F) << 12) | ((b2c & 0x3F) << 6) | (b3 & 0x3F)
+                    );
+                } else {
+                    var b2d = bytes[i++] || 0;
+                    var b3d = bytes[i++] || 0;
+                    var b4 = bytes[i++] || 0;
+                    var cp =
+                        ((b1 & 0x07) << 18) |
+                        ((b2d & 0x3F) << 12) |
+                        ((b3d & 0x3F) << 6) |
+                        (b4 & 0x3F);
+                    cp -= 0x10000;
+                    s += String.fromCharCode(
+                        0xD800 + (cp >> 10),
+                        0xDC00 + (cp & 0x3FF)
+                    );
+                }
+            }
+            return s;
+        };
+    }
+
     // `btoa` / `atob` — base64 encoders. QuickJS doesn't ship these.
     if (typeof globalThis.btoa !== 'function') {
         globalThis.btoa = function(str) {
