@@ -177,6 +177,38 @@ impl DaemonRuntime {
             .map_err(|trap| map_daemon_trap("daemon-init", trap))
     }
 
+    /// Same as [`Self::run_init`] but invokes pre-compiled bytecode
+    /// produced by [`crate::WasmCombustor::compile_daemon_init_bytecode`].
+    /// The wrap + compile happened on the host side; this just hands
+    /// the bytes to the plugin's `daemon-init` mode for invoke.
+    ///
+    /// Use case: when the same user app needs to load into multiple
+    /// daemon Stores (e.g. a multi-shard pool), pre-compile once and
+    /// run init with bytecode N times — each Store skips the per-
+    /// launch source parse + wrap + compile and just runs the
+    /// already-baked image.
+    ///
+    /// JS state (`process.argv`, `process.env`, `__host_cwd`) is
+    /// already baked into the bytecode via the script-mode envelope
+    /// the host applied at compile time. Re-running this method on
+    /// the same Store re-evaluates the script, which is a behavioral
+    /// no-op for typical daemon scripts (idempotent module init) but
+    /// could double-register handlers — same caveat as calling
+    /// [`Self::run_init`] twice.
+    pub fn run_init_with_bytecode(&mut self, bytecode: &[u8]) -> Result<()> {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(bytecode);
+        let envelope = serde_json::json!({
+            "mode": "daemon-init",
+            "bytecode_b64": b64,
+        });
+        let envelope_bytes = serde_json::to_vec(&envelope)?;
+        self.store.data_mut().pending_envelope = envelope_bytes;
+        self.daemon_step
+            .call(&mut self.store, ())
+            .map_err(|trap| map_daemon_trap("daemon-init", trap))
+    }
+
     /// Dispatch one event to the running daemon. Event shape:
     /// `{ kind: "http-request", server_id, req_id, req: {...} }` —
     /// the plugin's `daemon_event` mode looks the handler up on

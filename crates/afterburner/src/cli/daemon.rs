@@ -114,7 +114,22 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
     let dgram = DaemonDgram::new(rt.handle().clone(), manifold);
     daemon.install_dgram(Arc::clone(&dgram));
 
-    if let Err(e) = daemon.run_init(source, &invocation) {
+    // Pre-compile the user source on the host side so the daemon's
+    // long-lived Store skips the per-launch parse + wrap + compile.
+    // Compile errors surface here (via `compile_daemon_init_bytecode`'s
+    // `CompileFailed` return) rather than through a daemon-init trap,
+    // which keeps stderr cleaner — the daemon Store is still pristine
+    // if compile fails. Foundation for B1 multi-shard sharing: when N
+    // daemon Stores need to load the same app, they all run init from
+    // the same Vec<u8> instead of re-paying the source-compile cost.
+    let init_bytecode = match combustor.compile_daemon_init_bytecode(source, &invocation) {
+        Ok(bc) => bc,
+        Err(e) => {
+            let _ = std::io::stderr().write_all(format!("burn: {e}\n").as_bytes());
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = daemon.run_init_with_bytecode(&init_bytecode) {
         flush_streams(&mut daemon)?;
         match e {
             AfterburnerError::ProcessExit(code) => std::process::exit(code),

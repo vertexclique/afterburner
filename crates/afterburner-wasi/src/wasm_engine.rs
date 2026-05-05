@@ -288,6 +288,75 @@ impl WasmCombustor {
         &self.state_store
     }
 
+    /// Compile a daemon-init source to QuickJS bytecode by spinning up
+    /// a one-shot plugin Store in `compile-script` mode. The wrap +
+    /// compile happens here on the host side; the resulting bytecode
+    /// can then be handed to one or more `DaemonRuntime` instances
+    /// via [`DaemonRuntime::run_init_with_bytecode`], which skips
+    /// re-paying the parse + compile cost on each daemon Store.
+    ///
+    /// `argv` / `env` / `cwd` are baked into the compiled bytecode
+    /// via the script-mode envelope wrap; calling
+    /// [`DaemonRuntime::run_init_with_bytecode`] reuses these
+    /// captured values. Embedders that need different values per
+    /// invocation should re-compile.
+    ///
+    /// Returns `Err(AfterburnerError::CompileFailed)` on syntax
+    /// errors or transpile failures, with the plugin's stderr
+    /// captured in the message — same surface as
+    /// [`Self::compile_to_bytecode`] for the UDF path.
+    pub fn compile_daemon_init_bytecode(
+        &self,
+        source: &str,
+        invocation: &ScriptInvocation,
+    ) -> Result<Vec<u8>> {
+        let envelope = serde_json::json!({
+            "mode": "compile-script",
+            "source": source,
+            "argv": invocation.argv,
+            "env": invocation.env,
+            "cwd": invocation.cwd,
+        });
+        let envelope_bytes = serde_json::to_vec(&envelope)?;
+
+        // Same posture as the existing `compile_to_bytecode`: sealed
+        // Manifold, no host context, no host coordinators. The only
+        // thing the plugin does in this mode is wrap + compile +
+        // emit base64 on stdout.
+        let state = HostState::new(
+            &envelope_bytes,
+            None,
+            STDOUT_CAPACITY,
+            Manifold::sealed(),
+            self.state_store.clone(),
+            None,
+        );
+        let mut store = Store::new(&self.engine, state);
+        store.limiter(|s| &mut s.limits);
+        store
+            .set_fuel(u64::MAX)
+            .map_err(|e| AfterburnerError::Engine(format!("set_fuel: {e}")))?;
+        store.set_epoch_deadline(u64::MAX / 2);
+
+        let instance = self
+            .instance_pre
+            .instantiate(&mut store)
+            .map_err(|e| AfterburnerError::Engine(format!("plugin instantiate: {e}")))?;
+        let start = instance
+            .get_typed_func::<(), ()>(&mut store, "_start")
+            .map_err(|e| AfterburnerError::Engine(format!("_start lookup: {e}")))?;
+        start.call(&mut store, ()).map_err(|trap| {
+            let stderr = format_trap_with_stderr(&format!("compile-script: {trap}"), &mut store);
+            AfterburnerError::CompileFailed(stderr)
+        })?;
+
+        let stdout_bytes = drain_stdout(&mut store);
+        let trimmed = trim_trailing_whitespace(&stdout_bytes);
+        B64.decode(trimmed).map_err(|e| {
+            AfterburnerError::CompileFailed(format!("compile-script bytecode b64 decode: {e}"))
+        })
+    }
+
     /// Shared engine — DaemonRuntime::instantiate uses this when the
     /// CLI constructs the daemon from combustor internals.
     pub fn engine(&self) -> &Engine {
