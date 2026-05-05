@@ -1,7 +1,11 @@
 //! Real HTTP server (axum + tokio) that dispatches every request to
-//! an Express-style JS app running inside Afterburner.
+//! a real Express.js app running inside Afterburner.
+//!
+//! Setup:
 //!
 //! ```text
+//! $ cd examples/express-app
+//! $ npm install        # populates ./node_modules/express + transitive deps
 //! $ cargo run --release
 //! listening on http://127.0.0.1:3000
 //!
@@ -11,19 +15,21 @@
 //! $ curl -X POST -H 'Content-Type: application/json' -d '[1,2,3]' http://127.0.0.1:3000/sum
 //! ```
 //!
-//! Concurrency model:
+//! Pipeline:
 //!
 //! * Axum's tokio runtime accepts connections in parallel.
-//! * Each request serializes to a JSON envelope + calls
+//! * Each request serialises to a JSON envelope and calls
 //!   `Afterburner::run`. Because the Afterburner is built with
 //!   `threaded(N)`, those calls fan into the N-worker scheduler;
 //!   concurrent requests execute on different workers.
-//! * JS state is fresh per call (the plan's hard invariant), so
-//!   there's no session state inside the app — if you want it,
-//!   stash it on the host side and pass it into each request via
-//!   the envelope.
+//! * Inside the sandbox, `app.js` does `const express = require('express')`
+//!   — Afterburner's CommonJS resolver walks up from the example dir
+//!   and reads `node_modules/express/...` via the host fs bridge,
+//!   gated by the `Manifold` we install below.
+//! * JS state is fresh per call (Afterburner invariant). Sessions /
+//!   long-lived state must live host-side and ride the envelope.
 
-use afterburner::Afterburner;
+use afterburner::{Afterburner, FsAccess, Manifold};
 use anyhow::{Context, Result};
 use axum::{
     Router,
@@ -34,6 +40,7 @@ use axum::{
     routing::any,
 };
 use serde_json::{Map, Value, json};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -51,14 +58,47 @@ fn main() -> Result<()> {
         .unwrap_or(4)
         .min(8);
 
+    // Resolve the example root (the dir containing `package.json` +
+    // `node_modules`). `Afterburner::builder().cwd(path)` pins the
+    // require resolver to walk `node_modules` from here.
+    let example_root: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let node_modules = example_root.join("node_modules");
+    if !node_modules.is_dir() {
+        anyhow::bail!(
+            "missing {}\n\nThis example uses the real `express` npm package.\n\
+             From this directory, run:\n\n    npm install\n\n\
+             Then retry `cargo run --release`.",
+            node_modules.display()
+        );
+    }
+
     eprintln!("afterburner-example-express-app");
     eprintln!("  thrust workers: {workers}");
+    eprintln!("  cwd:            {}", example_root.display());
+
+    // Read-only fs grant scoped to the example root + crypto for
+    // Express's transitive deps. The `etag` npm package (used by
+    // `res.send` to generate response ETags) calls
+    // `crypto.createHash('sha1')`. body-parser uses crypto for
+    // signed cookies. Sealed manifold (the default) blocks both.
+    // Net, env, child_process, exit all stay denied.
+    let manifold = Manifold {
+        fs: FsAccess::ReadOnly(vec![example_root.clone()]),
+        crypto: true,
+        ..Manifold::sealed()
+    };
 
     // Build Afterburner *before* any tokio runtime exists. wasmtime-
     // wasi eagerly creates its own internal single-thread runtime on
     // first use, and constructing it from inside a tokio task
     // trips a "cannot start runtime from within runtime" panic.
+    //
+    // Manifold goes BEFORE threaded() — `ThreadedBuilder` doesn't
+    // expose .manifold (typed-builder discipline). cwd is on the
+    // base builder too and propagates into the threaded variant.
     let ab = Afterburner::builder()
+        .manifold(manifold)
+        .cwd(example_root.clone())
         .threaded(workers)
         .build()
         .context("build afterburner")?;
@@ -79,7 +119,8 @@ fn main() -> Result<()> {
 }
 
 async fn serve(state: Arc<AppState>) -> Result<()> {
-    // Single catch-all route; the JS router owns the path dispatch.
+    // Single catch-all route; the JS router (Express) owns path
+    // dispatch.
     let app = Router::new()
         .fallback(any(dispatch))
         .with_state(state);
@@ -153,8 +194,9 @@ fn build_envelope(
     headers: &HeaderMap,
     body_bytes: &[u8],
 ) -> Value {
-    // Only string headers go in; binary headers would need a different
-    // transport. Lowercased keys match Express's convention.
+    // Only string headers go in; binary headers would need a
+    // different transport. Lowercased keys match Express's
+    // convention.
     let mut hdrs = Map::new();
     for (name, value) in headers {
         if let Ok(s) = value.to_str() {
@@ -209,7 +251,10 @@ fn shape_response(v: Value) -> Response {
     } else if let Some(s) = body.as_str() {
         (s.as_bytes().to_vec(), ct.to_string())
     } else {
-        (serde_json::to_vec(&body).unwrap_or_default(), "application/json".to_string())
+        (
+            serde_json::to_vec(&body).unwrap_or_default(),
+            "application/json".to_string(),
+        )
     };
 
     let mut builder = Response::builder()

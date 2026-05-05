@@ -2559,8 +2559,23 @@ __register_module('events', function(module, exports, require) {
 
     function EventEmitter() {
         if (!(this instanceof EventEmitter)) return new EventEmitter();
-        this._events = Object.create(null);
+        ensureEvents(this);
         this._maxListeners = undefined;
+    }
+
+    // Lazy-init for the `_events` bag. Real Node's EventEmitter does
+    // the same thing: `init()` runs at constructor-call time, but
+    // every accessor method also bails out cleanly when `_events`
+    // wasn't yet allocated (treats absence as empty). The npm
+    // pattern of `mixin(target, EventEmitter.prototype, false)` —
+    // used by Express's `merge-descriptors` to graft EventEmitter
+    // methods onto a plain `app` object without running the
+    // constructor — depends on this. Without it, `app.on('mount',
+    // cb)` throws `cannot read property 'mount' of undefined`
+    // because `this._events` was never set.
+    function ensureEvents(self) {
+        if (!self._events) self._events = Object.create(null);
+        return self._events;
     }
 
     EventEmitter.prototype.setMaxListeners = function(n) {
@@ -2573,8 +2588,9 @@ __register_module('events', function(module, exports, require) {
 
     EventEmitter.prototype.on = function(name, fn) {
         if (typeof fn !== 'function') throw new TypeError('listener must be a function');
-        var list = this._events[name];
-        if (!list) this._events[name] = [fn];
+        var events = ensureEvents(this);
+        var list = events[name];
+        if (!list) events[name] = [fn];
         else list.push(fn);
         return this;
     };
@@ -2592,6 +2608,7 @@ __register_module('events', function(module, exports, require) {
     };
 
     EventEmitter.prototype.removeListener = function(name, fn) {
+        if (!this._events) return this;
         var list = this._events[name];
         if (!list) return this;
         for (var i = list.length - 1; i >= 0; i--) {
@@ -2607,11 +2624,12 @@ __register_module('events', function(module, exports, require) {
 
     EventEmitter.prototype.removeAllListeners = function(name) {
         if (name === undefined) this._events = Object.create(null);
-        else delete this._events[name];
+        else if (this._events) delete this._events[name];
         return this;
     };
 
     EventEmitter.prototype.emit = function(name) {
+        if (!this._events) return name === 'error' ? false : false;
         var list = this._events[name];
         if (!list) return name === 'error';
         // Copy before iterating — listeners may mutate the list.
@@ -2623,17 +2641,19 @@ __register_module('events', function(module, exports, require) {
     };
 
     EventEmitter.prototype.listeners = function(name) {
+        if (!this._events) return [];
         var list = this._events[name];
         return list ? list.slice() : [];
     };
 
     EventEmitter.prototype.listenerCount = function(name) {
+        if (!this._events) return 0;
         var list = this._events[name];
         return list ? list.length : 0;
     };
 
     EventEmitter.prototype.eventNames = function() {
-        return Object.keys(this._events);
+        return this._events ? Object.keys(this._events) : [];
     };
 
     EventEmitter.EventEmitter = EventEmitter;
@@ -3761,18 +3781,34 @@ function __plenum_install_http(moduleName) {
         exports._makeIncomingMessage = __ab_make_incoming_message;
         exports._makeServerResponse  = __ab_make_server_response;
 
-        // Minimal Server/IncomingMessage/ServerResponse constructors
-        // for `instanceof` checks. The real prototypes are event-
-        // emitter instances; these are forward-compatible placeholders.
+        // Minimal Server/IncomingMessage/ServerResponse constructors.
+        // The prototypes inherit from `EventEmitter.prototype` so npm
+        // packages that walk `Object.getPrototypeOf(req)` (Express's
+        // `setPrototypeOf(req, app.request)` lands the prototype on
+        // top of `http.IncomingMessage.prototype`) still find the
+        // EventEmitter methods (`on`, `emit`, `once`, `removeListener`).
+        // Without the inheritance, Express's request loses `.on` after
+        // its init middleware re-roots the prototype chain, and
+        // `body-parser`'s `raw-body` throws "argument stream must be
+        // a stream".
+        //
+        // The constructors themselves are not callable — instances
+        // come from the `_make*` factories. The classes exist for
+        // `instanceof` checks and for npm consumers that read
+        // `http.IncomingMessage.prototype`.
         exports.Server = function Server() {
             throw new Error('new http.Server() is not implemented; use http.createServer()');
         };
         exports.IncomingMessage = function IncomingMessage() {
             throw new Error('new http.IncomingMessage() is not implemented');
         };
+        exports.IncomingMessage.prototype = Object.create(EventEmitter.prototype);
+        exports.IncomingMessage.prototype.constructor = exports.IncomingMessage;
         exports.ServerResponse = function ServerResponse() {
             throw new Error('new http.ServerResponse() is not implemented');
         };
+        exports.ServerResponse.prototype = Object.create(EventEmitter.prototype);
+        exports.ServerResponse.prototype.constructor = exports.ServerResponse;
     });
 }
 __plenum_install_http('http');

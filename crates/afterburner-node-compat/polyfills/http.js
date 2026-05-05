@@ -298,18 +298,34 @@ function __plenum_install_http(moduleName) {
         exports._makeIncomingMessage = __ab_make_incoming_message;
         exports._makeServerResponse  = __ab_make_server_response;
 
-        // Minimal Server/IncomingMessage/ServerResponse constructors
-        // for `instanceof` checks. The real prototypes are event-
-        // emitter instances; these are forward-compatible placeholders.
+        // Minimal Server/IncomingMessage/ServerResponse constructors.
+        // The prototypes inherit from `EventEmitter.prototype` so npm
+        // packages that walk `Object.getPrototypeOf(req)` (Express's
+        // `setPrototypeOf(req, app.request)` lands the prototype on
+        // top of `http.IncomingMessage.prototype`) still find the
+        // EventEmitter methods (`on`, `emit`, `once`, `removeListener`).
+        // Without the inheritance, Express's request loses `.on` after
+        // its init middleware re-roots the prototype chain, and
+        // `body-parser`'s `raw-body` throws "argument stream must be
+        // a stream".
+        //
+        // The constructors themselves are not callable — instances
+        // come from the `_make*` factories. The classes exist for
+        // `instanceof` checks and for npm consumers that read
+        // `http.IncomingMessage.prototype`.
         exports.Server = function Server() {
             throw new Error('new http.Server() is not implemented; use http.createServer()');
         };
         exports.IncomingMessage = function IncomingMessage() {
             throw new Error('new http.IncomingMessage() is not implemented');
         };
+        exports.IncomingMessage.prototype = Object.create(EventEmitter.prototype);
+        exports.IncomingMessage.prototype.constructor = exports.IncomingMessage;
         exports.ServerResponse = function ServerResponse() {
             throw new Error('new http.ServerResponse() is not implemented');
         };
+        exports.ServerResponse.prototype = Object.create(EventEmitter.prototype);
+        exports.ServerResponse.prototype.constructor = exports.ServerResponse;
     });
 }
 __plenum_install_http('http');

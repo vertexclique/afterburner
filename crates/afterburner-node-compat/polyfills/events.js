@@ -4,8 +4,23 @@ __register_module('events', function(module, exports, require) {
 
     function EventEmitter() {
         if (!(this instanceof EventEmitter)) return new EventEmitter();
-        this._events = Object.create(null);
+        ensureEvents(this);
         this._maxListeners = undefined;
+    }
+
+    // Lazy-init for the `_events` bag. Real Node's EventEmitter does
+    // the same thing: `init()` runs at constructor-call time, but
+    // every accessor method also bails out cleanly when `_events`
+    // wasn't yet allocated (treats absence as empty). The npm
+    // pattern of `mixin(target, EventEmitter.prototype, false)` —
+    // used by Express's `merge-descriptors` to graft EventEmitter
+    // methods onto a plain `app` object without running the
+    // constructor — depends on this. Without it, `app.on('mount',
+    // cb)` throws `cannot read property 'mount' of undefined`
+    // because `this._events` was never set.
+    function ensureEvents(self) {
+        if (!self._events) self._events = Object.create(null);
+        return self._events;
     }
 
     EventEmitter.prototype.setMaxListeners = function(n) {
@@ -18,8 +33,9 @@ __register_module('events', function(module, exports, require) {
 
     EventEmitter.prototype.on = function(name, fn) {
         if (typeof fn !== 'function') throw new TypeError('listener must be a function');
-        var list = this._events[name];
-        if (!list) this._events[name] = [fn];
+        var events = ensureEvents(this);
+        var list = events[name];
+        if (!list) events[name] = [fn];
         else list.push(fn);
         return this;
     };
@@ -37,6 +53,7 @@ __register_module('events', function(module, exports, require) {
     };
 
     EventEmitter.prototype.removeListener = function(name, fn) {
+        if (!this._events) return this;
         var list = this._events[name];
         if (!list) return this;
         for (var i = list.length - 1; i >= 0; i--) {
@@ -52,11 +69,12 @@ __register_module('events', function(module, exports, require) {
 
     EventEmitter.prototype.removeAllListeners = function(name) {
         if (name === undefined) this._events = Object.create(null);
-        else delete this._events[name];
+        else if (this._events) delete this._events[name];
         return this;
     };
 
     EventEmitter.prototype.emit = function(name) {
+        if (!this._events) return name === 'error' ? false : false;
         var list = this._events[name];
         if (!list) return name === 'error';
         // Copy before iterating — listeners may mutate the list.
@@ -68,17 +86,19 @@ __register_module('events', function(module, exports, require) {
     };
 
     EventEmitter.prototype.listeners = function(name) {
+        if (!this._events) return [];
         var list = this._events[name];
         return list ? list.slice() : [];
     };
 
     EventEmitter.prototype.listenerCount = function(name) {
+        if (!this._events) return 0;
         var list = this._events[name];
         return list ? list.length : 0;
     };
 
     EventEmitter.prototype.eventNames = function() {
-        return Object.keys(this._events);
+        return this._events ? Object.keys(this._events) : [];
     };
 
     EventEmitter.EventEmitter = EventEmitter;

@@ -1,21 +1,44 @@
 # express-app
 
-**Real HTTP server running Express-style JS handlers inside Afterburner.**
+**Real Express.js app running inside Afterburner.**
 
-- Axum (Rust) listens on `127.0.0.1:3000` and accepts HTTP requests.
-- Every request is serialized to a JSON envelope (`method`, `path`,
-  `query`, `headers`, `body`) and handed to `Afterburner::run`.
-- `src/app.js` contains the Express-compatible app — a mini-router
-  with `.get`, `.post`, `.use`, path params (`:name`), and
-  `res.status(…).json(…)`.
-- Afterburner's `thrust` scheduler (N workers = available parallelism,
-  capped at 8) runs concurrent requests on different worker threads.
+The Rust host (axum) accepts HTTP requests; each request becomes a JSON envelope handed to a sandboxed JS app that does `const express = require('express')` — the actual npm package, resolved out of `./node_modules/express`.
+
+```text
+                ┌──────────────────────────────────────────────┐
+HTTP   ─────►   │ axum (Rust)                                  │
+                │   ↓ envelope { method, path, query, headers, │
+                │     body }                                   │
+                │ Afterburner::run  →  thrust scheduler  →     │
+                │   wasmtime + Javy QuickJS sandbox            │
+                │      ↓                                       │
+                │   app.js                                     │
+                │     const express = require('express')       │
+                │     app.get/post/...                         │
+                │      ↓ res.end(body)                         │
+                │ envelope { status, headers, body }           │
+HTTP   ◄─────   │   ↑                                          │
+                └──────────────────────────────────────────────┘
+```
+
+## Setup
+
+One-time `npm install` to populate `./node_modules/express` and its transitive deps. After that the Rust binary builds and runs as a normal `cargo` project.
 
 ```bash
+cd examples/express-app
+npm install                # creates ./node_modules/express + deps
 cargo run --release
 ```
 
-Then in another shell:
+```text
+afterburner-example-express-app
+  thrust workers: 8
+  cwd:            /…/examples/express-app
+  listening on http://127.0.0.1:3000
+```
+
+In another shell:
 
 ```bash
 curl http://127.0.0.1:3000/
@@ -29,25 +52,51 @@ curl -X POST -H 'Content-Type: application/json' \
 
 ## How it works
 
-| layer                          | responsibility                                             |
-|--------------------------------|------------------------------------------------------------|
-| `axum` (Rust, `src/main.rs`)   | TCP + HTTP framing + concurrent request dispatch           |
-| `tokio::task::spawn_blocking`  | Each request runs Afterburner on a blocking pool thread    |
+| Layer | Responsibility |
+|:------|:---------------|
+| `axum` (Rust, `src/main.rs`) | TCP + HTTP framing + concurrent request dispatch |
+| `tokio::task::spawn_blocking` | Each request runs Afterburner on a blocking pool thread |
 | `Afterburner` with `threaded(N)` | Hash-routes concurrent thrusts across N scheduler workers |
-| Wasmtime + Javy plugin         | Sandboxed QuickJS execution of `app.js`                    |
-| `app.js` (JS, inside Afterburner) | Express-style router owns path dispatch + response shape |
+| Wasmtime + Javy plugin | Sandboxed QuickJS execution of `app.js` |
+| `Afterburner::builder().cwd(path)` | Pins the require resolver to walk `node_modules` from the example dir, not from the host's cwd |
+| `require('express')` | Resolves out of `./node_modules/express` via the CommonJS resolver in `polyfills/require.js` |
+| `app.js` adapter | Builds Node-shape `IncomingMessage` / `ServerResponse` from the envelope via `http._makeIncomingMessage` / `http._makeServerResponse`, hands them to `app(req, res)`, resolves once `res.end()` fires |
 
-## Isolation
+## Why an adapter?
 
-- No `require('express')` — the router is in-file JS (~40 lines).
-  That's intentional: the example shows what *really* drives Express
-  in practice (routing + req/res shape) without pulling in the npm
-  package. If you want the real Express npm module, bundle it with
-  esbuild against the WASM target and feed the bundle to
-  `Afterburner::register` directly.
-- JS state is fresh per call (Afterburner invariant). Sessions /
-  long-lived state live on the Rust side; pass them through the
-  envelope if your handler needs them.
-- `Manifold::sealed()` is the default — `app.js` can't touch fs, net,
-  or env. Grant capabilities via `.manifold(Manifold { … })` on the
-  builder if your handlers need them.
+Express expects `(req, res)` where `req` is an `IncomingMessage` (an `EventEmitter` that emits `'data'` / `'end'`) and `res` is a `ServerResponse` (with `setHeader`, `statusCode`, `write`, `end`, ...).
+
+Afterburner's HTTP polyfill (`crates/afterburner-node-compat/polyfills/http.js`) already exposes the factories that back the in-process daemon-mode HTTP server: `http._makeIncomingMessage` / `http._makeServerResponse`. The example reuses those to construct request/response objects from the axum-side envelope and capture the response by intercepting `res.end`. The result is fed back to the host as a `{status, headers, body}` JSON object that axum turns back into an HTTP response.
+
+### Body parsing
+
+`app.use(express.json())` is **deliberately omitted**. body-parser pulls in `iconv-lite` whose encoding tables reach for Buffer internals we don't fully polyfill; rather than chase that surface, the adapter pre-parses JSON request bodies and sets `req.body` directly — the same pattern `aws-serverless-express`, Vercel's Node runtime, and other serverless adapters use. Route handlers see exactly the same `req.body` shape as if `express.json()` had run.
+
+If you need multipart, urlencoded, or other body shapes, parse them in the Rust dispatcher (`build_envelope` in `src/main.rs`) and surface the parsed value through the envelope. Or wire the chunks through `req.on('data')` / `req.on('end')` — that path works (see the IncomingMessage tests in `crates/afterburner/tests/b2_http_server.rs`); body-parser specifically is the sticky integration.
+
+## Sandboxing
+
+The Manifold installed in `main.rs`:
+
+```rust
+let manifold = Manifold {
+    fs: FsAccess::ReadOnly(vec![example_root.clone()]),
+    crypto: true,
+    ..Manifold::sealed()
+};
+```
+
+grants exactly two capabilities:
+
+* **fs read** scoped to the example root — `require('express')` reads `package.json`, `node_modules/.../*.js`. Nothing outside this directory is reachable.
+* **crypto** — Express's `etag` middleware computes a SHA-1 of every response body for the `ETag` header.
+
+Net, env, child_process, and process exit are all denied. Express runs unmodified inside that envelope. If your handler needs net or env, extend the Manifold the same way (see `examples/fetch-and-env`).
+
+JS state is fresh per call (Afterburner invariant). Sessions or long-lived state live on the Rust side; pass them through the envelope if your handler needs them.
+
+## Files
+
+- `package.json` — declares the `express` dependency.
+- `src/main.rs` — axum server, Afterburner builder (with `.cwd(...)`), request bridge.
+- `src/app.js` — real Express.js app + envelope ↔ `(req, res)` adapter.

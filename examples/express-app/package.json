@@ -1,0 +1,10 @@
+{
+  "name": "afterburner-example-express-app",
+  "version": "0.1.1",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Real Express.js app running inside Afterburner. Run `npm install` here, then `cargo run --release` to start the server.",
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
