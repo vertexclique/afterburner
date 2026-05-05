@@ -1124,6 +1124,17 @@ afterburner 0.1.1</pre>
         </div>
       </div>
 
+      <div class="callout callout--note">
+        <div class="callout__icon">i</div>
+        <div>
+          <strong>HTTP servers run across all your CPUs.</strong>
+          <p>When your script binds an HTTP listener (<code>http.createServer().listen(...)</code>), <code>burn</code> serves requests from every CPU the OS gives the process, in parallel. Container CPU limits flow through automatically: <code>docker run --cpus=4</code> gives you 4-way parallelism, k8s <code>cpu: "4"</code> the same. No knob to set.</p>
+          <p>This expansion only kicks in when init binds an HTTP listener. Other daemon shapes — timer-only scripts, raw <code>net</code> / <code>tls</code> / <code>dgram</code> servers, scripts that open outbound clients — stay single-shard so init-time side effects don't multiply across workers. <code>BURN_SHARDS=N</code> overrides this for benchmarks or workloads where init is intentionally idempotent.</p>
+          <p><strong>Per-request state in JavaScript is local to each parallel worker, not global.</strong> If a handler increments a counter declared outside the route, you'll get N independent counter streams instead of a single monotonic one — the same model Node's <code>cluster</code> module uses. For state shared across requests, use <code>require('afterburner:state')</code>.</p>
+          <p>Sandboxing is preserved end-to-end: capability gates (<code>--allow-fs</code> / <code>--allow-net</code> / <code>--allow-env</code> / <code>--sandbox</code>) apply identically to every parallel worker. A crash in one request can't take down the others — failed requests return HTTP 500 and the daemon keeps serving. Resource limits stack: <code>BURN_MAX_LINEAR_MEMORY=1G</code> with 16-way parallelism means up to 16 GiB peak memory; size your container accordingly.</p>
+        </div>
+      </div>
+
       <h2 id="tiers"><span class="anchor">#</span>Adaptive execution (Flying Start)</h2>
       <p>The default mode boots fast, then settles into the safer execution path without you noticing:</p>
 
@@ -1417,7 +1428,7 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
         <div class="compat"><span class="ck ck--gated">~</span>trace_events</div>
         <div class="compat"><span class="ck ck--gated">~</span>wasi</div>
       </div>
-      <p><code>http2</code> throws <code>ERR_HTTP2_NOT_IMPLEMENTED</code> on connect; HTTP/1.1 over TLS via <code>https</code> covers the canonical case. <code>cluster</code> routes through <code>worker_threads</code>. Native <code>.node</code> addons cannot load inside the WASM sandbox; for the popular ones, use the L3 shadows above.</p>
+      <p><code>http2</code> throws <code>ERR_HTTP2_NOT_IMPLEMENTED</code> on connect; HTTP/1.1 over TLS via <code>https</code> covers the canonical case. The <code>cluster</code> module's master + worker fork model isn't implemented, but the multi-core throughput it was meant to deliver is built into the daemon: <strong>burn runs HTTP servers across all your CPUs out of the box</strong>, same per-request-state model <code>cluster</code> users already plan around. Native <code>.node</code> addons cannot load inside the sandbox; for the popular ones, use the L3 shadows above.</p>
 
       <h3>Node 22 / 24 / 26 roadmap</h3>
       <p>The Node 20 LTS baseline above is the floor. Active work brings the surface forward toward Node 26 stable in priority bands:</p>
@@ -1427,7 +1438,7 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
           <tr><td><strong>Shipped</strong></td><td>Stream dual-shape, V8 CallSite proto patch, IncomingMessage Buffer chunks, <code>process.nextTick</code> queueing, <code>Afterburner::builder().cwd()</code>, <code>EventEmitter</code> lazy <code>_events</code> init, <code>http.IncomingMessage</code>/<code>ServerResponse</code> prototype chain → real <code>require('express')</code> works.</td></tr>
           <tr><td><strong>Next</strong></td><td><code>node:test</code> + reporters, <code>node:sqlite</code> built-in, Permission Model surface (<code>--permission</code>, <code>process.permission.has</code>), <code>--watch</code> mode, <code>--env-file</code>, TS-strip default-on, <code>WebSocket</code> client.</td></tr>
           <tr><td><strong>Then</strong></td><td><code>crypto.subtle</code> full Web Crypto, <code>URLPattern</code>, <code>FormData</code> / <code>Blob</code> / <code>File</code> globals, <code>EventSource</code>, <code>BroadcastChannel</code>, <code>CompressionStream</code> / <code>DecompressionStream</code>, <code>module.register</code> hooks, zstd in zlib, <code>import.meta.dirname</code>/<code>filename</code>/<code>resolve</code>, source maps in TS-strip + ESM-rewrite.</td></tr>
-          <tr><td><strong>Out of scope</strong></td><td>Native <code>.node</code> addons, <code>cluster</code> child-fork model, full <code>async_hooks</code> hook firing, <code>vm.SourceTextModule</code>, listening sockets in JS (host owns the listener).</td></tr>
+          <tr><td><strong>Out of scope</strong></td><td>Native <code>.node</code> addons, <code>cluster</code> child-fork model (multi-core HTTP throughput is built into daemon mode — see "Daemon mode runs across all your CPUs" above), full <code>async_hooks</code> hook firing, <code>vm.SourceTextModule</code>, listening sockets in JS (host owns the listener).</td></tr>
         </tbody>
       </table></div>
 
@@ -1453,6 +1464,7 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
           <tr><td><code>BURN_INSTALL</code></td><td><code>~/.local/bin</code></td><td>Install dir for the bootstrap installers. The runtime itself doesn't read this.</td></tr>
           <tr><td><code>BURN_INSTALL_NO_PATH</code></td><td>unset</td><td>Set to <code>1</code> to skip the bootstrap installer's automatic <code>$PATH</code> update (it normally appends an <code>export PATH=...</code> line to your shell rc — <code>~/.bashrc</code>, <code>~/.zshrc</code>, fish config, or <code>~/.profile</code> — or sets the User <code>Path</code> environment variable on Windows). Use this if you manage <code>$PATH</code> yourself via dotfiles, chezmoi, or a NixOS / nix-home / Guix configuration.</td></tr>
           <tr><td><code>BURN_QUIET</code></td><td>unset</td><td>Set to <code>1</code> to suppress the first-run capability banner and other non-essential stderr notices. Same as <code>--quiet</code> / <code>-q</code>.</td></tr>
+          <tr><td><code>BURN_SHARDS</code></td><td>auto (matches available CPUs)</td><td>Number of parallel workers the daemon uses to serve HTTP. Defaults to the number of CPUs your container or host gives the process, which is usually what you want — set this only for testing (<code>BURN_SHARDS=1</code> reverts to single-worker behavior), benchmarking different parallelism levels without changing the container, or pinning a specific count on a CI runner. Accepted range <code>1</code>–<code>128</code>; values outside that range or non-numeric input fall back to auto with a warning. Setting it higher than the number of available CPUs is allowed but discouraged — workers compete for cores they don't have, which slows you down rather than speeds you up.</td></tr>
           <tr><td><code>BURN_SHIM_DEPTH</code></td><td><code>0</code> (incremented per shim hop, capped at 8)</td><td>Pass-through recursion guard. When <code>burn</code> is invoked on a non-burn binary (<code>burn node script.js</code>, <code>burn npm test</code>, etc.) it forwards to the underlying tool and increments this counter — hitting <code>8</code> aborts with a typed error instead of fork-bombing. Operators rarely set this manually; it exists so the shim layer can refuse cycles introduced by a misconfigured PATH or a wrapper script that re-invokes <code>burn</code>.</td></tr>
           <tr><td><code>BURN_WORKER_DEPTH</code></td><td><code>0</code> (incremented per spawned worker, capped at 8)</td><td><code>worker_threads</code> recursion guard (mirrors <code>BURN_SHIM_DEPTH</code> for the worker model). Each spawned <code>new Worker(...)</code> child inherits the parent's depth + 1; hitting the ceiling refuses spawn with <code>E_DEPTH</code> instead of letting a runaway script exhaust system resources. Together with <code>WorkerConfig::max_concurrent</code> (default <code>32</code>) and the 16 MiB per-frame cap, this bounds the worst case a hostile or buggy script can do.</td></tr>
         </tbody>

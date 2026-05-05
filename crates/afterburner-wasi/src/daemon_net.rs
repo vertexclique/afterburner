@@ -184,6 +184,18 @@ pub struct DaemonNet {
     alive_servers: AtomicUsize,
     events_tx: BoundedTx<NetEvent>,
     events_rx: BoundedRx<NetEvent>,
+    /// Multi-shard port arbiter. `Some` when this coordinator was
+    /// built via `new_with_claims` (every shard's instance shares
+    /// the same `Arc`). On `listen(port)`, the first shard to call
+    /// `try_claim` becomes the kernel-level owner; subsequent
+    /// shards become followers (allocate a local server_id, no
+    /// real bind, no listener task). `None` means single-shard
+    /// mode — `listen(port)` always tries the real bind.
+    shared_claims: Option<Arc<crate::daemon_port_claims::SharedPortClaims>>,
+    /// `server_id` → port for owners, so `close_server` can release
+    /// the shared claim when the user calls `server.close()`.
+    /// Followers are NOT in this map (they don't own the claim).
+    owned_listener_ports: HopscotchMap<ServerId, u16>,
 }
 
 impl std::fmt::Debug for DaemonNet {
@@ -197,6 +209,27 @@ impl std::fmt::Debug for DaemonNet {
 
 impl DaemonNet {
     pub fn new(runtime: Handle, manifold: Manifold) -> Arc<Self> {
+        Self::new_inner(runtime, manifold, None)
+    }
+
+    /// Construct a `DaemonNet` that participates in a multi-shard
+    /// pool. The supplied `claims` is shared across every shard's
+    /// `DaemonNet` instance, so `listen(port)` calls converge on a
+    /// single owner without `EADDRINUSE` from sibling shards. See
+    /// `daemon_port_claims` for the contract.
+    pub fn new_with_claims(
+        runtime: Handle,
+        manifold: Manifold,
+        claims: Arc<crate::daemon_port_claims::SharedPortClaims>,
+    ) -> Arc<Self> {
+        Self::new_inner(runtime, manifold, Some(claims))
+    }
+
+    fn new_inner(
+        runtime: Handle,
+        manifold: Manifold,
+        shared_claims: Option<Arc<crate::daemon_port_claims::SharedPortClaims>>,
+    ) -> Arc<Self> {
         let (tx, rx) = bounded_channel::<NetEvent>(4096);
         Arc::new(Self {
             runtime,
@@ -216,6 +249,8 @@ impl DaemonNet {
             alive_servers: AtomicUsize::new(0),
             events_tx: tx,
             events_rx: rx,
+            shared_claims,
+            owned_listener_ports: HopscotchMap::new(),
         })
     }
 
@@ -339,6 +374,28 @@ impl DaemonNet {
             *last_error = "net.listen: empty host".into();
             return errors::E_BAD_HOST;
         }
+
+        // Multi-shard arbitration: when shared_claims is set, only
+        // the shard that wins the lock-free CAS does the real bind.
+        // Followers register a no-op listener — JS sees the port
+        // as "bound", connection events flow only through the
+        // owner shard. See `daemon_port_claims` for the rationale.
+        if let Some(claims) = &self.shared_claims {
+            use crate::daemon_port_claims::ClaimResult;
+            match claims.try_claim(port) {
+                ClaimResult::Owner(_) => { /* fall through to real bind */ }
+                ClaimResult::Follower(_) => {
+                    // Allocate a local server_id; user JS uses it
+                    // for `server.close()` accounting. No bind, no
+                    // task spawn — the kernel's listener is owned
+                    // by the winning shard.
+                    let server_id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
+                    self.alive_servers.fetch_add(1, Ordering::Release);
+                    return server_id;
+                }
+            }
+        }
+
         let server_id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
         let bind = format!("{host}:{port}");
         let evt_tx = self.events_tx.clone();
@@ -350,7 +407,11 @@ impl DaemonNet {
             .abort_handle();
 
         self.servers.insert(server_id, ListenerHandle { abort });
-        let _ = port; // bound port reaches JS via the `Listening` event
+        // Track the port so close_server can release the shared
+        // claim. Only owners enter this map.
+        if self.shared_claims.is_some() {
+            self.owned_listener_ports.insert(server_id, port);
+        }
         self.alive_servers.fetch_add(1, Ordering::Release);
         server_id
     }
@@ -358,6 +419,25 @@ impl DaemonNet {
     pub fn close_server(&self, server_id: ServerId) -> i32 {
         if let Some(handle) = self.servers.remove(&server_id) {
             handle.abort.abort();
+            self.alive_servers.fetch_sub(1, Ordering::Release);
+            // Owner: release the shared claim so a future
+            // `listen(same_port)` from any shard can bind again.
+            if let Some(claims) = &self.shared_claims
+                && let Some(port) = self.owned_listener_ports.remove(&server_id)
+            {
+                claims.release(port);
+            }
+            return 0;
+        }
+        // Not in `servers`. Two cases:
+        //   * Single-shard mode: stale / unknown id — historical
+        //     behavior is no-op return 0. Preserve that.
+        //   * Multi-shard mode: a follower stub closing. The
+        //     follower never inserted into `servers` in `listen`,
+        //     so we decrement here to keep alive_servers accurate.
+        if self.shared_claims.is_some()
+            && self.alive_servers.load(Ordering::Acquire) > 0
+        {
             self.alive_servers.fetch_sub(1, Ordering::Release);
         }
         0

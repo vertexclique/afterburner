@@ -101,6 +101,14 @@ pub struct DaemonDgram {
     alive: AtomicUsize,
     events_tx: BoundedTx<DgramEvent>,
     events_rx: BoundedRx<DgramEvent>,
+    /// Multi-shard port arbiter. `None` in single-shard mode. See
+    /// `daemon_port_claims` for the owner / follower contract.
+    shared_claims: Option<Arc<crate::daemon_port_claims::SharedPortClaims>>,
+    /// `socket_id` → port for owners, so `close()` releases the
+    /// shared claim. Followers are NOT in this map. `port == 0`
+    /// (OS-picked) is also tracked: claims keys on the *bound*
+    /// port; a 0-bind gets a real OS-assigned port that we register.
+    owned_socket_ports: HopscotchMap<SocketId, u16>,
 }
 
 impl std::fmt::Debug for DaemonDgram {
@@ -113,6 +121,24 @@ impl std::fmt::Debug for DaemonDgram {
 
 impl DaemonDgram {
     pub fn new(runtime: Handle, manifold: Manifold) -> Arc<Self> {
+        Self::new_inner(runtime, manifold, None)
+    }
+
+    /// Construct with a shared port-claim arbiter for multi-shard
+    /// mode. See `daemon_port_claims` for the contract.
+    pub fn new_with_claims(
+        runtime: Handle,
+        manifold: Manifold,
+        claims: Arc<crate::daemon_port_claims::SharedPortClaims>,
+    ) -> Arc<Self> {
+        Self::new_inner(runtime, manifold, Some(claims))
+    }
+
+    fn new_inner(
+        runtime: Handle,
+        manifold: Manifold,
+        shared_claims: Option<Arc<crate::daemon_port_claims::SharedPortClaims>>,
+    ) -> Arc<Self> {
         let (tx, rx) = bounded_channel::<DgramEvent>(4096);
         Arc::new(Self {
             runtime,
@@ -122,6 +148,8 @@ impl DaemonDgram {
             alive: AtomicUsize::new(0),
             events_tx: tx,
             events_rx: rx,
+            shared_claims,
+            owned_socket_ports: HopscotchMap::new(),
         })
     }
 
@@ -145,6 +173,30 @@ impl DaemonDgram {
             *last_error = "dgram.bind: empty host".into();
             return errors::E_BAD_HOST;
         }
+
+        // Multi-shard arbitration. Skip for `port == 0` (OS-picked)
+        // — each shard gets its own OS-assigned port; the user's
+        // intent is "any port", so racing shards each binding their
+        // own is the correct semantics. For non-zero ports, the
+        // first shard to claim wins; followers stub the bind.
+        if port != 0
+            && let Some(claims) = &self.shared_claims
+        {
+            use crate::daemon_port_claims::ClaimResult;
+            match claims.try_claim(port) {
+                ClaimResult::Owner(_) => { /* fall through to real bind */ }
+                ClaimResult::Follower(_) => {
+                    let socket_id = self.next_socket_id.fetch_add(1, Ordering::Relaxed);
+                    self.alive.fetch_add(1, Ordering::Release);
+                    // Emit a Listening event so the JS bind() callback
+                    // fires symmetrically with the owner shard.
+                    self.events_tx
+                        .send(DgramEvent::Listening { socket_id, port });
+                    return socket_id;
+                }
+            }
+        }
+
         let addr = format!("{host}:{port}");
         let socket_id = self.next_socket_id.fetch_add(1, Ordering::Relaxed);
         let this = self.clone();
@@ -182,6 +234,9 @@ impl DaemonDgram {
                 bound_addr,
             },
         );
+        if self.shared_claims.is_some() && port != 0 {
+            self.owned_socket_ports.insert(socket_id, port);
+        }
         self.alive.fetch_add(1, Ordering::Release);
 
         // Emit the listening event asynchronously so the JS-side bind
@@ -282,12 +337,27 @@ impl DaemonDgram {
 
     pub fn close(&self, socket_id: SocketId) {
         let Some(handle) = self.sockets.remove(&socket_id) else {
+            // Possible follower stub (multi-shard only). In
+            // single-shard mode, closing an unknown id is
+            // historically a no-op — preserve.
+            if self.shared_claims.is_some()
+                && self.alive.load(Ordering::Acquire) > 0
+            {
+                self.alive.fetch_sub(1, Ordering::Release);
+                self.events_tx.send(DgramEvent::Close { socket_id });
+            }
             return;
         };
         handle.abort.abort();
         // Drop the Arc<UdpSocket> by dropping the handle below; tokio
         // closes the underlying fd when the last Arc goes away.
         drop(handle);
+        // Owner: release the shared claim if any.
+        if let Some(claims) = &self.shared_claims
+            && let Some(port) = self.owned_socket_ports.remove(&socket_id)
+        {
+            claims.release(port);
+        }
         self.alive.fetch_sub(1, Ordering::Release);
         self.events_tx.send(DgramEvent::Close { socket_id });
     }

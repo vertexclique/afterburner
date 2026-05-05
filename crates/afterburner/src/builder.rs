@@ -298,8 +298,38 @@ pub struct AfterburnerBuilder {
     state_store: Option<SharedStateStore>,
     cache_backend: Option<Arc<dyn BurnCacheBackend>>,
     cwd: Option<PathBuf>,
+    /// Optional shard count for daemon-mode (multi-shard pool).
+    /// `None` → `available_parallelism()` at daemon spawn time.
+    /// Library affordance only — the CLI does NOT expose a flag /
+    /// env-var; deployment caps CPU at the container layer.
+    shards: Option<usize>,
     #[cfg(feature = "flow")]
     use_flow: bool,
+}
+
+/// Resolution order shared by the daemon (`burn server.js`) and
+/// the library `threaded_auto()` builder method:
+///
+/// 1. `BURN_SHARDS` env var if set + parses + non-zero. Same env
+///    var that pins the daemon's shard count, reused here so
+///    operators have one knob across the whole system.
+/// 2. `std::thread::available_parallelism()` — container-aware
+///    on Linux (cgroup CPU quotas honoured via
+///    `sched_getaffinity`).
+/// 3. `1` if `available_parallelism()` errors (rare — usually
+///    only on the strangest /proc-less containers).
+#[cfg(feature = "thrust")]
+fn auto_worker_count() -> usize {
+    if let Ok(s) = std::env::var("BURN_SHARDS")
+        && let Ok(n) = s.trim().parse::<usize>()
+        && n >= 1
+        && n <= 128
+    {
+        return n;
+    }
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
 }
 
 impl fmt::Debug for AfterburnerBuilder {
@@ -384,6 +414,46 @@ impl AfterburnerBuilder {
         self
     }
 
+    /// Number of parallel JS shards for daemon mode. Each shard is
+    /// its own Wasmtime Store + QuickJS isolate served from a
+    /// dedicated OS thread.
+    ///
+    /// Default: `std::thread::available_parallelism()` — container-
+    /// aware on Linux (cgroup CPU quotas honoured via
+    /// `sched_getaffinity`). Override only for specific reasons —
+    /// oversubscribing cores incurs context-switch tax with zero
+    /// throughput benefit; under-subscribing leaves performance on
+    /// the table that the operator already paid for at the cgroup
+    /// layer.
+    ///
+    /// In-process JS state (counters, in-memory caches, Express
+    /// router state) is per-shard, not global. Use
+    /// `require('afterburner:state')` for shared state across
+    /// shards. Sandbox boundary preserved per-shard: capability
+    /// gates apply per-Store; Wasmtime guarantees per-Store memory
+    /// isolation.
+    ///
+    /// Library-only affordance — the `burn` CLI does not expose
+    /// a flag or env-var. Deployment caps shard count at the
+    /// container CPU limit, which `available_parallelism()` reads
+    /// transparently.
+    pub fn shards(mut self, n: usize) -> Self {
+        // Hardcoded limits — the wasi crate's MAX_SHARDS constant
+        // is gated behind the `daemon` feature; we duplicate the
+        // value here so library consumers building without daemon
+        // can still call this method (e.g., for test setup that
+        // happens to not trigger the daemon path). The cap of 128
+        // matches Wasmtime's pooling allocator slot count
+        // (`POOL_TOTAL_MEMORIES`); requesting more would exhaust
+        // the pool at instantiate time.
+        const MIN: usize = 1;
+        const MAX: usize = 128;
+        assert!(n >= MIN, "shards must be ≥ {MIN}");
+        assert!(n <= MAX, "shards must be ≤ {MAX}");
+        self.shards = Some(n);
+        self
+    }
+
     /// Switch into multi-worker scheduler mode. Returns a specialized
     /// builder for thrust-only knobs.
     #[cfg(feature = "thrust")]
@@ -398,6 +468,22 @@ impl AfterburnerBuilder {
             injector_capacity: 0,
             shutdown_drain_deadline: Duration::from_secs(5),
         }
+    }
+
+    /// Switch into multi-worker scheduler mode with the worker count
+    /// auto-detected from the OS — the same `available_parallelism()`
+    /// call the daemon uses, so a `docker run --cpus=4` cap produces
+    /// 4 workers, k8s `cpu: "4"` produces 4 workers, and so on.
+    /// Honors `BURN_SHARDS` if set (so operators can pin a count
+    /// without changing application code).
+    ///
+    /// Library equivalent of the daemon's auto-detect for batch
+    /// workloads — UDFs over billions of rows want one worker per
+    /// CPU by default and a way to override at deploy time.
+    #[cfg(feature = "thrust")]
+    pub fn threaded_auto(self) -> ThreadedBuilder {
+        let workers = auto_worker_count();
+        self.threaded(workers)
     }
 
     /// Configure flow-engine defaults for multi-module bundle scripts.

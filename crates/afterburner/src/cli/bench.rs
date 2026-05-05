@@ -27,6 +27,25 @@ use super::build::build_threaded_for_bench;
 pub fn bench(cli: &Cli, path: &PathBuf, iters: usize, workers: usize) -> Result<()> {
     let source = fs::read_to_string(path).with_context(|| format!("reading {path:?}"))?;
 
+    // `--workers 0` (the default) resolves to BURN_SHARDS if set,
+    // else `available_parallelism()`. Same auto-detect path the
+    // daemon uses, so `docker run --cpus=4 burn bench foo.js`
+    // gets 4 workers automatically.
+    let workers = if workers == 0 {
+        if let Ok(s) = std::env::var("BURN_SHARDS")
+            && let Ok(n) = s.trim().parse::<usize>()
+            && (1..=128).contains(&n)
+        {
+            n
+        } else {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        }
+    } else {
+        workers
+    };
+
     if workers <= 1 {
         let ab = build_afterburner(cli)?;
         let id = ab.register(&source).context("compile")?;

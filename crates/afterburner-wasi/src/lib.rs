@@ -7,10 +7,15 @@
 
 #[cfg(feature = "daemon")]
 pub mod daemon_dgram;
+pub mod daemon_envelopes;
 pub mod daemon_http;
 #[cfg(feature = "daemon")]
 pub mod daemon_net;
+#[cfg(feature = "daemon")]
+pub mod daemon_port_claims;
 pub mod daemon_runtime;
+#[cfg(feature = "daemon")]
+pub mod daemon_shard_pool;
 #[cfg(feature = "daemon")]
 pub mod daemon_tls;
 pub mod daemon_workers;
@@ -28,7 +33,11 @@ pub use daemon_dgram::{DaemonDgram, DgramEvent};
 pub use daemon_http::{DaemonHttp, ReplyEnvelope};
 #[cfg(feature = "daemon")]
 pub use daemon_net::{DaemonNet, NetEvent};
+#[cfg(feature = "daemon")]
+pub use daemon_port_claims::{ClaimResult, SharedPortClaims};
 pub use daemon_runtime::DaemonRuntime;
+#[cfg(feature = "daemon")]
+pub use daemon_shard_pool::{DaemonShardPool, ShardPoolConfig};
 #[cfg(feature = "daemon")]
 pub use daemon_tls::{DaemonTls, TlsEvent};
 pub use daemon_workers::{DaemonWorkers, WorkerConfig, WorkerEvent};

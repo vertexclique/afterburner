@@ -25,7 +25,7 @@
 
 use kovan_map::HopscotchMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
 
 /// Opaque identifier the JS side uses to key handlers and requests.
 pub type ServerId = i32;
@@ -83,6 +83,20 @@ pub struct DaemonHttp {
     /// OS bind, and keeps close() accounting honest.
     ports_in_use: HopscotchMap<u16, ServerId>,
     pending: HopscotchMap<ReqId, PendingReply>,
+    /// When true, `bind_listener` for an already-bound port returns
+    /// the existing `server_id` instead of `LISTEN_ERR_ADDR_IN_USE`.
+    /// This is the multi-shard contract: every shard's daemon-init
+    /// runs the same source, so each shard calls `app.listen(port)`,
+    /// but only the first call binds a real socket — subsequent calls
+    /// register the handler under the same id and let the dispatcher
+    /// route requests to whichever shard is least busy.
+    ///
+    /// Off by default so single-shard daemons preserve Node's
+    /// "EADDRINUSE on double-listen" semantics. Multi-shard arbitration
+    /// is fully lock-free: `HopscotchMap::get_or_insert` (CAS-based
+    /// in `kovan_map`) atomically resolves which shard claims the
+    /// port. Losers see the winner's id without taking any lock.
+    shared_listeners: AtomicBool,
 
     /// Daemon-feature channel — axum handlers push `DaemonEvent`s
     /// through here; the CLI's dispatcher thread pops them off and
@@ -137,6 +151,7 @@ impl DaemonHttp {
             listeners: HopscotchMap::new(),
             ports_in_use: HopscotchMap::new(),
             pending: HopscotchMap::new(),
+            shared_listeners: AtomicBool::new(false),
             #[cfg(feature = "daemon")]
             event_tx: None,
             #[cfg(feature = "daemon")]
@@ -146,6 +161,19 @@ impl DaemonHttp {
             #[cfg(feature = "daemon")]
             runtime: None,
         }
+    }
+
+    /// Switch the coordinator into shared-listener mode. Must be
+    /// called BEFORE any `bind_listener` call — flipping this mid-
+    /// flight would race with in-flight binds. Multi-shard pools
+    /// flip this at construction.
+    pub fn enable_shared_listeners(&self) {
+        self.shared_listeners.store(true, Ordering::Release);
+    }
+
+    /// Whether shared-listener mode is on.
+    pub fn is_shared_listeners(&self) -> bool {
+        self.shared_listeners.load(Ordering::Acquire)
     }
 
     pub fn shared() -> Arc<Self> {
@@ -165,6 +193,7 @@ impl DaemonHttp {
             listeners: HopscotchMap::new(),
             ports_in_use: HopscotchMap::new(),
             pending: HopscotchMap::new(),
+            shared_listeners: AtomicBool::new(false),
             event_tx: Some(tx),
             event_rx: Some(rx),
             listener_tasks: HopscotchMap::new(),
@@ -187,14 +216,27 @@ impl DaemonHttp {
     /// without binding. Returned for tests / abstract drivers.
     /// Still honours within-process port collisions so stub-mode
     /// tests exercise the EADDRINUSE path.
+    ///
+    /// In shared-listener mode (multi-shard pool), an already-bound
+    /// port returns the existing id instead of erroring — first call
+    /// "binds" (registers), subsequent calls just rejoin.
+    ///
+    /// Lock-free port arbitration via `HopscotchMap::get_or_insert`
+    /// (CAS-based in kovan_map). N shards racing on the same port
+    /// converge atomically: exactly one shard's id wins; the others
+    /// see it without ever taking a lock.
     pub fn register_listener(&self, port: u16) -> ServerId {
-        if self.ports_in_use.get(&port).is_some() {
+        let new_id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
+        let claimed = self.ports_in_use.get_or_insert(port, new_id);
+        if claimed != new_id {
+            // Another shard claimed first.
+            if self.shared_listeners.load(Ordering::Acquire) {
+                return claimed;
+            }
             return LISTEN_ERR_ADDR_IN_USE;
         }
-        let id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
-        self.listeners.insert(id, ListenerSlot { port });
-        self.ports_in_use.insert(port, id);
-        id
+        self.listeners.insert(new_id, ListenerSlot { port });
+        new_id
     }
 
     /// Release a listener's port + accounting. Called from
@@ -276,22 +318,36 @@ impl DaemonHttp {
             return self.register_listener(port);
         };
 
-        // Fast in-process collision check — avoids the OS bind for
-        // the overwhelmingly common "same script calls .listen(p)
-        // twice" case.
-        if self.ports_in_use.get(&port).is_some() {
+        // Lock-free port arbitration. `get_or_insert` is a CAS in
+        // kovan_map's HopscotchMap — N shards racing converge
+        // atomically: exactly one's `new_id` becomes the claim.
+        let new_id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
+        let claimed_id = self.ports_in_use.get_or_insert(port, new_id);
+        if claimed_id != new_id {
+            // Another shard claimed first.
+            if self.shared_listeners.load(Ordering::Acquire) {
+                return claimed_id;
+            }
             return LISTEN_ERR_ADDR_IN_USE;
         }
 
+        // We own the claim. Bind the real socket.
         let bind_addr = format!("127.0.0.1:{port}");
         let std_listener = match std::net::TcpListener::bind(&bind_addr) {
             Ok(l) => l,
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                // External collision (some other OS process owns the port).
+                // Release our claim so subsequent retries can try again.
+                self.ports_in_use.remove(&port);
                 return LISTEN_ERR_ADDR_IN_USE;
             }
-            Err(_) => return LISTEN_ERR_IO,
+            Err(_) => {
+                self.ports_in_use.remove(&port);
+                return LISTEN_ERR_IO;
+            }
         };
         if std_listener.set_nonblocking(true).is_err() {
+            self.ports_in_use.remove(&port);
             return LISTEN_ERR_IO;
         }
         // `TcpListener::from_std` registers the raw fd with the tokio
@@ -301,22 +357,24 @@ impl DaemonHttp {
         let _enter = runtime.enter();
         let tokio_listener = match tokio::net::TcpListener::from_std(std_listener) {
             Ok(l) => l,
-            Err(_) => return LISTEN_ERR_IO,
+            Err(_) => {
+                self.ports_in_use.remove(&port);
+                return LISTEN_ERR_IO;
+            }
         };
 
-        let id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
-        self.listeners.insert(id, ListenerSlot { port });
-        self.ports_in_use.insert(port, id);
+        // Bound. Publish the listener slot + axum task.
+        self.listeners.insert(new_id, ListenerSlot { port });
 
         let coord = Arc::clone(self);
         let handle = runtime.spawn(axum_server::serve_listener(
             tokio_listener,
-            id,
+            new_id,
             coord,
             event_tx,
         ));
-        self.listener_tasks.insert(id, handle.abort_handle());
-        id
+        self.listener_tasks.insert(new_id, handle.abort_handle());
+        new_id
     }
 
     /// Non-daemon-feature variant — allocates an id without binding

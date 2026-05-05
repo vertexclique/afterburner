@@ -95,6 +95,27 @@ Net, env, child_process, and process exit are all denied. Express runs unmodifie
 
 JS state is fresh per call (Afterburner invariant). Sessions or long-lived state live on the Rust side; pass them through the envelope if your handler needs them.
 
+## How it parallelises (since v0.1.2)
+
+The `cargo run --release` shape above embeds Afterburner directly via `Afterburner::builder()` and dispatches via the thrust scheduler — every request gets a fresh per-call sandbox. That model is unchanged.
+
+If you instead deploy Express by running `burn server.js` directly (the `burn` CLI's daemon mode), `burn` auto-shards across all CPUs the OS exposes:
+
+* N independent Wasmtime Stores, each its own QuickJS isolate, each on a dedicated OS thread.
+* The TCP listener binds once; the dispatcher round-robins requests across shards.
+* Container CPU limits become shard limits transparently — `docker run --cpus=4` produces 4 shards, k8s `cpu: "4"` the same. No flag, no env var.
+
+**In-process JS state is per-shard.** The handler in `src/app.js` (`res.send('Hello World')`) is stateless, so it's unaffected — every shard returns the same body. But if you swap in a counter:
+
+```js
+let counter = 0;
+app.get('/counter', (req, res) => {
+  res.json({ value: ++counter });
+});
+```
+
+`/counter` would return values from N independent counters (each shard has its own `counter` starting at 0). For shared state, use `require('afterburner:state')` — its in-memory backing is process-wide and works across shards. Same trade-off Node's `cluster` module forces; the daemon makes the trade-off explicit and gives you the multi-core throughput in return.
+
 ## Files
 
 - `package.json` — declares the `express` dependency.

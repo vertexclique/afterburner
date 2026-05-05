@@ -159,29 +159,34 @@ fn precompiled_daemon_async_handler_round_trips() {
     // accidentally evaluated as a sync wrapper, top-level await
     // would parse-fail at compile time (which we'd surface as
     // CompileFailed before the daemon ever starts).
+    //
+    // Post-B1 (multi-shard daemon): in-process JS state (`let i`)
+    // is per-shard, so we can't assert monotonic counter values
+    // across requests. The handler echoes the request URL instead;
+    // each request gets its own URL back, which proves both the
+    // top-level-await path AND the async handler dispatch work.
     let port = pick_port();
     let src = format!(
         r#"
         const http = require('http');
         // Touch top-level await so the async wrap is exercised.
         await Promise.resolve(0);
-        let i = 0;
-        http.createServer(async (_req, res) => {{
+        http.createServer(async (req, res) => {{
             await Promise.resolve();
-            res.end('counter=' + (i++));
+            res.end('async-' + (req.url || '/'));
         }}).listen({port});
         "#
     );
     let mut child = spawn_burn(&src);
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
-    for expected in 0..3 {
-        let resp = http_get(port, "/");
-        assert!(resp.starts_with("HTTP/1.1 200"), "iter {expected}: {resp}");
-        let needle = format!("counter={expected}");
+    for path in &["/a", "/b", "/c"] {
+        let resp = http_get(port, path);
+        assert!(resp.starts_with("HTTP/1.1 200"), "path {path}: {resp}");
+        let needle = format!("async-{path}");
         assert!(
             resp.contains(&needle),
-            "iter {expected} missing {needle}:\n{resp}"
+            "path {path} missing {needle}:\n{resp}"
         );
     }
 

@@ -154,9 +154,12 @@ pub enum Cmd {
         /// Total iterations to submit.
         #[arg(long, default_value_t = 10_000)]
         iters: usize,
-        /// Workers for the threaded path. `1` uses the single-threaded
-        /// BurnCache. Higher values use ThrustEngine.
-        #[arg(long, default_value_t = 1)]
+        /// Worker count for the threaded path. `0` (the default)
+        /// resolves to `BURN_SHARDS` if set, else
+        /// `available_parallelism()`. `1` forces single-threaded
+        /// (BurnCache, no ThrustEngine). `≥2` engages
+        /// ThrustEngine with that many workers.
+        #[arg(long, default_value_t = 0)]
         workers: usize,
     },
     /// Interactive REPL. Each line becomes a fresh script (no state

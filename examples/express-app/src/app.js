@@ -13,6 +13,15 @@
 //      the host Promise with `{status, headers, body}`.
 //   4. Hand `(req, res)` to Express. Routes run, middleware runs,
 //      `res.json` → `res.send` → `res.end` → adapter resolves.
+//
+// PARALLELISM NOTE: when this same script runs under `burn server.js`
+// (CLI daemon mode rather than the embedding shape in main.rs), the
+// daemon auto-shards across all CPUs — N independent QuickJS isolates,
+// each on a dedicated OS thread, with requests round-robined across
+// them. In-process state (e.g., a `let counter = 0` outside a route)
+// becomes per-shard. The handlers below are stateless so they're
+// unaffected; for shared state, use `require('afterburner:state')`.
+// See examples/express-app/README.md "How it parallelises".
 
 const express = require('express');
 const http = require('http');

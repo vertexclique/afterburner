@@ -123,9 +123,139 @@ fn dispatch_meta(rest: &str, cli: &mut Cli, ab: &mut Afterburner) -> Result<Repl
 
 /// Wrap a raw REPL line into a module-exports shape so naked
 /// expressions yield their value back to the user.
+///
+/// Two cases:
+///
+/// * **Expressions** (`1 + 1`, `Math.sqrt(16)`, `[1,2,3].map(x=>x*2)`):
+///   wrapped as `module.exports = () => (LINE);` — the parens
+///   force expression position, the arrow returns the value.
+///
+/// * **Statements** (`var a = 32;`, `let x = ...`, `function f(){}`,
+///   `if (...) ...`, etc.): can't sit inside parens (syntax error).
+///   Wrapped as a body block: `() => { LINE; return undefined; }`.
+///   Statements don't have a value; user sees `undefined` in the
+///   output (and any side effects on `globalThis` if relevant —
+///   though state doesn't persist across lines per the
+///   fresh-per-call invariant).
+///
+/// Detection is a static prefix check on the trimmed line. Covers
+/// the practical REPL inputs; false positives (e.g., a bare
+/// identifier `var` used as a variable name in some hypothetical
+/// dialect) would only mis-classify, not crash.
 pub(super) fn wrap_repl_line(line: &str) -> String {
     if line.contains("module.exports") {
         return line.to_string();
     }
-    format!("module.exports = () => ({line});\n")
+    if is_statement(line) {
+        format!("module.exports = () => {{ {line}; return undefined; }};\n")
+    } else {
+        format!("module.exports = () => ({line});\n")
+    }
+}
+
+/// Heuristic: does this line look like a statement that can't be
+/// wrapped in parens? Checks for the leading keyword. Multi-line
+/// pasted statements are the common REPL case; one keyword is
+/// enough to disambiguate.
+fn is_statement(line: &str) -> bool {
+    // Trim leading whitespace; the keyword has to be the very
+    // first token.
+    let trimmed = line.trim_start();
+    const KEYWORDS: &[&str] = &[
+        "var ",
+        "var\t",
+        "let ",
+        "let\t",
+        "const ",
+        "const\t",
+        "function ",
+        "function\t",
+        "function(",
+        "class ",
+        "class\t",
+        "class{",
+        "if ",
+        "if(",
+        "if\t",
+        "for ",
+        "for(",
+        "for\t",
+        "while ",
+        "while(",
+        "while\t",
+        "do ",
+        "do{",
+        "do\t",
+        "try ",
+        "try{",
+        "try\t",
+        "switch ",
+        "switch(",
+        "switch\t",
+        "return ",
+        "return;",
+        "return\t",
+        "throw ",
+        "throw\t",
+        "break;",
+        "break\n",
+        "break\t",
+        "continue;",
+        "continue\n",
+        "continue\t",
+        "import ",
+        "import\t",
+        "export ",
+        "export\t",
+        "{", // bare block / object-literal-in-statement context
+    ];
+    KEYWORDS.iter().any(|k| trimmed.starts_with(k)) || trimmed == "break" || trimmed == "continue"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_expression_uses_parens() {
+        assert!(wrap_repl_line("1 + 1").contains("(1 + 1)"));
+        assert!(wrap_repl_line("Math.sqrt(16)").contains("(Math.sqrt(16))"));
+    }
+
+    #[test]
+    fn wrap_var_statement_uses_block() {
+        let w = wrap_repl_line("var a = 32;");
+        assert!(w.contains("{ var a = 32;"));
+        assert!(w.contains("return undefined"));
+    }
+
+    #[test]
+    fn wrap_let_statement_uses_block() {
+        let w = wrap_repl_line("let x = [1, 2, 3];");
+        assert!(w.contains("{ let x = [1, 2, 3];"));
+    }
+
+    #[test]
+    fn wrap_const_statement_uses_block() {
+        let w = wrap_repl_line("const k = 42;");
+        assert!(w.contains("{ const k = 42;"));
+    }
+
+    #[test]
+    fn wrap_function_decl_uses_block() {
+        let w = wrap_repl_line("function f() { return 1; }");
+        assert!(w.contains("{ function f"));
+    }
+
+    #[test]
+    fn wrap_if_statement_uses_block() {
+        let w = wrap_repl_line("if (true) console.log('hi');");
+        assert!(w.contains("{ if (true)"));
+    }
+
+    #[test]
+    fn wrap_module_exports_passthrough() {
+        let w = wrap_repl_line("module.exports = () => 42");
+        assert_eq!(w, "module.exports = () => 42");
+    }
 }

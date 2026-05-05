@@ -202,6 +202,12 @@ pub struct DaemonTls {
     alive_servers: AtomicUsize,
     events_tx: BoundedTx<TlsEvent>,
     events_rx: BoundedRx<TlsEvent>,
+    /// Multi-shard port arbiter — see `daemon_port_claims` for the
+    /// owner / follower contract. `None` in single-shard mode.
+    shared_claims: Option<Arc<crate::daemon_port_claims::SharedPortClaims>>,
+    /// `server_id` → port for owners, so `close_server` releases
+    /// the shared claim. Followers are NOT in this map.
+    owned_listener_ports: HopscotchMap<TlsServerId, u16>,
 }
 
 impl std::fmt::Debug for DaemonTls {
@@ -226,6 +232,24 @@ type AcceptedConn = (
 
 impl DaemonTls {
     pub fn new(runtime: Handle, manifold: Manifold) -> Arc<Self> {
+        Self::new_inner(runtime, manifold, None)
+    }
+
+    /// Construct with a shared port-claim arbiter for multi-shard
+    /// mode. See `daemon_port_claims` for the contract.
+    pub fn new_with_claims(
+        runtime: Handle,
+        manifold: Manifold,
+        claims: Arc<crate::daemon_port_claims::SharedPortClaims>,
+    ) -> Arc<Self> {
+        Self::new_inner(runtime, manifold, Some(claims))
+    }
+
+    fn new_inner(
+        runtime: Handle,
+        manifold: Manifold,
+        shared_claims: Option<Arc<crate::daemon_port_claims::SharedPortClaims>>,
+    ) -> Arc<Self> {
         let (tx, rx) = bounded_channel::<TlsEvent>(4096);
         Arc::new(Self {
             runtime,
@@ -238,6 +262,8 @@ impl DaemonTls {
             alive_servers: AtomicUsize::new(0),
             events_tx: tx,
             events_rx: rx,
+            shared_claims,
+            owned_listener_ports: HopscotchMap::new(),
         })
     }
 
@@ -347,10 +373,32 @@ impl DaemonTls {
             *last_error = "tls.listen: empty host".into();
             return errors::E_BAD_HOST;
         }
+
+        // Multi-shard arbitration. Same contract as DaemonNet:
+        // first shard to claim port `p` becomes the kernel-level
+        // owner, others become followers (no real bind; JS sees a
+        // live listener; events flow only to the owner). The cert
+        // build still happens for followers so a malformed PEM
+        // surfaces consistently across shards rather than only
+        // on the binding shard.
         let server_config = match build_server_config(cert_pem, key_pem, sni_map_json, last_error) {
             Some(c) => c,
             None => return errors::E_BAD_CERT,
         };
+
+        if let Some(claims) = &self.shared_claims {
+            use crate::daemon_port_claims::ClaimResult;
+            match claims.try_claim(port) {
+                ClaimResult::Owner(_) => { /* fall through to real bind */ }
+                ClaimResult::Follower(_) => {
+                    let server_id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
+                    self.alive_servers.fetch_add(1, Ordering::Release);
+                    let _ = server_config; // dropped; only owner uses it
+                    return server_id;
+                }
+            }
+        }
+
         let server_id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
         let bind = format!("{host}:{port}");
         let evt_tx = self.events_tx.clone();
@@ -362,6 +410,9 @@ impl DaemonTls {
             .abort_handle();
 
         self.servers.insert(server_id, ListenerHandle { abort });
+        if self.shared_claims.is_some() {
+            self.owned_listener_ports.insert(server_id, port);
+        }
         self.alive_servers.fetch_add(1, Ordering::Release);
         server_id
     }
@@ -369,6 +420,19 @@ impl DaemonTls {
     pub fn close_server(&self, server_id: TlsServerId) -> i32 {
         if let Some(handle) = self.servers.remove(&server_id) {
             handle.abort.abort();
+            self.alive_servers.fetch_sub(1, Ordering::Release);
+            if let Some(claims) = &self.shared_claims
+                && let Some(port) = self.owned_listener_ports.remove(&server_id)
+            {
+                claims.release(port);
+            }
+            return 0;
+        }
+        // Follower stub close (multi-shard only). In single-shard
+        // mode an unknown id is historically a no-op; preserve.
+        if self.shared_claims.is_some()
+            && self.alive_servers.load(Ordering::Acquire) > 0
+        {
             self.alive_servers.fetch_sub(1, Ordering::Release);
         }
         0
