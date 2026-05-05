@@ -60,9 +60,14 @@ jobs:
             os: ubuntu-latest
             archive: tar.gz
             cross: true
-          - target: x86_64-apple-darwin
-            os: macos-13
-            archive: tar.gz
+          # x86_64-apple-darwin is intentionally NOT in the release
+          # matrix. GitHub's `macos-13` runner (the last x86_64 macOS
+          # tier) is end-of-life and resource-starved — jobs queue
+          # 15+ minutes waiting for runner pickup, blocking the
+          # whole `attach-binaries` step. Apple's been ARM-only for
+          # new Macs since 2020; x86_64 macOS users on the
+          # increasingly small Intel-Mac install base can run the
+          # aarch64 binary under Rosetta if they need to.
           - target: aarch64-apple-darwin
             os: macos-latest
             archive: tar.gz
