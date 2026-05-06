@@ -26,7 +26,8 @@
 
 use afterburner_core::log::Level;
 use afterburner_core::{
-    Combustor, EngineMode, FuelGauge, Result, ScriptId, ScriptInvocation, ScriptOutcome, ab_event,
+    AfterburnerError, Combustor, EngineMode, FuelGauge, Result, ScriptId, ScriptInvocation,
+    ScriptOutcome, ab_event,
 };
 use afterburner_ignite::NativeCombustor;
 use afterburner_wasi::{WasmCombustor, WasmConfig};
@@ -252,6 +253,69 @@ impl Combustor for AdaptiveCombustor {
                 self.native.thrust(&native_id, input, limits)
             }
         }
+    }
+
+    fn thrust_columnar_bytes(
+        &self,
+        id: &ScriptId,
+        encoded: &[u8],
+        limits: &FuelGauge,
+    ) -> Result<Vec<u8>> {
+        // Columnar UDFs are wasm-only — the native (rquickjs) path
+        // has no TypedArray-over-linmem mechanism, so adaptive must
+        // route every columnar call to the wasm tier. If the wasm
+        // compile is still in flight, block-wait for it; the
+        // background worker normally finishes within a few ms.
+        // FAILED / CANCELLED slots surface as a clean Engine error
+        // rather than silently routing to native.
+        let slot_state = self
+            .state
+            .get(&id.hash)
+            .map(|s| s.state.load(Ordering::Acquire));
+        match slot_state {
+            Some(READY) => {}
+            Some(COMPILING) | None => {
+                // Block up to 5 s for the worker to finish. 5 s is
+                // ~10× the worst-case observed compile (~2-4 ms each
+                // for the regular + columnar wrappers); anything
+                // beyond that points at a deeper failure (worker
+                // wedged, missing plugin .wasm, etc.).
+                match self.wait_for_compile(id, 5_000) {
+                    CompileOutcome::Ready => {}
+                    CompileOutcome::Pending => {
+                        return Err(AfterburnerError::Engine(
+                            "columnar UDF: wasm compile still in flight after 5s — \
+                             check that the plugin worker is healthy and that the \
+                             script ignited cleanly"
+                                .into(),
+                        ));
+                    }
+                    CompileOutcome::Failed => {
+                        return Err(AfterburnerError::Engine(
+                            "columnar UDF: wasm compile failed for this script — \
+                             see prior `wasm.ignite.compile_failed` event for details"
+                                .into(),
+                        ));
+                    }
+                    CompileOutcome::Cancelled => {
+                        return Err(AfterburnerError::ScriptNotFound);
+                    }
+                }
+            }
+            Some(FAILED) => {
+                return Err(AfterburnerError::Engine(
+                    "columnar UDF: wasm compile failed for this script (sticky)".into(),
+                ));
+            }
+            Some(CANCELLED) => return Err(AfterburnerError::ScriptNotFound),
+            Some(_) => {}
+        }
+
+        let wasm_id = ScriptId {
+            hash: id.hash,
+            mode: EngineMode::Wasm,
+        };
+        self.wasm.thrust_columnar_bytes(&wasm_id, encoded, limits)
     }
 
     fn extinguish(&self, id: &ScriptId) {

@@ -430,24 +430,26 @@ fn main() -> Result<()> {
     }
 
     // Phase 1 typed columnar API — `run_columnar` over a binary
-    // `ColumnarBatch`. Force `Mode::Wasm` (NOT adaptive — adaptive's
-    // `Combustor` impl doesn't yet route the columnar trait method
-    // to its inner WasmCombustor, so it'd inherit the trait default
-    // and silently error out with "not implemented for this backend"
-    // in the spawned threads). And single-threaded — `run_columnar`
-    // requires it (the threaded scheduler also doesn't route the
-    // columnar method). The wasmtime pool inside `WasmCombustor` is
-    // thread-safe, so N submitters issuing concurrent `run_columnar`
-    // calls all execute in parallel.
-    let burn_st = Afterburner::builder().mode(afterburner::Mode::Wasm).build()?;
+    // `ColumnarBatch`. Adaptive routes columnar to its inner
+    // `WasmCombustor` (block-waiting up to 5s for the background
+    // wasm compile if needed); the threaded engine bypasses the
+    // worker pipeline and dispatches directly into the wasm pool.
+    // Either way, N submitters issuing concurrent `run_columnar`
+    // calls all run in parallel — the wasmtime pooling allocator
+    // is itself thread-safe.
+    //
+    // The bench above used `threaded_auto()` — same instance works
+    // for the columnar path now; no separate single-threaded build
+    // needed.
+    let burn_st = &burn;
     println!("\nPhase 1 typed-columnar API (run_columnar):");
-    bench_columnar_typed_parallel(&burn_st, ROWS_BATCHED, workers, DEFAULT_BATCH_SIZE)?;
+    bench_columnar_typed_parallel(burn_st, ROWS_BATCHED, workers, DEFAULT_BATCH_SIZE)?;
 
     println!(
         "\nbatch-size sweep (columnar-typed, {workers} submitters, {ROWS_BATCHED} rows):"
     );
     for &b in BATCH_SWEEP {
-        bench_columnar_typed_parallel(&burn_st, ROWS_BATCHED, workers, b)?;
+        bench_columnar_typed_parallel(burn_st, ROWS_BATCHED, workers, b)?;
     }
 
     // Compute-light UDF (single Float64 column → doubled). The
@@ -458,14 +460,14 @@ fn main() -> Result<()> {
     // so the numbers reflect almost pure dispatch + JSON-vs-blob
     // boundary cost.
     println!("\ncompute-light UDF (1 Float64 col, doubled):");
-    bench_columnar_typed_double(&burn_st, ROWS_BATCHED, workers, 16_000)?;
+    bench_columnar_typed_double(burn_st, ROWS_BATCHED, workers, 16_000)?;
 
     // Phase 1.5 var-width path — 1 Utf8 input column → 1 Int32 length
     // column. Tests the string boundary throughput separate from the
     // Float64 numeric one (the var-width path has UTF-8 decode +
     // slot/heap layout overhead the numeric path doesn't pay).
     println!("\nPhase 1.5 var-width path (1 Utf8 col → Int32 length):");
-    bench_columnar_typed_utf8_length(&burn_st, ROWS_BATCHED, workers, 4_000)?;
+    bench_columnar_typed_utf8_length(burn_st, ROWS_BATCHED, workers, 4_000)?;
 
     Ok(())
 }

@@ -217,19 +217,32 @@ impl Afterburner {
     /// just bytes flowing through host imports — no new attack
     /// surface beyond the existing `host_get_input` channel.
     ///
-    /// **Phase 1 dtype scope:** `Bool` / `Int8`–`Int64` / `UInt8`–
-    /// `UInt64` / `Float32` / `Float64` / `Date32` / `Timestamp`. All
-    /// fixed-width. Variable-width (`Utf8` / `Bytea` / `Jsonb`) and
-    /// 16-byte (`Decimal128` / `Uuid` / `Interval`) tags exist in the
-    /// enum but surface a clean
-    /// [`AfterburnerError::Engine`] from `encode_batch`; Phase 1.5 /
-    /// Phase 2 add support.
+    /// **Phase 1.5 dtype scope:** `Bool` / `Int8`–`Int64` /
+    /// `UInt8`–`UInt64` / `Float32` / `Float64` / `Date32` /
+    /// `Timestamp` / `Utf8` / `Bytea` / `Jsonb`. 16-byte fixed dtypes
+    /// (`Decimal128` / `Uuid` / `Interval`) have stable wire tags but
+    /// surface [`AfterburnerError::Engine`] from `encode_batch` —
+    /// Phase 2 adds them.
     ///
-    /// Available only when the `wasm` feature is enabled — the
-    /// columnar path is sandbox-only by design (the native /
-    /// `rquickjs` backend has no TypedArray-over-linmem mechanism;
-    /// users on `native`-only builds get the JSON-shaped
-    /// [`run`](Self::run) instead).
+    /// **Engine-mode behaviour:**
+    ///
+    /// * `Mode::Wasm` — direct call into [`WasmCombustor`].
+    /// * `Mode::Adaptive` — routes to the wasm tier; if the
+    ///   background wasm compile is still in flight on the first
+    ///   columnar call, blocks up to 5 s waiting for it (subsequent
+    ///   calls hit the READY tier with no wait).
+    /// * `Mode::Native` — surfaces a clean
+    ///   [`AfterburnerError::Engine`] (the native `rquickjs` backend
+    ///   has no TypedArray-over-linmem mechanism; users on
+    ///   native-only builds get the JSON-shaped [`run`](Self::run)
+    ///   instead).
+    /// * Threaded engine (`.threaded(N)`) — bypasses the worker
+    ///   pipeline and dispatches directly into the inner
+    ///   `WasmCombustor` (the wasmtime pool is itself thread-safe;
+    ///   submitter parallelism comes from the caller fanning out N
+    ///   threads, not from the worker pool).
+    ///
+    /// Available only when the `wasm` feature is enabled.
     #[cfg(feature = "wasm")]
     pub fn run_columnar(
         &self,
@@ -252,14 +265,7 @@ impl Afterburner {
         let reply = match &self.engine {
             EngineHolder::Cache(c) => c.execute_columnar_bytes(id, &encoded.bytes, limits)?,
             #[cfg(feature = "thrust")]
-            EngineHolder::Thrust(_) => {
-                return Err(AfterburnerError::Engine(
-                    "run_columnar requires a single-threaded engine; \
-                     construct `Afterburner::builder()` without .threaded() \
-                     for the columnar UDF path"
-                        .into(),
-                ));
-            }
+            EngineHolder::Thrust(t) => t.thrust_columnar_bytes(id, &encoded.bytes, limits)?,
         };
         afterburner_wasi::decode_batch(&reply)
     }

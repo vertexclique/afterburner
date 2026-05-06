@@ -620,6 +620,38 @@ impl ThrustEngine {
         self.combustor.ignite(source)
     }
 
+    /// Columnar UDF entry point. Bypasses the per-job dispatch
+    /// pipeline (admission, tenant routing, NUMA-aware steal, etc.)
+    /// and calls directly into the inner [`WasmCombustor`]'s
+    /// columnar path. This is the right shape because:
+    ///
+    /// 1. The wasmtime pooling allocator inside `WasmCombustor`
+    ///    is itself thread-safe — N concurrent submitters from N
+    ///    OS threads all check out a fresh slot per call without
+    ///    contention.
+    /// 2. The columnar payload is a `&[u8]` blob, not a JSON
+    ///    `Value` — it doesn't fit cleanly into the `Job` enum
+    ///    that ThrustEngine's worker channels carry, and pretending
+    ///    it does would force a copy through the job-encoding step
+    ///    that the columnar path explicitly avoids.
+    /// 3. The caller's submitter parallelism is what the bench
+    ///    measures anyway — adding a worker hop wouldn't increase
+    ///    parallelism, just add latency.
+    ///
+    /// Subscribers that want the admission/tenant/NUMA machinery for
+    /// a columnar workload should split N submitters at their own
+    /// layer and call this method from each. The
+    /// `examples/billion-row-bench` columnar-typed scenario is the
+    /// canonical pattern.
+    pub fn thrust_columnar_bytes(
+        &self,
+        id: &ScriptId,
+        encoded: &[u8],
+        limits: &FuelGauge,
+    ) -> Result<Vec<u8>> {
+        self.combustor.thrust_columnar_bytes(id, encoded, limits)
+    }
+
     /// Snapshot of operational counters.
     pub fn stats(&self) -> ThrustEngineStats {
         let mut snap = self.stats.snapshot();
