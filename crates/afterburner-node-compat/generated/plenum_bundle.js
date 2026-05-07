@@ -6580,60 +6580,334 @@ __register_module('diagnostics_channel', function(module, exports, require) {
 });
 
 // node:test / node:test/reporters — Node 18+ built-in test runner.
-// Sandbox can't host the runner's child-process worker pool; we
-// expose the API surface so libraries that conditionally import
-// `node:test` for in-source tests don't crash. Minimal recorder
-// runs synchronously in-process.
+// Real runner: collects describe/it/before/after/beforeEach/afterEach
+// blocks, runs them with proper nesting + async support, tracks
+// pass / fail / skip / todo counts, and emits a TAP-shaped summary
+// to stdout when any tests were registered. Reporter modules at
+// `node:test/reporters` provide the `spec` / `tap` / `dot` / `junit`
+// / `lcov` exports as Transform streams that pass-through (the
+// runner already emits the right shape).
 __register_module('test', function(module, exports, require) {
-    var current = null;
-    function describe(name, fn) {
-        var prev = current;
-        current = { name: name, children: [] };
-        try { if (typeof fn === 'function') fn(); } finally { current = prev; }
+    // Suite tree is built on first describe()/it() call. Each suite
+    // holds its own before/after hooks + child suites + tests; the
+    // run is triggered on a microtask after the script body settles
+    // so test files don't need an explicit `await test.run()`.
+    var ROOT = { name: '<root>', children: [], tests: [], hooks: {
+        before: [], after: [], beforeEach: [], afterEach: [],
+    } };
+    var current = ROOT;
+    var runScheduled = false;
+
+    function newSuite(name) {
+        return { name: name, children: [], tests: [],
+                 hooks: { before: [], after: [], beforeEach: [], afterEach: [] } };
     }
-    function it(name, fn) {
-        if (current) current.children.push({ name: name, fn: fn });
-    }
-    function test() {
-        var args = [].slice.call(arguments);
-        var name = (typeof args[0] === 'string') ? args.shift() : '<anonymous>';
-        if (args[0] && typeof args[0] === 'object') args.shift();
-        var fn = args[0];
-        return Promise.resolve().then(function() {
-            if (typeof fn === 'function') return fn({ name: name });
+    function scheduleRun() {
+        if (runScheduled) return;
+        runScheduled = true;
+        Promise.resolve().then(function() {
+            // Avoid running when imported but no tests registered
+            // (libraries that conditionally `require('node:test')`
+            // for in-source tests).
+            if (ROOT.tests.length === 0 && ROOT.children.length === 0) return;
+            runSuite(ROOT, '').then(function(stats) {
+                if (typeof process !== 'undefined' && typeof process.stdout !== 'undefined') {
+                    var line = '\n# tests: ' + stats.total + '\n# pass: ' + stats.pass +
+                               '\n# fail: ' + stats.fail + '\n# skip: ' + stats.skip + '\n';
+                    if (typeof process.stdout.write === 'function') process.stdout.write(line);
+                    else console.log(line);
+                }
+                if (stats.fail > 0 && typeof process !== 'undefined' && typeof process.exit === 'function') {
+                    process.exit(1);
+                }
+            });
         });
     }
+
+    function describe(name, _opts, fn) {
+        if (typeof _opts === 'function') { fn = _opts; _opts = undefined; }
+        var suite = newSuite(typeof name === 'string' ? name : '<suite>');
+        current.children.push(suite);
+        var prev = current;
+        current = suite;
+        try { if (typeof fn === 'function') fn(); } finally { current = prev; }
+        scheduleRun();
+    }
+    function it(name, _opts, fn) {
+        if (typeof _opts === 'function') { fn = _opts; _opts = undefined; }
+        var skip = !!(_opts && _opts.skip);
+        var todo = !!(_opts && _opts.todo);
+        current.tests.push({
+            name: typeof name === 'string' ? name : '<test>',
+            fn: fn, skip: skip, todo: todo,
+        });
+        scheduleRun();
+    }
+    function before(fn)     { current.hooks.before.push(fn); }
+    function after(fn)      { current.hooks.after.push(fn); }
+    function beforeEach(fn) { current.hooks.beforeEach.push(fn); }
+    function afterEach(fn)  { current.hooks.afterEach.push(fn); }
+
+    // The default export `test()` is both the function form AND the
+    // namespace. Calling it adds a leaf test at the current scope.
+    function test(name, _opts, fn) {
+        if (typeof name === 'function') { fn = name; name = '<anonymous>'; }
+        if (typeof _opts === 'function') { fn = _opts; _opts = undefined; }
+        var skip = !!(_opts && _opts.skip);
+        var todo = !!(_opts && _opts.todo);
+        current.tests.push({
+            name: typeof name === 'string' ? name : '<test>',
+            fn: fn, skip: skip, todo: todo,
+        });
+        scheduleRun();
+        // Return a settled Promise so `await test(...)` is well-formed.
+        return Promise.resolve();
+    }
+
+    async function callHooks(hooks) {
+        for (var i = 0; i < hooks.length; i++) {
+            try { await hooks[i](); } catch (_) {}
+        }
+    }
+    async function runSuite(suite, indent) {
+        var stats = { total: 0, pass: 0, fail: 0, skip: 0 };
+        if (suite !== ROOT && suite.name !== '<root>' && typeof process !== 'undefined') {
+            console.log(indent + '# Subtest: ' + suite.name);
+        }
+        await callHooks(suite.hooks.before);
+        for (var ti = 0; ti < suite.tests.length; ti++) {
+            var t = suite.tests[ti];
+            stats.total++;
+            if (t.skip) {
+                stats.skip++;
+                console.log(indent + 'ok ' + stats.total + ' - ' + t.name + ' # SKIP');
+                continue;
+            }
+            if (t.todo) {
+                console.log(indent + 'ok ' + stats.total + ' - ' + t.name + ' # TODO');
+                continue;
+            }
+            await callHooks(suite.hooks.beforeEach);
+            var ok = true;
+            var errMsg = null;
+            try { if (typeof t.fn === 'function') await t.fn({ name: t.name }); }
+            catch (e) { ok = false; errMsg = (e && e.message) || String(e); }
+            await callHooks(suite.hooks.afterEach);
+            if (ok) {
+                stats.pass++;
+                console.log(indent + 'ok ' + stats.total + ' - ' + t.name);
+            } else {
+                stats.fail++;
+                console.log(indent + 'not ok ' + stats.total + ' - ' + t.name);
+                if (errMsg) {
+                    console.log(indent + '  ---');
+                    console.log(indent + '  message: "' + errMsg.replace(/"/g, '\\"') + '"');
+                    console.log(indent + '  ...');
+                }
+            }
+        }
+        for (var ci = 0; ci < suite.children.length; ci++) {
+            var sub = await runSuite(suite.children[ci], indent + '    ');
+            stats.total += sub.total;
+            stats.pass  += sub.pass;
+            stats.fail  += sub.fail;
+            stats.skip  += sub.skip;
+        }
+        await callHooks(suite.hooks.after);
+        return stats;
+    }
+
     test.describe = describe;
     test.it = it;
-    test.test = test;
     test.suite = describe;
-    test.before = function() {};
-    test.after = function() {};
-    test.beforeEach = function() {};
-    test.afterEach = function() {};
-    test.skip = function() {};
-    test.todo = function() {};
+    test.test = test;
+    test.before = before;
+    test.after = after;
+    test.beforeEach = beforeEach;
+    test.afterEach = afterEach;
+    test.skip = function(name, fn) { return it(name, { skip: true }, fn); };
+    test.todo = function(name, fn) { return it(name, { todo: true }, fn); };
+    test.only = function(name, fn) { return it(name, fn); };
     test.run = function() {
+        // Async iterator over a snapshot of the current suite tree.
+        // Most consumers only check `Symbol.asyncIterator`; we yield
+        // one event per test as it runs.
+        var done = false;
         return { [Symbol.asyncIterator]: function() {
-            return { next: function() { return Promise.resolve({ value: undefined, done: true }); } };
+            return { next: function() {
+                if (done) return Promise.resolve({ value: undefined, done: true });
+                done = true;
+                return runSuite(ROOT, '').then(function(stats) {
+                    return { value: { type: 'test:summary', data: stats }, done: false };
+                });
+            } };
         } };
     };
     test.mock = {
         method: function() {}, getter: function() {}, setter: function() {},
-        timers: { enable: function() {}, reset: function() {}, tick: function() {} },
+        fn: function(impl) { return impl || function() {}; },
+        module: function() {}, restoreAll: function() {},
+        timers: { enable: function() {}, reset: function() {}, tick: function() {},
+                  runAll: function() {} },
     };
+
+    // Dual surface: `import test from 'node:test'` / `require('node:test')`
+    // both yield the function-with-namespace shape. Named exports also
+    // exposed for `import { describe, it, ... } from 'node:test'`.
     module.exports = test;
+    module.exports.default = test;
+    Object.assign(module.exports, {
+        describe: describe, it: it, suite: describe, test: test,
+        before: before, after: after, beforeEach: beforeEach, afterEach: afterEach,
+        skip: test.skip, todo: test.todo, only: test.only,
+        run: test.run, mock: test.mock,
+    });
 });
+
+// node:sqlite — Node 22+ built-in SQLite. Distinct module from the
+// `shadow-sqlite3` L3 shadow (which mimics the `sqlite3` npm
+// package's callback API). Shares the same `__host_shadow_sqlite3_*`
+// host fns underneath.
+__register_module('sqlite', function(module, exports, require) {
+    function ensureHost(name) {
+        var fn = globalThis[name];
+        if (typeof fn !== 'function') {
+            throw Object.assign(
+                new Error('node:sqlite not available: rebuild burn with `shadow-sqlite3`'),
+                { code: 'ERR_FEATURE_UNAVAILABLE' }
+            );
+        }
+        return fn;
+    }
+    function lastError() {
+        var fn = globalThis.__host_last_error;
+        return typeof fn === 'function' ? fn() : '';
+    }
+    function checkErrPrefix(raw, op) {
+        if (typeof raw === 'string' && raw.indexOf('__HOST_ERR__:') === 0) {
+            throw Object.assign(
+                new Error('sqlite.' + op + ': ' + raw.slice('__HOST_ERR__:'.length)),
+                { code: 'SQLITE_ERROR' }
+            );
+        }
+        return raw;
+    }
+
+    function StatementSync(db, sql) {
+        this._db = db;
+        this._sql = sql;
+        this._returnsExpected = /^\s*(select|with|pragma|values)\b/i.test(sql);
+    }
+    StatementSync.prototype.run = function() {
+        if (this._db._closed) throw new Error('database is closed');
+        var args = JSON.stringify([].slice.call(arguments));
+        var fn = ensureHost('__host_shadow_sqlite3_run');
+        var raw = fn(this._db._id, this._sql, args);
+        var resp = checkErrPrefix(raw, 'run');
+        var parsed = (typeof resp === 'string' && resp.length) ? JSON.parse(resp) : {};
+        return {
+            changes: parsed.changes || 0,
+            lastInsertRowid: parsed.lastInsertRowid || parsed.lastID || 0,
+        };
+    };
+    StatementSync.prototype.get = function() {
+        if (this._db._closed) throw new Error('database is closed');
+        var args = JSON.stringify([].slice.call(arguments));
+        var fn = ensureHost('__host_shadow_sqlite3_get');
+        var raw = checkErrPrefix(fn(this._db._id, this._sql, args), 'get');
+        return (typeof raw === 'string' && raw.length) ? JSON.parse(raw) : undefined;
+    };
+    StatementSync.prototype.all = function() {
+        if (this._db._closed) throw new Error('database is closed');
+        var args = JSON.stringify([].slice.call(arguments));
+        var fn = ensureHost('__host_shadow_sqlite3_all');
+        var raw = checkErrPrefix(fn(this._db._id, this._sql, args), 'all');
+        return (typeof raw === 'string' && raw.length) ? JSON.parse(raw) : [];
+    };
+    StatementSync.prototype.iterate = function() {
+        return this.all.apply(this, arguments)[Symbol.iterator]();
+    };
+    StatementSync.prototype.finalize = function() { /* no-op */ };
+    StatementSync.prototype.expandedSQL = function() { return this._sql; };
+    StatementSync.prototype.sourceSQL = function() { return this._sql; };
+    StatementSync.prototype.setReadBigInts = function() { return this; };
+    StatementSync.prototype.setAllowBareNamedParameters = function() { return this; };
+
+    function DatabaseSync(filename, options) {
+        if (!(this instanceof DatabaseSync)) return new DatabaseSync(filename, options);
+        var open = ensureHost('__host_shadow_sqlite3_open');
+        var path = String(filename || ':memory:');
+        var id = open(path);
+        if (id < 0) {
+            throw Object.assign(
+                new Error('sqlite.DatabaseSync: ' + (lastError() || 'open failed')),
+                { code: 'SQLITE_CANTOPEN' }
+            );
+        }
+        this._id = id;
+        this._closed = false;
+        this.location = path;
+        if (options && options.open === false) {
+            // Spec: caller calls .open() later. For simplicity we keep
+            // the connection open; .open() is then a no-op.
+        }
+    }
+    DatabaseSync.prototype.exec = function(sql) {
+        if (this._closed) throw new Error('database is closed');
+        var fn = ensureHost('__host_shadow_sqlite3_exec');
+        var raw = checkErrPrefix(fn(this._id, String(sql)), 'exec');
+        var _ = raw; // discard
+    };
+    DatabaseSync.prototype.prepare = function(sql) {
+        return new StatementSync(this, String(sql));
+    };
+    DatabaseSync.prototype.close = function() {
+        if (this._closed) return;
+        var fn = ensureHost('__host_shadow_sqlite3_close');
+        try { fn(this._id); } catch (_) {}
+        this._closed = true;
+        this._id = -1;
+    };
+    DatabaseSync.prototype.open = function() { /* idempotent in our model */ };
+    DatabaseSync.prototype.isOpen = function() { return !this._closed; };
+    DatabaseSync.prototype.isTransaction = function() { return false; };
+    DatabaseSync.prototype[Symbol.dispose] = DatabaseSync.prototype.close;
+
+    var SQLITE_CONSTANTS = {
+        SQLITE_CHANGESET_OMIT: 0,
+        SQLITE_CHANGESET_REPLACE: 1,
+        SQLITE_CHANGESET_ABORT: 2,
+    };
+
+    module.exports = {
+        DatabaseSync: DatabaseSync,
+        StatementSync: StatementSync,
+        constants: SQLITE_CONSTANTS,
+        backup: function() { throw Object.assign(
+            new Error('sqlite.backup not implemented'),
+            { code: 'ERR_NOT_IMPLEMENTED' }
+        ); },
+    };
+});
+
 __register_module('test/reporters', function(module, exports, require) {
     var stream = require('stream');
-    function makeReporter() {
+    function passthrough() {
         return new stream.Transform({
             transform: function(chunk, _enc, cb) { cb(null, chunk); },
         });
     }
+    // Each reporter is a Transform stream that node:test pipes its
+    // event stream into. The runner already emits TAP-shaped lines
+    // to stdout; these objects are pass-throughs so user pipelines
+    // (`node --test --test-reporter=spec` etc.) compose without
+    // crashing. Format-conversion is a follow-up.
     module.exports = {
-        spec: makeReporter, tap: makeReporter, dot: makeReporter,
-        junit: makeReporter, lcov: makeReporter,
+        spec: passthrough,
+        tap: passthrough,
+        dot: passthrough,
+        junit: passthrough,
+        lcov: passthrough,
     };
 });
 
