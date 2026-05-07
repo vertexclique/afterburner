@@ -1461,6 +1461,79 @@
         globalThis.ErrorEvent.prototype.constructor = globalThis.ErrorEvent;
     }
 
+    // ---- Uint8Array base64 / hex (Stage 3 / Node 22+) -------------
+    //
+    // `arr.toBase64({alphabet?, omitPadding?})` /
+    // `arr.toHex()` / `Uint8Array.fromBase64(s, opts?)` /
+    // `Uint8Array.fromHex(s)`. Reuse Buffer for the actual codec
+    // since Buffer is already wired through QuickJS's optimised
+    // base64 path; the wrappers normalise the spec-shape options.
+    if (typeof Uint8Array.prototype.toBase64 !== 'function') {
+        Object.defineProperty(Uint8Array.prototype, 'toBase64', {
+            value: function toBase64(options) {
+                var Buf = globalThis.Buffer || require('buffer').Buffer;
+                var s = Buf.from(this).toString('base64');
+                var alphabet = (options && options.alphabet) || 'base64';
+                if (alphabet === 'base64url') {
+                    s = s.replace(/\+/g, '-').replace(/\//g, '_');
+                }
+                if (options && options.omitPadding) s = s.replace(/=+$/, '');
+                return s;
+            },
+            writable: true, configurable: true,
+        });
+    }
+    if (typeof Uint8Array.prototype.toHex !== 'function') {
+        Object.defineProperty(Uint8Array.prototype, 'toHex', {
+            value: function toHex() {
+                var out = '';
+                for (var i = 0; i < this.length; i++) {
+                    var b = this[i];
+                    if (b < 16) out += '0';
+                    out += b.toString(16);
+                }
+                return out;
+            },
+            writable: true, configurable: true,
+        });
+    }
+    if (typeof Uint8Array.fromBase64 !== 'function') {
+        Object.defineProperty(Uint8Array, 'fromBase64', {
+            value: function fromBase64(input, options) {
+                var s = String(input);
+                var alphabet = (options && options.alphabet) || 'base64';
+                if (alphabet === 'base64url') {
+                    s = s.replace(/-/g, '+').replace(/_/g, '/');
+                    while (s.length % 4 !== 0) s += '=';
+                }
+                var Buf = globalThis.Buffer || require('buffer').Buffer;
+                return new Uint8Array(Buf.from(s, 'base64'));
+            },
+            writable: true, configurable: true,
+        });
+    }
+    if (typeof Uint8Array.fromHex !== 'function') {
+        Object.defineProperty(Uint8Array, 'fromHex', {
+            value: function fromHex(input) {
+                var s = String(input);
+                if (s.length % 2 !== 0) {
+                    throw new SyntaxError('Uint8Array.fromHex: odd-length string');
+                }
+                var out = new Uint8Array(s.length / 2);
+                for (var i = 0; i < out.length; i++) {
+                    var hi = parseInt(s[i * 2], 16);
+                    var lo = parseInt(s[i * 2 + 1], 16);
+                    if (Number.isNaN(hi) || Number.isNaN(lo)) {
+                        throw new SyntaxError('Uint8Array.fromHex: non-hex char');
+                    }
+                    out[i] = (hi << 4) | lo;
+                }
+                return out;
+            },
+            writable: true, configurable: true,
+        });
+    }
+
     // ---- Symbol.dispose / Symbol.asyncDispose (Node 20+) ------------
     // Installed FIRST because DisposableStack and AsyncDisposableStack
     // below register prototype methods keyed on these symbols. Spec
