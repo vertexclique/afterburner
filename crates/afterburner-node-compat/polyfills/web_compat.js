@@ -617,22 +617,383 @@
             for (var j = 0; j < n; j++) view2[j] = Math.floor(Math.random() * 256);
             return typed;
         };
-        webCrypto.subtle = webCrypto.subtle || {
+        // ---- SubtleCrypto -------------------------------------
+        //
+        // Web Crypto subset wired on top of node:crypto host fns.
+        //
+        // Algorithms shipped:
+        //   AES-GCM      encrypt / decrypt / generateKey / importKey
+        //                / exportKey
+        //   AES-CBC      encrypt / decrypt / generateKey / importKey
+        //                / exportKey
+        //   AES-CTR      encrypt / decrypt (via AES-CBC host fn with
+        //                CTR-mode wrapper TBD; falls back to error)
+        //   HMAC         sign / verify / generateKey / importKey /
+        //                exportKey (SHA-1/256/384/512)
+        //   PBKDF2       deriveBits / deriveKey
+        //   HKDF         deriveBits / deriveKey (HMAC-based)
+        //   SHA-1/256/384/512  digest
+        //
+        // CryptoKey is an opaque-ish JS object holding the raw key
+        // bytes plus algorithm metadata — extractable=true returns
+        // the bytes via exportKey, false returns an error per the
+        // spec.
+        function _toBytes(input) {
+            if (input == null) return new Uint8Array(0);
+            if (input instanceof ArrayBuffer) return new Uint8Array(input);
+            if (ArrayBuffer.isView(input)) {
+                return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+            }
+            if (typeof input === 'string') {
+                var enc = new TextEncoder();
+                return enc.encode(input);
+            }
+            return new Uint8Array(input);
+        }
+        function _bufToB64(bytes) {
+            // Avoid require('buffer') here since this function runs
+            // before module loading is fully wired during early
+            // global install.
+            var Buf = globalThis.Buffer || (require('buffer') && require('buffer').Buffer);
+            return Buf.from(bytes).toString('base64');
+        }
+        function _b64ToBuf(b64) {
+            var Buf = globalThis.Buffer || (require('buffer') && require('buffer').Buffer);
+            return new Uint8Array(Buf.from(b64, 'base64'));
+        }
+        function _algoName(a) {
+            return (typeof a === 'string') ? a.toLowerCase()
+                 : (a && a.name) ? String(a.name).toLowerCase()
+                 : '';
+        }
+        function _hashName(h) {
+            var s = (typeof h === 'string') ? h : (h && h.name) || '';
+            return s.toLowerCase().replace('-', '');
+        }
+        function _aesCipherName(keyBytes, mode) {
+            var bits = keyBytes.length * 8;
+            return 'aes-' + bits + '-' + mode;
+        }
+        function _makeCryptoKey(algorithm, raw, type, extractable, usages) {
+            var key = Object.create(null);
+            Object.defineProperty(key, 'algorithm', { value: algorithm, enumerable: true });
+            Object.defineProperty(key, 'type', { value: type, enumerable: true });
+            Object.defineProperty(key, 'extractable', { value: !!extractable, enumerable: true });
+            Object.defineProperty(key, 'usages', { value: usages.slice(), enumerable: true });
+            // _raw is non-enumerable so JSON.stringify(key) doesn't leak
+            // the secret. Spec-wise CryptoKey is opaque; we keep parity.
+            Object.defineProperty(key, '_raw', { value: raw, enumerable: false });
+            return key;
+        }
+
+        var subtle = {
             digest: function(algo, data) {
-                var algorithm = (typeof algo === 'string') ? algo : (algo && algo.name) || '';
-                var nodeAlgo = algorithm.toLowerCase().replace('-', '');
+                var nodeAlgo = _hashName(algo);
                 try {
                     var nc = require('crypto');
                     var hash = nc.createHash(nodeAlgo);
-                    var bytes = (data instanceof ArrayBuffer) ? new Uint8Array(data)
-                              : (data && data.buffer) ? new Uint8Array(data.buffer, data.byteOffset || 0, data.byteLength)
-                              : data;
-                    hash.update(bytes);
+                    hash.update(_toBytes(data));
                     var hex = hash.digest('hex');
                     return Promise.resolve(_hexToBytes(hex).buffer);
                 } catch (e) { return Promise.reject(e); }
             },
+
+            encrypt: function(algorithm, key, data) {
+                return new Promise(function(resolve, reject) {
+                    try {
+                        var name = _algoName(algorithm);
+                        var nc = require('crypto');
+                        if (name === 'aes-gcm') {
+                            var iv = _toBytes(algorithm.iv);
+                            var aad = algorithm.additionalData ? _toBytes(algorithm.additionalData) : null;
+                            var tagLen = (algorithm.tagLength | 0) || 128;
+                            var c = nc.createCipheriv(_aesCipherName(key._raw, 'gcm'),
+                                                      Buffer.from(key._raw),
+                                                      Buffer.from(iv));
+                            if (aad) c.setAAD(Buffer.from(aad));
+                            c.update(Buffer.from(_toBytes(data)));
+                            var ct = c.final();
+                            var tag = c.getAuthTag().slice(0, tagLen / 8);
+                            var out = new Uint8Array(ct.length + tag.length);
+                            out.set(ct, 0);
+                            out.set(tag, ct.length);
+                            resolve(out.buffer);
+                            return;
+                        }
+                        if (name === 'aes-cbc') {
+                            var iv2 = _toBytes(algorithm.iv);
+                            var c2 = nc.createCipheriv(_aesCipherName(key._raw, 'cbc'),
+                                                       Buffer.from(key._raw),
+                                                       Buffer.from(iv2));
+                            c2.update(Buffer.from(_toBytes(data)));
+                            var out2 = c2.final();
+                            resolve(new Uint8Array(out2).buffer);
+                            return;
+                        }
+                        reject(new Error('SubtleCrypto.encrypt: unsupported algorithm: ' + name));
+                    } catch (e) { reject(e); }
+                });
+            },
+
+            decrypt: function(algorithm, key, data) {
+                return new Promise(function(resolve, reject) {
+                    try {
+                        var name = _algoName(algorithm);
+                        var nc = require('crypto');
+                        var input = _toBytes(data);
+                        if (name === 'aes-gcm') {
+                            var iv = _toBytes(algorithm.iv);
+                            var aad = algorithm.additionalData ? _toBytes(algorithm.additionalData) : null;
+                            var tagLen = (algorithm.tagLength | 0) || 128;
+                            var tagBytes = tagLen / 8;
+                            if (input.length < tagBytes) return reject(new Error('aes-gcm: ciphertext shorter than tag'));
+                            var ct = input.slice(0, input.length - tagBytes);
+                            var tag = input.slice(input.length - tagBytes);
+                            var d = nc.createDecipheriv(_aesCipherName(key._raw, 'gcm'),
+                                                        Buffer.from(key._raw),
+                                                        Buffer.from(iv));
+                            if (aad) d.setAAD(Buffer.from(aad));
+                            d.setAuthTag(Buffer.from(tag));
+                            d.update(Buffer.from(ct));
+                            var pt = d.final();
+                            resolve(new Uint8Array(pt).buffer);
+                            return;
+                        }
+                        if (name === 'aes-cbc') {
+                            var iv2 = _toBytes(algorithm.iv);
+                            var d2 = nc.createDecipheriv(_aesCipherName(key._raw, 'cbc'),
+                                                         Buffer.from(key._raw),
+                                                         Buffer.from(iv2));
+                            d2.update(Buffer.from(input));
+                            var pt2 = d2.final();
+                            resolve(new Uint8Array(pt2).buffer);
+                            return;
+                        }
+                        reject(new Error('SubtleCrypto.decrypt: unsupported algorithm: ' + name));
+                    } catch (e) { reject(e); }
+                });
+            },
+
+            sign: function(algorithm, key, data) {
+                return new Promise(function(resolve, reject) {
+                    try {
+                        var name = _algoName(algorithm);
+                        var nc = require('crypto');
+                        if (name === 'hmac') {
+                            var hashName = _hashName(key.algorithm && key.algorithm.hash);
+                            var h = nc.createHmac(hashName, Buffer.from(key._raw));
+                            h.update(Buffer.from(_toBytes(data)));
+                            var hex = h.digest('hex');
+                            resolve(_hexToBytes(hex).buffer);
+                            return;
+                        }
+                        reject(new Error('SubtleCrypto.sign: unsupported algorithm: ' + name));
+                    } catch (e) { reject(e); }
+                });
+            },
+
+            verify: function(algorithm, key, signature, data) {
+                return new Promise(function(resolve, reject) {
+                    var self = this;
+                    var p = subtle.sign(algorithm, key, data);
+                    p.then(function(expected) {
+                        var sig = new Uint8Array(_toBytes(signature));
+                        var exp = new Uint8Array(expected);
+                        if (sig.length !== exp.length) { resolve(false); return; }
+                        var ok = 0;
+                        for (var i = 0; i < sig.length; i++) ok |= (sig[i] ^ exp[i]);
+                        resolve(ok === 0);
+                    }, reject);
+                });
+            },
+
+            generateKey: function(algorithm, extractable, usages) {
+                return new Promise(function(resolve, reject) {
+                    try {
+                        var name = _algoName(algorithm);
+                        var len = (algorithm.length | 0) || 256;
+                        var raw = new Uint8Array(len / 8);
+                        webCrypto.getRandomValues(raw);
+                        if (name === 'aes-gcm' || name === 'aes-cbc' || name === 'aes-ctr') {
+                            resolve(_makeCryptoKey({ name: name.toUpperCase(), length: len },
+                                                   raw, 'secret', extractable, usages));
+                            return;
+                        }
+                        if (name === 'hmac') {
+                            var hashName = _hashName(algorithm.hash);
+                            // HMAC default key length matches block size of hash.
+                            var blockBits = (hashName === 'sha512' || hashName === 'sha384') ? 1024 : 512;
+                            var hmacLen = algorithm.length || blockBits;
+                            var hraw = new Uint8Array(hmacLen / 8);
+                            webCrypto.getRandomValues(hraw);
+                            resolve(_makeCryptoKey({ name: 'HMAC',
+                                                     hash: { name: hashName.toUpperCase().replace(/^SHA/, 'SHA-') },
+                                                     length: hmacLen },
+                                                   hraw, 'secret', extractable, usages));
+                            return;
+                        }
+                        reject(new Error('SubtleCrypto.generateKey: unsupported algorithm: ' + name));
+                    } catch (e) { reject(e); }
+                });
+            },
+
+            importKey: function(format, keyData, algorithm, extractable, usages) {
+                return new Promise(function(resolve, reject) {
+                    try {
+                        var name = _algoName(algorithm);
+                        if (format === 'raw') {
+                            var raw = _toBytes(keyData);
+                            if (name === 'aes-gcm' || name === 'aes-cbc' || name === 'aes-ctr') {
+                                resolve(_makeCryptoKey({ name: name.toUpperCase(), length: raw.length * 8 },
+                                                       raw, 'secret', extractable, usages));
+                                return;
+                            }
+                            if (name === 'hmac') {
+                                var hashName = _hashName(algorithm.hash);
+                                resolve(_makeCryptoKey({ name: 'HMAC',
+                                                         hash: { name: hashName.toUpperCase().replace(/^SHA/, 'SHA-') },
+                                                         length: raw.length * 8 },
+                                                       raw, 'secret', extractable, usages));
+                                return;
+                            }
+                            if (name === 'pbkdf2' || name === 'hkdf') {
+                                resolve(_makeCryptoKey({ name: name.toUpperCase() },
+                                                       raw, 'secret', extractable, usages));
+                                return;
+                            }
+                        }
+                        if (format === 'jwk' && keyData && keyData.k) {
+                            var raw2 = _toBytes(_b64UrlDecode(keyData.k));
+                            if (name === 'aes-gcm' || name === 'aes-cbc') {
+                                resolve(_makeCryptoKey({ name: name.toUpperCase(), length: raw2.length * 8 },
+                                                       raw2, 'secret', extractable, usages));
+                                return;
+                            }
+                            if (name === 'hmac') {
+                                var hashName2 = _hashName(algorithm.hash);
+                                resolve(_makeCryptoKey({ name: 'HMAC',
+                                                         hash: { name: hashName2.toUpperCase().replace(/^SHA/, 'SHA-') },
+                                                         length: raw2.length * 8 },
+                                                       raw2, 'secret', extractable, usages));
+                                return;
+                            }
+                        }
+                        reject(new Error('SubtleCrypto.importKey: unsupported format/algorithm: '
+                                         + format + '/' + name));
+                    } catch (e) { reject(e); }
+                });
+            },
+
+            exportKey: function(format, key) {
+                return new Promise(function(resolve, reject) {
+                    try {
+                        if (!key.extractable) {
+                            return reject(new Error('SubtleCrypto.exportKey: key not extractable'));
+                        }
+                        if (format === 'raw') {
+                            resolve(new Uint8Array(key._raw).buffer);
+                            return;
+                        }
+                        if (format === 'jwk') {
+                            var algoName = (key.algorithm && key.algorithm.name) || '';
+                            var jwk = {
+                                kty: 'oct',
+                                k: _b64UrlEncode(key._raw),
+                                alg: algoName,
+                                ext: true,
+                                key_ops: key.usages.slice(),
+                            };
+                            resolve(jwk);
+                            return;
+                        }
+                        reject(new Error('SubtleCrypto.exportKey: unsupported format: ' + format));
+                    } catch (e) { reject(e); }
+                });
+            },
+
+            deriveBits: function(algorithm, baseKey, length) {
+                return new Promise(function(resolve, reject) {
+                    try {
+                        var name = _algoName(algorithm);
+                        var nc = require('crypto');
+                        if (name === 'pbkdf2') {
+                            var hashName = _hashName(algorithm.hash);
+                            var salt = _toBytes(algorithm.salt);
+                            var iters = algorithm.iterations | 0;
+                            var bytes = length / 8;
+                            var raw = nc.pbkdf2Sync(
+                                Buffer.from(baseKey._raw),
+                                Buffer.from(salt),
+                                iters,
+                                bytes,
+                                hashName);
+                            resolve(new Uint8Array(raw).buffer);
+                            return;
+                        }
+                        if (name === 'hkdf') {
+                            // RFC 5869 HKDF on top of HMAC. The Hmac
+                            // wrapper's `digest()` returns a hex string
+                            // by default; pass the raw form via
+                            // `digest('hex')` and convert with
+                            // `Buffer.from(hex, 'hex')` so we get bytes.
+                            var hash = _hashName(algorithm.hash);
+                            var ikm = baseKey._raw;
+                            var salt2 = algorithm.salt ? _toBytes(algorithm.salt) : new Uint8Array(0);
+                            var info = algorithm.info ? _toBytes(algorithm.info) : new Uint8Array(0);
+                            var extract = nc.createHmac(hash, Buffer.from(salt2));
+                            extract.update(Buffer.from(ikm));
+                            var prk = Buffer.from(extract.digest('hex'), 'hex');
+                            var bytesNeeded = length / 8;
+                            var hashLen = prk.length;
+                            var n = Math.ceil(bytesNeeded / hashLen);
+                            var t = Buffer.alloc(0);
+                            var okm = Buffer.alloc(0);
+                            for (var i = 1; i <= n; i++) {
+                                var h = nc.createHmac(hash, prk);
+                                h.update(t);
+                                h.update(Buffer.from(info));
+                                h.update(Buffer.from([i]));
+                                t = Buffer.from(h.digest('hex'), 'hex');
+                                okm = Buffer.concat([okm, t]);
+                            }
+                            resolve(new Uint8Array(okm.slice(0, bytesNeeded)).buffer);
+                            return;
+                        }
+                        reject(new Error('SubtleCrypto.deriveBits: unsupported algorithm: ' + name));
+                    } catch (e) { reject(e); }
+                });
+            },
+
+            deriveKey: function(algorithm, baseKey, derivedKeyAlgorithm, extractable, usages) {
+                return subtle.deriveBits(algorithm, baseKey,
+                    (derivedKeyAlgorithm.length | 0) || 256
+                ).then(function(buf) {
+                    return subtle.importKey('raw', buf, derivedKeyAlgorithm, extractable, usages);
+                });
+            },
+
+            wrapKey: function(format, key, wrappingKey, wrapAlgorithm) {
+                return subtle.exportKey(format, key).then(function(raw) {
+                    return subtle.encrypt(wrapAlgorithm, wrappingKey, raw);
+                });
+            },
+
+            unwrapKey: function(format, wrapped, unwrappingKey, unwrapAlgorithm,
+                                unwrappedKeyAlgorithm, extractable, usages) {
+                return subtle.decrypt(unwrapAlgorithm, unwrappingKey, wrapped).then(function(raw) {
+                    return subtle.importKey(format, raw, unwrappedKeyAlgorithm, extractable, usages);
+                });
+            },
         };
+        function _b64UrlEncode(bytes) {
+            return _bufToB64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        }
+        function _b64UrlDecode(str) {
+            var s = String(str).replace(/-/g, '+').replace(/_/g, '/');
+            while (s.length % 4 !== 0) s += '=';
+            return _b64ToBuf(s);
+        }
+        webCrypto.subtle = webCrypto.subtle || subtle;
         globalThis.crypto = webCrypto;
     }
 
