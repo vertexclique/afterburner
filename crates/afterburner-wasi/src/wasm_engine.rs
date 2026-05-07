@@ -1193,14 +1193,20 @@ mod tests {
         // columnar). Catches a bytecode-cache miss the day it
         // happens (would silently 100× slow down every thrust).
         let c = make_combustor();
-        assert_eq!(c.compile_count.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(
+            c.compile_count.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
 
         let id = c
             .ignite("module.exports = (d) => ({ doubled: d.n * 2 })")
             .unwrap();
         // Two compiles per ignite: one for the regular UDF wrapper,
         // one for the columnar wrapper (Phase 1.4).
-        assert_eq!(c.compile_count.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(
+            c.compile_count.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
 
         for n in 0..32 {
             let out = c
@@ -1209,7 +1215,10 @@ mod tests {
             assert_eq!(out, json!({ "doubled": n * 2 }));
         }
         // After 32 thrusts the cache has done its job: still two compiles.
-        assert_eq!(c.compile_count.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(
+            c.compile_count.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
 
         // Re-igniting the same source must also hit the cache (no
         // recompile) — content-addressed by hash.
@@ -1217,11 +1226,17 @@ mod tests {
             .ignite("module.exports = (d) => ({ doubled: d.n * 2 })")
             .unwrap();
         assert_eq!(id2.hash, id.hash);
-        assert_eq!(c.compile_count.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(
+            c.compile_count.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
 
         // A different source compiles exactly twice more (regular + columnar).
         let _id3 = c.ignite("module.exports = () => 42").unwrap();
-        assert_eq!(c.compile_count.load(std::sync::atomic::Ordering::Relaxed), 4);
+        assert_eq!(
+            c.compile_count.load(std::sync::atomic::Ordering::Relaxed),
+            4
+        );
     }
 
     #[test]
@@ -1369,7 +1384,7 @@ mod tests {
                 name: names[j].as_str(),
                 dtype: ColumnDtype::Float64,
                 data: buf,
-            heap: None,
+                heap: None,
                 validity: None,
             });
         }

@@ -103,6 +103,19 @@ burn --allow-env=HOME,PATH launcher.js
 burn -A runall.js                          # grant everything
 ```
 
+### Package managers
+
+`burn bun add lodash` works end-to-end — bun is a self-contained
+native binary, so the passthrough hands it the args verbatim.
+`burn npm install` / `burn pnpm install` / `burn yarn add` are
+best-effort: the JS-script package managers reach our Node-compat
+surface (a `#!/usr/bin/env node` script picks up our PATH shim and
+re-enters the sandbox) and a lot of their internals work, but the
+deeper async dispatch chain — corepack's clipanion state machine,
+npm's logfile cleanup glob, etc. — needs more node-runtime fidelity
+than we currently provide. Use `burn bun` if you want the
+package-manager experience to just work today.
+
 See [`examples/`](./examples/) for standalone projects covering single
 UDF, batched UDF, multi-worker scheduling, streaming crypto,
 `HostContext` + capability grants, and rebuilding `burn` in 30 lines.

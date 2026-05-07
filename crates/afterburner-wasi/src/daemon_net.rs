@@ -435,9 +435,7 @@ impl DaemonNet {
         //   * Multi-shard mode: a follower stub closing. The
         //     follower never inserted into `servers` in `listen`,
         //     so we decrement here to keep alive_servers accurate.
-        if self.shared_claims.is_some()
-            && self.alive_servers.load(Ordering::Acquire) > 0
-        {
+        if self.shared_claims.is_some() && self.alive_servers.load(Ordering::Acquire) > 0 {
             self.alive_servers.fetch_sub(1, Ordering::Release);
         }
         0

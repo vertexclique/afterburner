@@ -149,6 +149,21 @@ __register_module('crypto', function(module, exports, require) {
     exports.createHash = function(algorithm) { return new Hash(algorithm); };
     exports.createHmac = function(algorithm, key) { return new Hmac(algorithm, key); };
 
+    // Supported hash + cipher catalogues. Keep these aligned with the
+    // host's crypto bridge — packaging tools (npm/ssri/node-tap) call
+    // `getHashes()` at module-init time and crash with TypeError when
+    // it is missing.
+    var SUPPORTED_HASHES = [
+        'md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512'
+    ];
+    var SUPPORTED_CIPHERS = [
+        'aes-128-cbc', 'aes-192-cbc', 'aes-256-cbc',
+        'aes-128-gcm', 'aes-192-gcm', 'aes-256-gcm'
+    ];
+    exports.getHashes  = function() { return SUPPORTED_HASHES.slice(); };
+    exports.getCiphers = function() { return SUPPORTED_CIPHERS.slice(); };
+    exports.getCurves  = function() { return ['P-256', 'P-384', 'P-521']; };
+
     exports.randomBytes = function(len, encoding) {
         var enc = typeof encoding === 'string' ? encoding : 'hex';
         return checkErr(ensureHost('random_bytes')(len, enc), 'randomBytes');

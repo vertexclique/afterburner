@@ -39,8 +39,8 @@
 
 use crate::daemon_dgram::DaemonDgram;
 use crate::daemon_envelopes::{
-    dgram_event_to_envelope, http_event_to_envelope, net_event_to_envelope,
-    tls_event_to_envelope, worker_event_to_envelope,
+    dgram_event_to_envelope, http_event_to_envelope, net_event_to_envelope, tls_event_to_envelope,
+    worker_event_to_envelope,
 };
 use crate::daemon_http::{DaemonEvent, DaemonHttp};
 use crate::daemon_net::DaemonNet;
@@ -215,9 +215,7 @@ impl DaemonShardPool {
         // for shard 0 (so we can probe the post-init state before
         // committing to N), and again for shards 1..N-1 if we
         // decide to expand.
-        let spawn_one = |shard_idx: usize,
-                         shards: &mut Vec<ShardHandle>|
-         -> Result<()> {
+        let spawn_one = |shard_idx: usize, shards: &mut Vec<ShardHandle>| -> Result<()> {
             let (http_tx, http_rx) = mpsc::channel::<DaemonEvent>(queue_depth);
             let alive = Arc::new(AtomicBool::new(true));
             let has_refs = Arc::new(AtomicBool::new(false));
@@ -294,8 +292,7 @@ impl DaemonShardPool {
         // legacy "always multi-shard" behavior).
         let should_expand = first_failure.is_none()
             && cfg.shard_count > 1
-            && (!cfg.expand_only_for_http_listener
-                || cfg.daemon_http.listener_count() > 0);
+            && (!cfg.expand_only_for_http_listener || cfg.daemon_http.listener_count() > 0);
 
         if should_expand {
             for shard_idx in 1..cfg.shard_count {
@@ -356,9 +353,7 @@ impl DaemonShardPool {
             drop(shards);
             return Err(match error {
                 AfterburnerError::ProcessExit(code) => AfterburnerError::ProcessExit(code),
-                other => AfterburnerError::Engine(format!(
-                    "shard {shard_idx} init: {other}"
-                )),
+                other => AfterburnerError::Engine(format!("shard {shard_idx} init: {other}")),
             });
         }
 
@@ -371,8 +366,10 @@ impl DaemonShardPool {
             shards.iter().map(|s| s.http_tx.clone()).collect();
         let shard_alives: Vec<Arc<AtomicBool>> =
             shards.iter().map(|s| Arc::clone(&s.alive)).collect();
-        let shard_request_counters: Vec<Arc<AtomicUsize>> =
-            shards.iter().map(|s| Arc::clone(&s.requests_handled)).collect();
+        let shard_request_counters: Vec<Arc<AtomicUsize>> = shards
+            .iter()
+            .map(|s| Arc::clone(&s.requests_handled))
+            .collect();
         let coord = Arc::clone(&cfg.daemon_http);
         let shutdown_disp = Arc::clone(&cfg.shutdown);
 
@@ -709,9 +706,7 @@ fn shard_event_loop(
             };
             did_work = true;
             let (envelope, reap_id) = net_event_to_envelope(&evt);
-            dispatch_with_panic_isolation(
-                shard_idx, daemon, envelope, "net", stdout_hw, stderr_hw,
-            );
+            dispatch_with_panic_isolation(shard_idx, daemon, envelope, "net", stdout_hw, stderr_hw);
             let _ = flush_streams(daemon, stdout_hw, stderr_hw);
             if let Some(id) = reap_id {
                 daemon.mark_net_closed(id);
@@ -725,9 +720,7 @@ fn shard_event_loop(
             };
             did_work = true;
             let (envelope, reap_id) = tls_event_to_envelope(&evt);
-            dispatch_with_panic_isolation(
-                shard_idx, daemon, envelope, "tls", stdout_hw, stderr_hw,
-            );
+            dispatch_with_panic_isolation(shard_idx, daemon, envelope, "tls", stdout_hw, stderr_hw);
             let _ = flush_streams(daemon, stdout_hw, stderr_hw);
             if let Some(id) = reap_id {
                 daemon.mark_tls_closed(id);

@@ -243,19 +243,39 @@
         return null;
     }
 
-    // Transpile if the extension needs it (TS or ESM .mjs). `.cjs`
-    // is plain CommonJS, no transpile. Returns the transformed
-    // source or throws a "transpile needed but unavailable" error
-    // if the host hook isn't wired.
+    // Transpile if the extension or contents need it. TS / `.mts` /
+    // `.mjs` always go through the host transpile hook. Plain `.js`
+    // files are scanned for ESM syntax — if found, they are routed
+    // through the same hook so `import` / `export` lower to
+    // CommonJS. ESM-only npm packages (chalk, ora, etc., which set
+    // `"type": "module"` and ship .js files) reach us via this
+    // path; without it `require('chalk')` would parse-fail at
+    // `import` keywords. The fast string-scan keeps plain CJS
+    // modules off the oxc parse path.
     function maybeTranspile(source, absPath) {
         var lower = absPath.toLowerCase();
-        var needs = lower.slice(-3) === '.ts'
-                 || lower.slice(-4) === '.mts'
-                 || lower.slice(-4) === '.cts'
-                 || lower.slice(-4) === '.mjs';
+        var explicit = lower.slice(-3) === '.ts'
+                    || lower.slice(-4) === '.mts'
+                    || lower.slice(-4) === '.cts'
+                    || lower.slice(-4) === '.mjs';
+        var needs = explicit;
+        if (!needs && (lower.slice(-3) === '.js' || lower.slice(-4) === '.cjs')) {
+            // Cheap pre-check: top-of-line `import …` / `export …` /
+            // `import.meta` are the markers that warrant a real
+            // lowering pass. Mid-line `import` (in strings, comments,
+            // member access) is fine — oxc would no-op those — but we
+            // skip the parse to keep CJS imports cheap.
+            needs = /(^|\n)\s*(import\s|import\(|export\s|export\{)/.test(source)
+                 || source.indexOf('import.meta') >= 0;
+        }
         if (!needs) return source;
         var fn = globalThis.__host_ts_transpile;
         if (typeof fn !== 'function') {
+            // Only TS files hard-require the hook. `.js` callers fall
+            // back to the unmodified source and let the CJS parser
+            // surface its own error if it actually contained ESM —
+            // matches the no-`ts`-feature flow on the CLI side.
+            if (!explicit) return source;
             var e = new Error("Loading '" + absPath + "' requires the `ts` cargo feature");
             e.code = 'ERR_UNSUPPORTED_EXTENSION';
             throw e;
@@ -267,6 +287,71 @@
             throw err;
         }
         return out;
+    }
+
+    // Subpath imports (`#name`) — Node's mechanism for a package to
+    // reference its own internal modules without exposing them to
+    // consumers. We walk up from `fromDir` for the nearest
+    // `package.json`, look up its `imports` field, and resolve the
+    // matched entry relative to that package's root. Conditional
+    // exports collapse to `node` → `default` (we don't support
+    // `import` vs `require` discrimination since we have a single
+    // require-shaped resolver). Returns the absolute path or null.
+    function resolveSubpathImport(name, fromDir) {
+        var dir = fromDir;
+        if (typeof dir !== 'string' || dir.length === 0) dir = '/';
+        for (var i = 0; i < 64; i++) {
+            var pkgPath = dir + '/package.json';
+            if (fsExists(pkgPath)) {
+                var raw = fsRead(pkgPath);
+                if (typeof raw === 'string') {
+                    var pkg;
+                    try { pkg = JSON.parse(raw); } catch (_) { pkg = null; }
+                    if (pkg && pkg.imports && typeof pkg.imports === 'object') {
+                        var entry = pkg.imports[name];
+                        if (entry === undefined) {
+                            // Pattern subpath imports like
+                            // `#feature/*` would land here in Node.
+                            // We don't support patterns yet — fall
+                            // through to upper package.json.
+                        } else {
+                            var relative = pickConditional(entry);
+                            if (typeof relative === 'string') {
+                                var abs = resolveJoin(dir, relative);
+                                var r = resolveCandidate(abs);
+                                if (r) return r;
+                            }
+                        }
+                    }
+                }
+            }
+            var parent = dirname(dir);
+            if (parent === dir) break;
+            dir = parent;
+        }
+        return null;
+    }
+
+    // Conditional-exports resolver: pick `node` then `default` then
+    // the first string entry. Strings are returned as-is.
+    function pickConditional(entry) {
+        if (typeof entry === 'string') return entry;
+        if (entry && typeof entry === 'object') {
+            if (typeof entry.node === 'string') return entry.node;
+            if (typeof entry.default === 'string') return entry.default;
+            // Object form with `import`/`require` — prefer require shape
+            // since we resolve through a CJS lens.
+            if (typeof entry.require === 'string') return entry.require;
+            if (typeof entry.import === 'string') return entry.import;
+            // Recurse into nested condition objects (e.g. `node: {default}`).
+            for (var k in entry) {
+                if (typeof entry[k] === 'object') {
+                    var nested = pickConditional(entry[k]);
+                    if (nested) return nested;
+                }
+            }
+        }
+        return null;
     }
 
     // Walk up `fromDir` looking for `node_modules/<name>`. Returns the
@@ -288,8 +373,33 @@
         return null;
     }
 
+    // Cache stores `module` records, not bare `module.exports`. This
+    // mirrors Node's `require.cache` shape (`{ [path]: Module }` —
+    // `Module.exports` resolved at read-time) and is the ONLY way
+    // circular requires work correctly: when `a.js` partially loads
+    // and requires `b.js`, which requires `a.js` back, `b.js` must
+    // see the LATEST `a.js` exports object — including any
+    // `module.exports = NewClass` reassignment that happened between
+    // the cache install and the cycle re-entry. Caching the bare
+    // `module.exports` snapshot misses every such reassignment and
+    // hands cycles a stale empty object, which surfaces in user code
+    // as `parent class must be constructor` or
+    // `Cannot read property 'X' of undefined`.
+    function getCached(path) {
+        var rec = cache[path];
+        if (rec === undefined) return undefined;
+        // JSON modules are cached as the parsed value directly; only
+        // module records have an `exports` property + `loaded` flag.
+        if (rec && typeof rec === 'object' && Object.prototype.hasOwnProperty.call(rec, 'exports')
+            && Object.prototype.hasOwnProperty.call(rec, 'filename')) {
+            return rec.exports;
+        }
+        return rec;
+    }
+
     function loadAbsoluteFile(absPath, scopedRequire) {
-        if (cache[absPath] !== undefined) return cache[absPath];
+        var cached = getCached(absPath);
+        if (cached !== undefined) return cached;
         var source = fsRead(absPath);
         if (source === null) {
             var ePerm = new Error("Cannot find module '" + absPath + "'");
@@ -305,20 +415,72 @@
         // oxc-based transpiler before landing in the CJS wrapper.
         // Plain .js / .cjs pass through untouched.
         source = maybeTranspile(source, absPath);
+        // Node strips a leading hashbang before handing source to V8;
+        // QuickJS rejects `#!`. Replace with `//` so line numbers
+        // stay aligned with the on-disk file. Also drops a UTF-8 BOM
+        // if one is present (which would otherwise reach the Function
+        // constructor and parse-fail the same way).
+        if (source.charCodeAt(0) === 0xFEFF) {
+            source = source.slice(1);
+        }
+        if (source.charCodeAt(0) === 0x23 /* # */ &&
+            source.charCodeAt(1) === 0x21 /* ! */) {
+            source = '//' + source.slice(2);
+        }
+        // Dynamic `import(spec)` has no module loader registered in
+        // QuickJS, so the bare expression throws "could not load
+        // module 'X'" the moment it runs. Rewrite to a require-based
+        // shim BEFORE the source reaches the Function constructor.
+        // This keeps the npm / corepack / yarn dispatch chain
+        // (which uses `await import('chalk')`) functional under our
+        // CJS-shaped require resolver. The shim resolves to a
+        // namespace-shaped object (matches Node's CJS-from-ESM
+        // interop). The pattern is conservative — only `import(`
+        // followed by a non-`.` (excludes `import.meta` /
+        // `imports.foo`) and not preceded by an identifier char
+        // (excludes `aimport(`). Strings/comments containing
+        // `import(` are a known false-positive but vanishingly rare
+        // in distributed npm packages.
+        if (source.indexOf('import(') >= 0 || source.indexOf('import (') >= 0) {
+            // Capture the closure-scoped `require` as the FIRST arg so
+            // the import resolves relative to *this* file's dir, not
+            // the entry script's. Async dynamic imports inside class
+            // methods would otherwise lose the active-require frame
+            // by the time they fire.
+            source = source.replace(
+                /([^A-Za-z0-9_$]|^)import(\s*)\(/g,
+                '$1globalThis.__ab_dyn_import$2(require,'
+            );
+        }
         // Node CJS wrapper — `module.exports` / `exports` are the
         // user-visible outputs; `require` is the scoped copy; the two
         // `__filename` / `__dirname` bindings match Node.
         var modObj = { exports: {}, filename: absPath, loaded: false };
-        // Install before invoking so cyclic requires see a partial
-        // exports object rather than triggering an infinite loop.
-        cache[absPath] = modObj.exports;
+        // Install the MODULE record (not the exports snapshot) before
+        // invoking the user body. Cycles look up `cache[absPath]` and
+        // pull `.exports` at access time — so any
+        // `module.exports = NewClass` reassignment inside the user
+        // body is visible to a re-entrant require immediately.
+        cache[absPath] = modObj;
         var dir = dirname(absPath);
         try {
             var fn = new Function(
                 'module', 'exports', 'require', '__filename', '__dirname',
                 source
             );
-            fn(modObj, modObj.exports, scopedRequire, absPath, dir);
+            // Stash the current scoped require before running the
+            // user body so dynamic `import(...)` (rewritten to
+            // `__ab_dyn_import(spec)`) walks `node_modules` from the
+            // importing file's dir. JS is single-threaded so the
+            // simple save/restore is race-free; nested requires nest
+            // their saves naturally.
+            var prevActive = globalThis.__ab_active_require;
+            globalThis.__ab_active_require = scopedRequire;
+            try {
+                fn(modObj, modObj.exports, scopedRequire, absPath, dir);
+            } finally {
+                globalThis.__ab_active_require = prevActive;
+            }
         } catch (e) {
             // Broken module — evict so a retry can re-run the factory
             // cleanly.
@@ -326,7 +488,6 @@
             throw e;
         }
         modObj.loaded = true;
-        cache[absPath] = modObj.exports;
         return modObj.exports;
     }
 
@@ -373,6 +534,21 @@
             // those should short-circuit the filesystem lookup.
             var preregistered = loadStdlib(stripNodePrefix(name));
             if (preregistered !== undefined) return preregistered;
+
+            // Subpath imports (`#name`) — Node looks up the closest
+            // package.json's `imports` field and resolves the matched
+            // entry relative to that package root. ESM-only npm
+            // packages (chalk, ora) ship internal deps like
+            // `#ansi-styles` via this mechanism.
+            if (name.charAt(0) === '#') {
+                var resolvedSubpath = resolveSubpathImport(name, fromDir);
+                if (resolvedSubpath) {
+                    return loadAbsoluteFile(resolvedSubpath, makeRequire(dirname(resolvedSubpath)));
+                }
+                var eImp = new Error("Cannot find module '" + name + "'");
+                eImp.code = 'ERR_PACKAGE_IMPORT_NOT_DEFINED';
+                throw eImp;
+            }
 
             if (isRelativeOrAbsolute(name)) {
                 var base = name.charAt(0) === '/' ? name : resolveJoin(fromDir, name);
@@ -469,4 +645,52 @@
     // starting dir. Called from the plugin's script/daemon-init
     // wrappers immediately after they set `__host_cwd`.
     globalThis.__plenum_refresh_entry_require = installEntryRequire;
+
+    // Dynamic-import shim. QuickJS has no registered module loader,
+    // so bare `import('foo')` throws "could not load module" the
+    // moment it runs — that breaks every npm-side dispatcher (npm
+    // imports `chalk` / `supports-color`; corepack imports the proxy
+    // agent; pnpm imports its own engine). At source-rewrite time
+    // we replace `import(` with `globalThis.__ab_dyn_import(`; this
+    // function returns a Promise resolving to the module's
+    // namespace-shaped object, matching Node's CJS-from-ESM interop:
+    // CJS modules whose `module.exports` is an object are returned
+    // as-is; anything else is wrapped under `default`.
+    globalThis.__ab_dyn_import = function(reqOrSpec, maybeSpec) {
+        // Two-arg shape: rewriter passes `(require, spec)` so the
+        // import resolves relative to the importing file's dir.
+        // One-arg shape: entry-script eval / CLI code that's outside
+        // a CJS wrapper — fall back to the entry require.
+        var r;
+        var spec;
+        if (typeof maybeSpec !== 'undefined' && typeof reqOrSpec === 'function') {
+            r = reqOrSpec;
+            spec = maybeSpec;
+        } else {
+            r = globalThis.require;
+            spec = reqOrSpec;
+        }
+        try {
+            var mod = r(spec);
+            // Already namespace-shaped (ESM-lowered files include
+            // `__esModule: true` + named keys, plus `default`).
+            if (mod && typeof mod === 'object' && mod.__esModule) {
+                return Promise.resolve(mod);
+            }
+            // CJS fallback: synthesise a namespace with `default` set
+            // to the require result. Spread the object's enumerable
+            // keys so `import('cjs').namedExport` still works when
+            // the CJS module exports a plain object.
+            var ns = { default: mod };
+            if (mod && typeof mod === 'object') {
+                for (var k in mod) {
+                    if (k === 'default') continue;
+                    ns[k] = mod[k];
+                }
+            }
+            return Promise.resolve(ns);
+        } catch (e) {
+            return Promise.reject(e);
+        }
+    };
 })();

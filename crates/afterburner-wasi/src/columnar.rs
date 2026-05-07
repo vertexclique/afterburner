@@ -125,7 +125,10 @@ impl ColumnDtype {
         Ok(match self {
             ColumnDtype::Bool | ColumnDtype::Int8 | ColumnDtype::UInt8 => 1,
             ColumnDtype::Int16 | ColumnDtype::UInt16 => 2,
-            ColumnDtype::Int32 | ColumnDtype::UInt32 | ColumnDtype::Float32 | ColumnDtype::Date32 => 4,
+            ColumnDtype::Int32
+            | ColumnDtype::UInt32
+            | ColumnDtype::Float32
+            | ColumnDtype::Date32 => 4,
             ColumnDtype::Int64
             | ColumnDtype::UInt64
             | ColumnDtype::Float64
@@ -310,10 +313,9 @@ impl OwnedColumn {
                     "row_bytes: row {i} × stride {stride} overflows usize",
                 ))
             })?;
-            return self
-                .data
-                .get(off..off + stride)
-                .ok_or_else(|| AfterburnerError::Engine(format!("row_bytes: row {i} out of range")));
+            return self.data.get(off..off + stride).ok_or_else(|| {
+                AfterburnerError::Engine(format!("row_bytes: row {i} out of range"))
+            });
         }
         // Variable-width: parse the inline-or-pointer slot.
         let slot_off = i
@@ -327,8 +329,7 @@ impl OwnedColumn {
         if len <= INLINE_SLOT_INLINE_MAX {
             Ok(&slot[4..4 + len])
         } else {
-            let heap_off =
-                u32::from_le_bytes(slot[12..16].try_into().unwrap()) as usize;
+            let heap_off = u32::from_le_bytes(slot[12..16].try_into().unwrap()) as usize;
             let heap = self.heap.as_ref().ok_or_else(|| {
                 AfterburnerError::Engine(format!(
                     "row_bytes: var-width column '{}' has long slot at row {i} but no heap buffer",
@@ -525,12 +526,8 @@ pub fn encode_batch(batch: &ColumnarBatch<'_>) -> Result<EncodedBatch, Afterburn
                 let slot = &col.data[slot_off..slot_off + INLINE_SLOT_BYTES];
                 let len = u32::from_le_bytes(slot[0..4].try_into().unwrap()) as usize;
                 if len > INLINE_SLOT_INLINE_MAX {
-                    let heap_off =
-                        u32::from_le_bytes(slot[12..16].try_into().unwrap()) as usize;
-                    if heap_off
-                        .checked_add(len)
-                        .is_none_or(|end| end > heap.len())
-                    {
+                    let heap_off = u32::from_le_bytes(slot[12..16].try_into().unwrap()) as usize;
+                    if heap_off.checked_add(len).is_none_or(|end| end > heap.len()) {
                         return Err(AfterburnerError::Engine(format!(
                             "column[{idx}] '{}' row {r}: slot len={len}, heap_off={heap_off}, heap_len={} — out of bounds",
                             col.name,
@@ -705,11 +702,11 @@ pub fn decode_batch(blob: &[u8]) -> Result<ColumnarOutput, AfterburnerError> {
         let heap_len = read_u32_le(blob, h_off + 24) as usize;
 
         let stride = dtype.size_bytes()?;
-        let data_len = stride
-            .checked_mul(row_count as usize)
-            .ok_or_else(|| AfterburnerError::Engine(format!(
+        let data_len = stride.checked_mul(row_count as usize).ok_or_else(|| {
+            AfterburnerError::Engine(format!(
                 "decode column[{i}] size overflow: {row_count} × {stride}",
-            )))?;
+            ))
+        })?;
         if data_offset
             .checked_add(data_len)
             .is_none_or(|end| end > blob.len())
@@ -747,7 +744,9 @@ pub fn decode_batch(blob: &[u8]) -> Result<ColumnarOutput, AfterburnerError> {
             )));
         }
         let name = std::str::from_utf8(&blob[name_offset..name_offset + name_len])
-            .map_err(|e| AfterburnerError::Engine(format!("columnar reply column[{i}] name not UTF-8: {e}")))?
+            .map_err(|e| {
+                AfterburnerError::Engine(format!("columnar reply column[{i}] name not UTF-8: {e}"))
+            })?
             .to_string();
 
         // Read the heap buffer for variable-width dtypes. Fixed-width
@@ -783,10 +782,7 @@ pub fn decode_batch(blob: &[u8]) -> Result<ColumnarOutput, AfterburnerError> {
         });
     }
 
-    Ok(ColumnarOutput {
-        row_count,
-        columns,
-    })
+    Ok(ColumnarOutput { row_count, columns })
 }
 
 // ---- helpers ----------------------------------------------------------
@@ -797,9 +793,8 @@ fn align_up(x: usize, a: usize) -> usize {
 }
 
 fn u32_from_usize(x: usize) -> Result<u32, AfterburnerError> {
-    u32::try_from(x).map_err(|_| {
-        AfterburnerError::Engine(format!("columnar offset {x} exceeds u32::MAX"))
-    })
+    u32::try_from(x)
+        .map_err(|_| AfterburnerError::Engine(format!("columnar offset {x} exceeds u32::MAX")))
 }
 
 fn write_u32_le(buf: &mut [u8], off: usize, v: u32) {
@@ -1003,10 +998,7 @@ mod tests {
         let err = encode_batch(&batch).unwrap_err();
         let msg = format!("{err:?}");
         assert!(msg.contains("Decimal128"), "got {msg}");
-        assert!(
-            msg.contains("not yet implemented"),
-            "got {msg}",
-        );
+        assert!(msg.contains("not yet implemented"), "got {msg}",);
     }
 
     #[test]
@@ -1075,7 +1067,7 @@ mod tests {
                 name: n,
                 dtype: ColumnDtype::Float64,
                 data: &f64_data,
-            heap: None,
+                heap: None,
                 validity: None,
             });
         }
@@ -1123,7 +1115,9 @@ mod tests {
         // (1 GiB default).
         let row_count = 2048u32;
         let col_count = 32usize;
-        let buf: Vec<u8> = (0..(row_count as usize)).flat_map(|i| (i as f64).to_le_bytes()).collect();
+        let buf: Vec<u8> = (0..(row_count as usize))
+            .flat_map(|i| (i as f64).to_le_bytes())
+            .collect();
         let mut batch = ColumnarBatch::new(row_count);
         let names: Vec<String> = (0..col_count).map(|i| format!("c{i}")).collect();
         for n in &names {
@@ -1131,14 +1125,18 @@ mod tests {
                 name: n.as_str(),
                 dtype: ColumnDtype::Float64,
                 data: &buf,
-            heap: None,
+                heap: None,
                 validity: None,
             });
         }
         let encoded = encode_batch(&batch).unwrap();
         // Expected: 16 header + 32 × 24 col headers + 32 × (2048×8 +
         // padding + name) ≈ 528 KB. Well under any reasonable cap.
-        assert!(encoded.bytes.len() < 1024 * 1024, "{} bytes", encoded.bytes.len());
+        assert!(
+            encoded.bytes.len() < 1024 * 1024,
+            "{} bytes",
+            encoded.bytes.len()
+        );
         let decoded = decode_batch(&encoded.bytes).unwrap();
         assert_eq!(decoded.row_count, row_count);
         assert_eq!(decoded.columns.len(), col_count);
@@ -1301,11 +1299,17 @@ mod tests {
 
     #[test]
     fn header_struct_sizes_match_constants() {
-        assert_eq!(BATCH_HEADER_BYTES, 16, "BatchHeader must be exactly 16 bytes");
+        assert_eq!(
+            BATCH_HEADER_BYTES, 16,
+            "BatchHeader must be exactly 16 bytes"
+        );
         // Phase 1.5: ColumnHeader grew from 20 to 28 bytes (added
         // heap_offset + heap_len for variable-width dtypes). The JS
         // dispatcher's COL_HDR constant must stay in sync (asserted
         // by the b_columnar_udf integration tests).
-        assert_eq!(COLUMN_HEADER_BYTES, 28, "ColumnHeader must be exactly 28 bytes");
+        assert_eq!(
+            COLUMN_HEADER_BYTES, 28,
+            "ColumnHeader must be exactly 28 bytes"
+        );
     }
 }

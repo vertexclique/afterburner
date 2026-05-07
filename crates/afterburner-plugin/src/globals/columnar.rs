@@ -391,7 +391,10 @@ fn ab_columnar_reply<'js>(arr: TypedArray<'js, u8>) -> i32 {
 }
 
 pub fn install<'js>(globals: &Object<'js>) {
-    let _ = globals.set("__AB_GET_COLUMNAR_INPUT__", Func::from(ab_get_columnar_input));
+    let _ = globals.set(
+        "__AB_GET_COLUMNAR_INPUT__",
+        Func::from(ab_get_columnar_input),
+    );
     let _ = globals.set("__AB_COLUMNAR_REPLY__", Func::from(ab_columnar_reply));
 }
 

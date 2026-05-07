@@ -430,9 +430,7 @@ impl DaemonTls {
         }
         // Follower stub close (multi-shard only). In single-shard
         // mode an unknown id is historically a no-op; preserve.
-        if self.shared_claims.is_some()
-            && self.alive_servers.load(Ordering::Acquire) > 0
-        {
+        if self.shared_claims.is_some() && self.alive_servers.load(Ordering::Acquire) > 0 {
             self.alive_servers.fetch_sub(1, Ordering::Release);
         }
         0

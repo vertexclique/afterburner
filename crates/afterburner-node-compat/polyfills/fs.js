@@ -94,16 +94,108 @@ __register_module('fs', function(module, exports, require) {
         return typeof fn === 'function' ? fn(String(path)) : false;
     };
 
+    // Fully fleshed-out Stats object. Node's `Stats` exposes seven
+    // type-test methods (isFile / isDirectory / isSymbolicLink /
+    // isBlockDevice / isCharacterDevice / isSocket / isFIFO) plus a
+    // handful of mode/ino/size/mtime/atime/ctime/birthtime fields and
+    // their `*Ms` counterparts. Libraries like path-scurry and chokidar
+    // call `entToType(s)` over every field; missing methods crash with
+    // "not a function" deep in their walkers. The host gives us file/
+    // directory bits via `stat_sync`; everything else is `false` (we
+    // don't surface block/char/socket/fifo through the bridge today).
+    function shapeStats(parsed) {
+        var s = parsed || {};
+        s.isFile             = wrapBool(!!s.isFile);
+        s.isDirectory        = wrapBool(!!s.isDirectory);
+        s.isSymbolicLink     = wrapBool(!!s.isSymbolicLink);
+        s.isBlockDevice      = wrapBool(!!s.isBlockDevice);
+        s.isCharacterDevice  = wrapBool(!!s.isCharacterDevice);
+        s.isSocket           = wrapBool(!!s.isSocket);
+        s.isFIFO             = wrapBool(!!s.isFIFO);
+        if (typeof s.mode  !== 'number') s.mode  = s.isDirectory() ? 0o040755 : 0o100644;
+        if (typeof s.size  !== 'number') s.size  = 0;
+        if (typeof s.ino   !== 'number') s.ino   = 0;
+        if (typeof s.dev   !== 'number') s.dev   = 0;
+        if (typeof s.nlink !== 'number') s.nlink = 1;
+        if (typeof s.uid   !== 'number') s.uid   = 0;
+        if (typeof s.gid   !== 'number') s.gid   = 0;
+        if (typeof s.rdev  !== 'number') s.rdev  = 0;
+        if (typeof s.blksize !== 'number') s.blksize = 4096;
+        if (typeof s.blocks  !== 'number') s.blocks  = Math.ceil(s.size / 512);
+        // Time fields. Node exposes both `ms` numeric and Date-shaped.
+        var nowMs = (typeof s.mtimeMs === 'number') ? s.mtimeMs : Date.now();
+        if (typeof s.atimeMs !== 'number')    s.atimeMs    = nowMs;
+        if (typeof s.mtimeMs !== 'number')    s.mtimeMs    = nowMs;
+        if (typeof s.ctimeMs !== 'number')    s.ctimeMs    = nowMs;
+        if (typeof s.birthtimeMs !== 'number') s.birthtimeMs = nowMs;
+        if (!s.atime)     s.atime     = new Date(s.atimeMs);
+        if (!s.mtime)     s.mtime     = new Date(s.mtimeMs);
+        if (!s.ctime)     s.ctime     = new Date(s.ctimeMs);
+        if (!s.birthtime) s.birthtime = new Date(s.birthtimeMs);
+        return s;
+    }
+    function wrapBool(v) { return function() { return v; }; }
+
     exports.statSync = function(path) {
         var raw = checkHostError(requireHost('stat_sync')(String(path)), 'statSync');
-        var parsed = JSON.parse(raw);
-        parsed.isFile = (function(v) { return function() { return v; }; })(parsed.isFile);
-        parsed.isDirectory = (function(v) { return function() { return v; }; })(parsed.isDirectory);
-        return parsed;
+        return shapeStats(JSON.parse(raw));
+    };
+    // lstatSync — Node's `lstat` differs from `stat` only for
+    // symlinks (it returns info about the link itself). The sandbox
+    // bridge doesn't surface symlink-specific bits today; falling
+    // back to `statSync` matches the symlink-followed posture we
+    // already have for `readFileSync` / `readdirSync`.
+    exports.lstatSync = function(path) {
+        return exports.statSync(path);
+    };
+
+    // readlinkSync — no host bridge, so fail with ENOSYS so callers
+    // can fall through (most archive / module-resolution code probes
+    // and degrades gracefully when readlink fails).
+    exports.readlinkSync = function(path) {
+        var fn = globalThis.__host_fs_readlink_sync;
+        if (typeof fn === 'function') {
+            return checkHostError(fn(String(path)), 'readlinkSync');
+        }
+        var e = new Error("readlinkSync is not implemented");
+        e.code = 'ENOSYS';
+        throw e;
+    };
+
+    // accessSync — Node uses bitwise mode constants. We map any
+    // mode to `existsSync`, which is the semantic the vast majority
+    // of consumers care about (does the path exist + is reachable).
+    var F_OK = 0, R_OK = 4, W_OK = 2, X_OK = 1;
+    exports.accessSync = function(path, _mode) {
+        if (!exports.existsSync(path)) {
+            var e = new Error("ENOENT: no such file or directory, access '" + String(path) + "'");
+            e.code = 'ENOENT';
+            e.errno = -2;
+            e.path = String(path);
+            throw e;
+        }
     };
 
     exports.readdirSync = function(path) {
-        return requireHost('readdir_sync')(String(path));
+        // The host returns either an array of entries (success) or a
+        // string starting with `__HOST_ERR__:` (failure — non-existent
+        // path, permission denied, etc). Throwing on the error string
+        // matches Node's contract and prevents callers from iterating
+        // a single string as if it were a directory entry.
+        var result = requireHost('readdir_sync')(String(path));
+        if (typeof result === 'string' && result.indexOf('__HOST_ERR__:') === 0) {
+            var msg = result.slice('__HOST_ERR__:'.length);
+            var err = new Error("ENOENT: no such file or directory, scandir '" + String(path) + "'");
+            err.code = 'ENOENT';
+            err.errno = -2;
+            err.syscall = 'scandir';
+            err.path = String(path);
+            // Preserve the original detail in case callers introspect
+            // beyond `code`.
+            err.message = err.message + ' (' + msg + ')';
+            throw err;
+        }
+        return result;
     };
 
     exports.mkdirSync = function(path, options) {
@@ -117,6 +209,157 @@ __register_module('fs', function(module, exports, require) {
 
     exports.renameSync = function(from, to) {
         requireHost('rename_sync')(String(from), String(to));
+    };
+
+    // Append. Build on readFileSync + writeFileSync — atomic-ish for
+    // small files which is the only shape we'd hit in the sandbox.
+    exports.appendFileSync = function(path, data, options) {
+        var existing;
+        try { existing = exports.readFileSync(path); } catch (_) { existing = ''; }
+        var combined;
+        if (Buffer.isBuffer(existing) || Buffer.isBuffer(data)) {
+            combined = Buffer.concat([
+                Buffer.isBuffer(existing) ? existing : Buffer.from(String(existing)),
+                Buffer.isBuffer(data) ? data : Buffer.from(String(data))
+            ]);
+        } else {
+            combined = String(existing) + String(data);
+        }
+        exports.writeFileSync(path, combined, options);
+    };
+
+    // copyFileSync — straight read-then-write, matches Node when
+    // `flags` is the default 0 (copy contents, overwrite if exists).
+    exports.copyFileSync = function(src, dst, _flags) {
+        var data = exports.readFileSync(src);
+        exports.writeFileSync(dst, data);
+    };
+
+    // truncateSync — read existing, truncate, rewrite. Sandbox-wide
+    // libraries (npm, tar, etc.) only ever truncate small lockfiles
+    // so the read+write path is fine.
+    exports.truncateSync = function(path, len) {
+        len = len || 0;
+        var existing;
+        try { existing = exports.readFileSync(path); } catch (_) { existing = Buffer.alloc(0); }
+        var buf = Buffer.isBuffer(existing) ? existing : Buffer.from(String(existing));
+        var truncated = buf.slice(0, len);
+        exports.writeFileSync(path, truncated);
+    };
+
+    // rmdirSync / rmSync — no host bridge for recursive dir removal,
+    // so we walk the tree and delete leaves. Slow for huge trees but
+    // correct for lockfile / cache cleanup the sandbox actually sees.
+    function _rmDir(path) {
+        var entries;
+        try { entries = exports.readdirSync(path); } catch (e) { entries = []; }
+        for (var i = 0; i < entries.length; i++) {
+            var child = String(path) + '/' + entries[i];
+            var s;
+            try { s = exports.statSync(child); } catch (_) { continue; }
+            if (s.isDirectory()) _rmDir(child);
+            else { try { exports.unlinkSync(child); } catch (_) {} }
+        }
+        try { requireHost('unlink_sync')(String(path)); } catch (_) {}
+    }
+    exports.rmdirSync = function(path, options) {
+        if (options && options.recursive) { _rmDir(path); return; }
+        try { requireHost('unlink_sync')(String(path)); }
+        catch (e) {
+            // Some hosts route directory removal through a separate fn;
+            // fall back to the recursive walker if it's empty.
+            _rmDir(path);
+        }
+    };
+    exports.rmSync = function(path, options) {
+        options = options || {};
+        if (!exports.existsSync(path)) {
+            if (options.force) return;
+            var e = new Error("ENOENT: no such file or directory, rm '" + String(path) + "'");
+            e.code = 'ENOENT';
+            throw e;
+        }
+        var s;
+        try { s = exports.statSync(path); } catch (_) { s = null; }
+        if (s && s.isDirectory()) {
+            if (options.recursive) _rmDir(path);
+            else {
+                var ee = new Error("EISDIR: illegal operation on a directory, rm '" + String(path) + "'");
+                ee.code = 'EISDIR';
+                throw ee;
+            }
+        } else {
+            try { exports.unlinkSync(path); } catch (e) { if (!options.force) throw e; }
+        }
+    };
+
+    // mkdtempSync — atomic-name temp dir creation. Use a 6-char
+    // suffix matching Node's contract.
+    exports.mkdtempSync = function(prefix) {
+        var p = String(prefix);
+        for (var attempt = 0; attempt < 16; attempt++) {
+            var rnd = Math.floor(Math.random() * 0xFFFFFF).toString(16).padStart(6, '0');
+            var name = p + rnd;
+            try {
+                requireHost('mkdir_sync')(name, false);
+                return name;
+            } catch (_) { /* collision — try again */ }
+        }
+        var e = new Error("mkdtempSync: failed to create unique directory");
+        e.code = 'EEXIST';
+        throw e;
+    };
+
+    // No-op chmod / chown / utimes / link / symlink / lchown —
+    // the sandbox doesn't grant arbitrary metadata mutation, but
+    // libraries that defensively call these (npm cache, tar
+    // extraction) expect them to silently succeed when the
+    // operation is harmless.
+    exports.chmodSync   = function(_p, _m) {};
+    exports.fchmodSync  = function(_fd, _m) {};
+    exports.lchmodSync  = function(_p, _m) {};
+    exports.chownSync   = function(_p, _u, _g) {};
+    exports.fchownSync  = function(_fd, _u, _g) {};
+    exports.lchownSync  = function(_p, _u, _g) {};
+    exports.utimesSync  = function(_p, _a, _m) {};
+    exports.lutimesSync = function(_p, _a, _m) {};
+    exports.futimesSync = function(_fd, _a, _m) {};
+    exports.linkSync    = function(existing, target) {
+        // Best-effort: copy contents. Hard-link semantics are not
+        // representable through the bridge, but most callers only
+        // need the file to exist at the new path.
+        exports.copyFileSync(existing, target);
+    };
+    exports.symlinkSync = function(target, p, _type) {
+        // Same posture as linkSync — copy. Real symlink behavior
+        // (lstat differing from stat) isn't representable.
+        try { exports.copyFileSync(target, p); }
+        catch (e) {
+            // Source missing is the typical npm install case for
+            // workspace symlinks; fail loudly so callers can
+            // fall through to a real install path.
+            throw e;
+        }
+    };
+
+    // fs constants. Most tools probe `fs.constants.{F,R,W,X}_OK`
+    // (access mode flags) and `O_*` (open flag bits). Linux numeric
+    // values; we mirror Node's table.
+    exports.constants = {
+        F_OK: F_OK, R_OK: R_OK, W_OK: W_OK, X_OK: X_OK,
+        O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, O_CREAT: 64, O_EXCL: 128,
+        O_NOCTTY: 256, O_TRUNC: 512, O_APPEND: 1024, O_DIRECTORY: 65536,
+        O_NOATIME: 262144, O_NOFOLLOW: 131072, O_SYNC: 1052672,
+        O_DSYNC: 4096, O_SYMLINK: 0, O_DIRECT: 16384, O_NONBLOCK: 2048,
+        S_IFMT: 0o170000, S_IFREG: 0o100000, S_IFDIR: 0o040000,
+        S_IFCHR: 0o020000, S_IFBLK: 0o060000, S_IFIFO: 0o010000,
+        S_IFLNK: 0o120000, S_IFSOCK: 0o140000,
+        S_IRWXU: 0o700, S_IRUSR: 0o400, S_IWUSR: 0o200, S_IXUSR: 0o100,
+        S_IRWXG: 0o070, S_IRGRP: 0o040, S_IWGRP: 0o020, S_IXGRP: 0o010,
+        S_IRWXO: 0o007, S_IROTH: 0o004, S_IWOTH: 0o002, S_IXOTH: 0o001,
+        UV_FS_COPYFILE_EXCL: 1, COPYFILE_EXCL: 1,
+        UV_FS_COPYFILE_FICLONE: 2, COPYFILE_FICLONE: 2,
+        UV_FS_COPYFILE_FICLONE_FORCE: 4, COPYFILE_FICLONE_FORCE: 4,
     };
 
     // ---- streaming -----------------------------------------------------
@@ -358,17 +601,61 @@ __register_module('fs', function(module, exports, require) {
     exports.Dir = Dir;
     exports.Dirent = Dirent;
 
-    // Augment readdirSync with `withFileTypes` support — the existing
-    // overload returns a plain string array; opendir_sync gives us
-    // typed entries.
+    // Augment readdirSync with `withFileTypes` and `recursive` support
+    // (Node 22+). The existing overload returns a plain string array;
+    // opendir_sync gives us typed entries. `recursive: true` walks
+    // the tree depth-first and returns paths relative to `path`.
     var _readdirSyncBasic = exports.readdirSync;
     exports.readdirSync = function(path, options) {
-        if (options && options.withFileTypes) {
+        var recursive = !!(options && options.recursive);
+        var withFileTypes = !!(options && options.withFileTypes);
+        var encoding = options && options.encoding;
+        if (recursive) {
+            // DFS walk. `parentPath` on Dirent is set to the dir we
+            // listed (Node 20+ contract); names are relative to `path`.
+            var rootStr = String(path);
+            var out = [];
+            var stack = [{ dir: rootStr, prefix: '' }];
+            while (stack.length) {
+                var top = stack.pop();
+                var children;
+                try { children = rawDirEntries(top.dir); }
+                catch (_) { children = []; }
+                for (var i = 0; i < children.length; i++) {
+                    var c = children[i];
+                    var rel = top.prefix ? (top.prefix + '/' + c.name) : c.name;
+                    var abs = top.dir + '/' + c.name;
+                    if (withFileTypes) {
+                        var d = new Dirent(c, top.dir);
+                        // Node-26 path field — the absolute joined path.
+                        d.path = abs;
+                        d.parentPath = top.dir;
+                        out.push(d);
+                    } else {
+                        out.push(rel);
+                    }
+                    if (c.isDir) {
+                        stack.push({ dir: abs, prefix: rel });
+                    }
+                }
+            }
+            return out;
+        }
+        if (withFileTypes) {
             var entries = rawDirEntries(path);
             var pp = String(path);
-            return entries.map(function(e) { return new Dirent(e, pp); });
+            return entries.map(function(e) {
+                var d = new Dirent(e, pp);
+                d.parentPath = pp;
+                d.path = pp + '/' + e.name;
+                return d;
+            });
         }
-        return _readdirSyncBasic(path);
+        var raw = _readdirSyncBasic(path);
+        if (encoding === 'buffer') {
+            return raw.map(function(n) { return Buffer.from(String(n)); });
+        }
+        return raw;
     };
 
     // ----- watch (polling-based FSWatcher) ----------------------------
@@ -570,7 +857,15 @@ __register_module('fs', function(module, exports, require) {
     // ----- fs.promises ------------------------------------------------
 
     exports.promises = {};
-    ['readFile','writeFile','stat','readdir','mkdir','unlink','rename'].forEach(function(name) {
+    // Auto-promisify every sync function that has a 1:1 promise twin.
+    // Node 26 keeps these stable; if the upstream surface grows,
+    // adding a new entry here is enough.
+    [
+        'readFile','writeFile','stat','lstat','readdir','mkdir',
+        'unlink','rename','readlink','access','chmod','fchmod','lchmod',
+        'chown','fchown','lchown','utimes','lutimes','futimes','link',
+        'symlink','copyFile','appendFile','truncate','mkdtemp','rmdir','rm',
+    ].forEach(function(name) {
         exports.promises[name] = function() {
             var args = [].slice.call(arguments);
             var syncName = name + 'Sync';
@@ -580,8 +875,6 @@ __register_module('fs', function(module, exports, require) {
             });
         };
     });
-    // Common aliases.
-    exports.promises.rm = exports.promises.unlink;
 
     // New promise-only entries.
     exports.promises.realpath = function(path) {
@@ -645,4 +938,200 @@ __register_module('fs', function(module, exports, require) {
         });
     };
     exports.FileHandle = FileHandle;
+
+    // Node 22+ added `fs.glob` / `fs.globSync` / `fs.promises.glob`
+    // for pattern-matched directory walks. We don't pull in a full
+    // micromatch engine; libraries that genuinely need glob semantics
+    // import the `glob` npm package, which works on top of
+    // `readdirSync` / `lstatSync`. The shim returns the bare-leaf
+    // shape (no globs interpreted) so callers that pass a literal
+    // path get the right answer and pattern callers fall through to
+    // the empty-result path matching Node's no-match behavior.
+    function _matchPattern(pattern, root) {
+        var p = String(pattern);
+        // Literal path passthrough — no `*` / `?` / `[` markers.
+        if (!/[*?[]/.test(p)) {
+            try {
+                exports.statSync(p);
+                return [p];
+            } catch (_) { return []; }
+        }
+        // For pattern globs, walk the directory and return entries
+        // whose name matches the trailing star-segment. Cheap but
+        // correct enough for the npm log-cleanup `*.log` case.
+        var slash = p.lastIndexOf('/');
+        var dir = slash >= 0 ? p.slice(0, slash) : (root || '.');
+        var rest = slash >= 0 ? p.slice(slash + 1) : p;
+        var re = new RegExp('^' + rest
+            .replace(/[.+^${}()|\\]/g, '\\$&')
+            .replace(/\*/g, '.*')
+            .replace(/\?/g, '.') + '$');
+        var entries;
+        try { entries = exports.readdirSync(dir); }
+        catch (_) { return []; }
+        var out = [];
+        for (var i = 0; i < entries.length; i++) {
+            if (re.test(entries[i])) out.push(dir + '/' + entries[i]);
+        }
+        return out;
+    }
+    exports.globSync = function(pattern, options) {
+        var pats = Array.isArray(pattern) ? pattern : [pattern];
+        var cwd = (options && options.cwd) ? String(options.cwd) : (typeof globalThis.__host_cwd === 'string' ? globalThis.__host_cwd : '.');
+        var seen = {};
+        var out = [];
+        for (var i = 0; i < pats.length; i++) {
+            var matches = _matchPattern(pats[i], cwd);
+            for (var j = 0; j < matches.length; j++) {
+                if (!seen[matches[j]]) { seen[matches[j]] = true; out.push(matches[j]); }
+            }
+        }
+        return out;
+    };
+    exports.glob = function(pattern, options, cb) {
+        if (typeof options === 'function') { cb = options; options = undefined; }
+        Promise.resolve().then(function() {
+            try { cb(null, exports.globSync(pattern, options)); }
+            catch (e) { cb(e); }
+        });
+    };
+    exports.promises.glob = function(pattern, options) {
+        return new Promise(function(resolve, reject) {
+            try { resolve(exports.globSync(pattern, options)); }
+            catch (e) { reject(e); }
+        });
+    };
+
+    // Callback-style entry points for every sync function. Node ships
+    // both shapes for the entire fs surface; libraries (path-scurry,
+    // chokidar, npm's lockfile cleanup) call the callback form
+    // directly. We auto-wrap each `*Sync` in an async-callback shim
+    // — the result fires on a microtask so handlers attached after
+    // dispatch see it (matches Node's CB-after-IO contract).
+    var CALLBACK_NAMES = [
+        'readFile','writeFile','appendFile','stat','lstat','fstat','exists',
+        'readdir','mkdir','rmdir','rm','unlink','rename','readlink','access',
+        'chmod','fchmod','lchmod','chown','fchown','lchown','utimes','lutimes',
+        'futimes','link','symlink','copyFile','truncate','mkdtemp','realpath',
+    ];
+    CALLBACK_NAMES.forEach(function(name) {
+        if (typeof exports[name] === 'function') return; // already defined (e.g. realpath)
+        var syncName = name + 'Sync';
+        if (typeof exports[syncName] !== 'function') return; // sync entry missing
+        exports[name] = function() {
+            var args = [].slice.call(arguments);
+            var cb = (typeof args[args.length - 1] === 'function') ? args.pop() : null;
+            // Schedule on a microtask so the cb fires after the
+            // calling expression returns — matches Node's
+            // async-callback contract for code like:
+            //   `const r = fs.readdir(path, opts, cb); /* … */`.
+            Promise.resolve().then(function() {
+                try {
+                    var r = exports[syncName].apply(null, args);
+                    if (cb) cb(null, r);
+                } catch (e) {
+                    if (cb) cb(e);
+                }
+            });
+        };
+    });
+    // existsSync's callback form has a single-arg shape (no err).
+    exports.exists = function(path, cb) {
+        Promise.resolve().then(function() {
+            if (cb) cb(exports.existsSync(path));
+        });
+    };
+
+    // `fs.writev` / `writevSync` — vectored writes. fs-minipass
+    // gates a libuv-binding fallback on `!fs.writev`, so providing
+    // even a sequential implementation skips the binding path
+    // entirely. The fd is the path-keyed handle from FileHandle /
+    // openSync; we serialise the iovec by concatenating buffers
+    // and dispatching one write per call. `position === null` means
+    // "current position" (Node default); a numeric value seeks first.
+    exports.writevSync = function(fd, buffers, position) {
+        var total = 0;
+        var pos = (typeof position === 'number') ? position : 0;
+        // FileHandle stores its path on `_path`; for raw numeric fds
+        // we don't have a path mapping and fall through to sync write
+        // via the chunk bridge.
+        var path = (fd && typeof fd === 'object' && fd._path) ? fd._path : String(fd);
+        var writeFn = globalThis.__host_fs_write_chunk;
+        if (typeof writeFn !== 'function') {
+            throw new Error('fs.writev: not available');
+        }
+        for (var i = 0; i < buffers.length; i++) {
+            var b = buffers[i];
+            var bb = Buffer.isBuffer(b) ? b : Buffer.from(b);
+            var raw = writeFn(path, pos, bb.toString('base64'));
+            if (typeof raw === 'string' && raw.indexOf('__HOST_ERR__:') === 0) {
+                throw new Error('fs: ' + raw.slice('__HOST_ERR__:'.length));
+            }
+            pos += bb.length;
+            total += bb.length;
+        }
+        return total;
+    };
+    exports.writev = function(fd, buffers, position, cb) {
+        if (typeof position === 'function') { cb = position; position = null; }
+        Promise.resolve().then(function() {
+            try {
+                var n = exports.writevSync(fd, buffers, position);
+                if (cb) cb(null, n, buffers);
+            } catch (e) { if (cb) cb(e); }
+        });
+    };
+    // `fs.readv` — gather-read vectored. Same posture: serialise.
+    exports.readvSync = function(fd, buffers, position) {
+        var total = 0;
+        var pos = (typeof position === 'number') ? position : 0;
+        var path = (fd && typeof fd === 'object' && fd._path) ? fd._path : String(fd);
+        var readFn = globalThis.__host_fs_read_chunk;
+        if (typeof readFn !== 'function') {
+            throw new Error('fs.readv: not available');
+        }
+        for (var i = 0; i < buffers.length; i++) {
+            var b = buffers[i];
+            var want = b.length;
+            var raw = readFn(path, pos, want);
+            if (typeof raw === 'string' && raw.indexOf('__HOST_ERR__:') === 0) {
+                throw new Error('fs: ' + raw.slice('__HOST_ERR__:'.length));
+            }
+            var got = Buffer.from(raw, 'base64');
+            got.copy(b, 0, 0, Math.min(got.length, want));
+            pos += got.length;
+            total += got.length;
+            if (got.length < want) break;
+        }
+        return total;
+    };
+    exports.readv = function(fd, buffers, position, cb) {
+        if (typeof position === 'function') { cb = position; position = null; }
+        Promise.resolve().then(function() {
+            try {
+                var n = exports.readvSync(fd, buffers, position);
+                if (cb) cb(null, n, buffers);
+            } catch (e) { if (cb) cb(e); }
+        });
+    };
+
+    // `fs.openAsBlob` — Node 19+. Returns a Blob backed by the
+    // file's content. Sandbox-safe: we read eagerly via the host
+    // bridge (no streaming Blob support yet, but the shape is
+    // there for libraries that probe).
+    exports.openAsBlob = function(path, _options) {
+        var data = exports.readFileSync(path);
+        if (typeof Blob === 'function') {
+            return Promise.resolve(new Blob([data]));
+        }
+        // Pre-Blob runtimes — return a minimal blob-shaped object.
+        var bytes = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
+        return Promise.resolve({
+            size: bytes.length,
+            type: '',
+            arrayBuffer: function() { return Promise.resolve(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)); },
+            text:        function() { return Promise.resolve(bytes.toString('utf8')); },
+            slice:       function() { return this; },
+        });
+    };
 });

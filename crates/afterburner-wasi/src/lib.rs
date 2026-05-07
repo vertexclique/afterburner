@@ -29,6 +29,10 @@ pub mod test_support;
 pub mod wasm_engine;
 pub mod wasm_loader;
 
+pub use columnar::{
+    ColumnDtype, ColumnRef, ColumnarBatch, ColumnarOutput, INLINE_SLOT_BYTES,
+    INLINE_SLOT_INLINE_MAX, OwnedColumn, decode_batch, encode_batch,
+};
 #[cfg(feature = "daemon")]
 pub use daemon_dgram::{DaemonDgram, DgramEvent};
 pub use daemon_http::{DaemonHttp, ReplyEnvelope};
@@ -42,9 +46,5 @@ pub use daemon_shard_pool::{DaemonShardPool, ShardPoolConfig};
 #[cfg(feature = "daemon")]
 pub use daemon_tls::{DaemonTls, TlsEvent};
 pub use daemon_workers::{DaemonWorkers, WorkerConfig, WorkerEvent};
-pub use columnar::{
-    ColumnDtype, ColumnRef, ColumnarBatch, ColumnarOutput, INLINE_SLOT_BYTES,
-    INLINE_SLOT_INLINE_MAX, OwnedColumn, decode_batch, encode_batch,
-};
 pub use manifold_codec::manifold_to_cli_args;
 pub use wasm_engine::{WasmCombustor, WasmConfig};

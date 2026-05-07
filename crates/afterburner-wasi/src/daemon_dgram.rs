@@ -340,9 +340,7 @@ impl DaemonDgram {
             // Possible follower stub (multi-shard only). In
             // single-shard mode, closing an unknown id is
             // historically a no-op — preserve.
-            if self.shared_claims.is_some()
-                && self.alive.load(Ordering::Acquire) > 0
-            {
+            if self.shared_claims.is_some() && self.alive.load(Ordering::Acquire) > 0 {
                 self.alive.fetch_sub(1, Ordering::Release);
                 self.events_tx.send(DgramEvent::Close { socket_id });
             }

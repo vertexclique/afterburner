@@ -247,19 +247,39 @@
         return null;
     }
 
-    // Transpile if the extension needs it (TS or ESM .mjs). `.cjs`
-    // is plain CommonJS, no transpile. Returns the transformed
-    // source or throws a "transpile needed but unavailable" error
-    // if the host hook isn't wired.
+    // Transpile if the extension or contents need it. TS / `.mts` /
+    // `.mjs` always go through the host transpile hook. Plain `.js`
+    // files are scanned for ESM syntax — if found, they are routed
+    // through the same hook so `import` / `export` lower to
+    // CommonJS. ESM-only npm packages (chalk, ora, etc., which set
+    // `"type": "module"` and ship .js files) reach us via this
+    // path; without it `require('chalk')` would parse-fail at
+    // `import` keywords. The fast string-scan keeps plain CJS
+    // modules off the oxc parse path.
     function maybeTranspile(source, absPath) {
         var lower = absPath.toLowerCase();
-        var needs = lower.slice(-3) === '.ts'
-                 || lower.slice(-4) === '.mts'
-                 || lower.slice(-4) === '.cts'
-                 || lower.slice(-4) === '.mjs';
+        var explicit = lower.slice(-3) === '.ts'
+                    || lower.slice(-4) === '.mts'
+                    || lower.slice(-4) === '.cts'
+                    || lower.slice(-4) === '.mjs';
+        var needs = explicit;
+        if (!needs && (lower.slice(-3) === '.js' || lower.slice(-4) === '.cjs')) {
+            // Cheap pre-check: top-of-line `import …` / `export …` /
+            // `import.meta` are the markers that warrant a real
+            // lowering pass. Mid-line `import` (in strings, comments,
+            // member access) is fine — oxc would no-op those — but we
+            // skip the parse to keep CJS imports cheap.
+            needs = /(^|\n)\s*(import\s|import\(|export\s|export\{)/.test(source)
+                 || source.indexOf('import.meta') >= 0;
+        }
         if (!needs) return source;
         var fn = globalThis.__host_ts_transpile;
         if (typeof fn !== 'function') {
+            // Only TS files hard-require the hook. `.js` callers fall
+            // back to the unmodified source and let the CJS parser
+            // surface its own error if it actually contained ESM —
+            // matches the no-`ts`-feature flow on the CLI side.
+            if (!explicit) return source;
             var e = new Error("Loading '" + absPath + "' requires the `ts` cargo feature");
             e.code = 'ERR_UNSUPPORTED_EXTENSION';
             throw e;
@@ -271,6 +291,71 @@
             throw err;
         }
         return out;
+    }
+
+    // Subpath imports (`#name`) — Node's mechanism for a package to
+    // reference its own internal modules without exposing them to
+    // consumers. We walk up from `fromDir` for the nearest
+    // `package.json`, look up its `imports` field, and resolve the
+    // matched entry relative to that package's root. Conditional
+    // exports collapse to `node` → `default` (we don't support
+    // `import` vs `require` discrimination since we have a single
+    // require-shaped resolver). Returns the absolute path or null.
+    function resolveSubpathImport(name, fromDir) {
+        var dir = fromDir;
+        if (typeof dir !== 'string' || dir.length === 0) dir = '/';
+        for (var i = 0; i < 64; i++) {
+            var pkgPath = dir + '/package.json';
+            if (fsExists(pkgPath)) {
+                var raw = fsRead(pkgPath);
+                if (typeof raw === 'string') {
+                    var pkg;
+                    try { pkg = JSON.parse(raw); } catch (_) { pkg = null; }
+                    if (pkg && pkg.imports && typeof pkg.imports === 'object') {
+                        var entry = pkg.imports[name];
+                        if (entry === undefined) {
+                            // Pattern subpath imports like
+                            // `#feature/*` would land here in Node.
+                            // We don't support patterns yet — fall
+                            // through to upper package.json.
+                        } else {
+                            var relative = pickConditional(entry);
+                            if (typeof relative === 'string') {
+                                var abs = resolveJoin(dir, relative);
+                                var r = resolveCandidate(abs);
+                                if (r) return r;
+                            }
+                        }
+                    }
+                }
+            }
+            var parent = dirname(dir);
+            if (parent === dir) break;
+            dir = parent;
+        }
+        return null;
+    }
+
+    // Conditional-exports resolver: pick `node` then `default` then
+    // the first string entry. Strings are returned as-is.
+    function pickConditional(entry) {
+        if (typeof entry === 'string') return entry;
+        if (entry && typeof entry === 'object') {
+            if (typeof entry.node === 'string') return entry.node;
+            if (typeof entry.default === 'string') return entry.default;
+            // Object form with `import`/`require` — prefer require shape
+            // since we resolve through a CJS lens.
+            if (typeof entry.require === 'string') return entry.require;
+            if (typeof entry.import === 'string') return entry.import;
+            // Recurse into nested condition objects (e.g. `node: {default}`).
+            for (var k in entry) {
+                if (typeof entry[k] === 'object') {
+                    var nested = pickConditional(entry[k]);
+                    if (nested) return nested;
+                }
+            }
+        }
+        return null;
     }
 
     // Walk up `fromDir` looking for `node_modules/<name>`. Returns the
@@ -292,8 +377,33 @@
         return null;
     }
 
+    // Cache stores `module` records, not bare `module.exports`. This
+    // mirrors Node's `require.cache` shape (`{ [path]: Module }` —
+    // `Module.exports` resolved at read-time) and is the ONLY way
+    // circular requires work correctly: when `a.js` partially loads
+    // and requires `b.js`, which requires `a.js` back, `b.js` must
+    // see the LATEST `a.js` exports object — including any
+    // `module.exports = NewClass` reassignment that happened between
+    // the cache install and the cycle re-entry. Caching the bare
+    // `module.exports` snapshot misses every such reassignment and
+    // hands cycles a stale empty object, which surfaces in user code
+    // as `parent class must be constructor` or
+    // `Cannot read property 'X' of undefined`.
+    function getCached(path) {
+        var rec = cache[path];
+        if (rec === undefined) return undefined;
+        // JSON modules are cached as the parsed value directly; only
+        // module records have an `exports` property + `loaded` flag.
+        if (rec && typeof rec === 'object' && Object.prototype.hasOwnProperty.call(rec, 'exports')
+            && Object.prototype.hasOwnProperty.call(rec, 'filename')) {
+            return rec.exports;
+        }
+        return rec;
+    }
+
     function loadAbsoluteFile(absPath, scopedRequire) {
-        if (cache[absPath] !== undefined) return cache[absPath];
+        var cached = getCached(absPath);
+        if (cached !== undefined) return cached;
         var source = fsRead(absPath);
         if (source === null) {
             var ePerm = new Error("Cannot find module '" + absPath + "'");
@@ -309,20 +419,72 @@
         // oxc-based transpiler before landing in the CJS wrapper.
         // Plain .js / .cjs pass through untouched.
         source = maybeTranspile(source, absPath);
+        // Node strips a leading hashbang before handing source to V8;
+        // QuickJS rejects `#!`. Replace with `//` so line numbers
+        // stay aligned with the on-disk file. Also drops a UTF-8 BOM
+        // if one is present (which would otherwise reach the Function
+        // constructor and parse-fail the same way).
+        if (source.charCodeAt(0) === 0xFEFF) {
+            source = source.slice(1);
+        }
+        if (source.charCodeAt(0) === 0x23 /* # */ &&
+            source.charCodeAt(1) === 0x21 /* ! */) {
+            source = '//' + source.slice(2);
+        }
+        // Dynamic `import(spec)` has no module loader registered in
+        // QuickJS, so the bare expression throws "could not load
+        // module 'X'" the moment it runs. Rewrite to a require-based
+        // shim BEFORE the source reaches the Function constructor.
+        // This keeps the npm / corepack / yarn dispatch chain
+        // (which uses `await import('chalk')`) functional under our
+        // CJS-shaped require resolver. The shim resolves to a
+        // namespace-shaped object (matches Node's CJS-from-ESM
+        // interop). The pattern is conservative — only `import(`
+        // followed by a non-`.` (excludes `import.meta` /
+        // `imports.foo`) and not preceded by an identifier char
+        // (excludes `aimport(`). Strings/comments containing
+        // `import(` are a known false-positive but vanishingly rare
+        // in distributed npm packages.
+        if (source.indexOf('import(') >= 0 || source.indexOf('import (') >= 0) {
+            // Capture the closure-scoped `require` as the FIRST arg so
+            // the import resolves relative to *this* file's dir, not
+            // the entry script's. Async dynamic imports inside class
+            // methods would otherwise lose the active-require frame
+            // by the time they fire.
+            source = source.replace(
+                /([^A-Za-z0-9_$]|^)import(\s*)\(/g,
+                '$1globalThis.__ab_dyn_import$2(require,'
+            );
+        }
         // Node CJS wrapper — `module.exports` / `exports` are the
         // user-visible outputs; `require` is the scoped copy; the two
         // `__filename` / `__dirname` bindings match Node.
         var modObj = { exports: {}, filename: absPath, loaded: false };
-        // Install before invoking so cyclic requires see a partial
-        // exports object rather than triggering an infinite loop.
-        cache[absPath] = modObj.exports;
+        // Install the MODULE record (not the exports snapshot) before
+        // invoking the user body. Cycles look up `cache[absPath]` and
+        // pull `.exports` at access time — so any
+        // `module.exports = NewClass` reassignment inside the user
+        // body is visible to a re-entrant require immediately.
+        cache[absPath] = modObj;
         var dir = dirname(absPath);
         try {
             var fn = new Function(
                 'module', 'exports', 'require', '__filename', '__dirname',
                 source
             );
-            fn(modObj, modObj.exports, scopedRequire, absPath, dir);
+            // Stash the current scoped require before running the
+            // user body so dynamic `import(...)` (rewritten to
+            // `__ab_dyn_import(spec)`) walks `node_modules` from the
+            // importing file's dir. JS is single-threaded so the
+            // simple save/restore is race-free; nested requires nest
+            // their saves naturally.
+            var prevActive = globalThis.__ab_active_require;
+            globalThis.__ab_active_require = scopedRequire;
+            try {
+                fn(modObj, modObj.exports, scopedRequire, absPath, dir);
+            } finally {
+                globalThis.__ab_active_require = prevActive;
+            }
         } catch (e) {
             // Broken module — evict so a retry can re-run the factory
             // cleanly.
@@ -330,7 +492,6 @@
             throw e;
         }
         modObj.loaded = true;
-        cache[absPath] = modObj.exports;
         return modObj.exports;
     }
 
@@ -377,6 +538,21 @@
             // those should short-circuit the filesystem lookup.
             var preregistered = loadStdlib(stripNodePrefix(name));
             if (preregistered !== undefined) return preregistered;
+
+            // Subpath imports (`#name`) — Node looks up the closest
+            // package.json's `imports` field and resolves the matched
+            // entry relative to that package root. ESM-only npm
+            // packages (chalk, ora) ship internal deps like
+            // `#ansi-styles` via this mechanism.
+            if (name.charAt(0) === '#') {
+                var resolvedSubpath = resolveSubpathImport(name, fromDir);
+                if (resolvedSubpath) {
+                    return loadAbsoluteFile(resolvedSubpath, makeRequire(dirname(resolvedSubpath)));
+                }
+                var eImp = new Error("Cannot find module '" + name + "'");
+                eImp.code = 'ERR_PACKAGE_IMPORT_NOT_DEFINED';
+                throw eImp;
+            }
 
             if (isRelativeOrAbsolute(name)) {
                 var base = name.charAt(0) === '/' ? name : resolveJoin(fromDir, name);
@@ -473,6 +649,54 @@
     // starting dir. Called from the plugin's script/daemon-init
     // wrappers immediately after they set `__host_cwd`.
     globalThis.__plenum_refresh_entry_require = installEntryRequire;
+
+    // Dynamic-import shim. QuickJS has no registered module loader,
+    // so bare `import('foo')` throws "could not load module" the
+    // moment it runs — that breaks every npm-side dispatcher (npm
+    // imports `chalk` / `supports-color`; corepack imports the proxy
+    // agent; pnpm imports its own engine). At source-rewrite time
+    // we replace `import(` with `globalThis.__ab_dyn_import(`; this
+    // function returns a Promise resolving to the module's
+    // namespace-shaped object, matching Node's CJS-from-ESM interop:
+    // CJS modules whose `module.exports` is an object are returned
+    // as-is; anything else is wrapped under `default`.
+    globalThis.__ab_dyn_import = function(reqOrSpec, maybeSpec) {
+        // Two-arg shape: rewriter passes `(require, spec)` so the
+        // import resolves relative to the importing file's dir.
+        // One-arg shape: entry-script eval / CLI code that's outside
+        // a CJS wrapper — fall back to the entry require.
+        var r;
+        var spec;
+        if (typeof maybeSpec !== 'undefined' && typeof reqOrSpec === 'function') {
+            r = reqOrSpec;
+            spec = maybeSpec;
+        } else {
+            r = globalThis.require;
+            spec = reqOrSpec;
+        }
+        try {
+            var mod = r(spec);
+            // Already namespace-shaped (ESM-lowered files include
+            // `__esModule: true` + named keys, plus `default`).
+            if (mod && typeof mod === 'object' && mod.__esModule) {
+                return Promise.resolve(mod);
+            }
+            // CJS fallback: synthesise a namespace with `default` set
+            // to the require result. Spread the object's enumerable
+            // keys so `import('cjs').namedExport` still works when
+            // the CJS module exports a plain object.
+            var ns = { default: mod };
+            if (mod && typeof mod === 'object') {
+                for (var k in mod) {
+                    if (k === 'default') continue;
+                    ns[k] = mod[k];
+                }
+            }
+            return Promise.resolve(ns);
+        } catch (e) {
+            return Promise.reject(e);
+        }
+    };
 })();
 
 // ---- abort.js ----
@@ -1297,11 +1521,6 @@ __register_module('console', function(module, exports, require) {
 });
 
 (function bootstrapConsole() {
-    if (globalThis.console) {
-        // Runtime already has a console (Javy on wasm, etc.) — leave it.
-        return;
-    }
-
     function resolveHost() {
         return typeof globalThis.__host_log === 'function' ? globalThis.__host_log : null;
     }
@@ -1333,7 +1552,15 @@ __register_module('console', function(module, exports, require) {
         };
     }
 
-    var c = {
+    // Build the full Node-shaped console contract. On wasm Javy ships
+    // its own `globalThis.console` with just `log`/`error`; we keep
+    // those (they write directly to fd 1/2 — strictly better than the
+    // host-log bridge) and only fill in the methods Javy doesn't
+    // provide. Missing methods like `assert`/`warn`/`info`/`debug`
+    // are what break npm/pnpm/clipanion deep in their bundles, so the
+    // fill-in is non-optional.
+    var existing = globalThis.console || {};
+    var defaults = {
         log:     logAt('info'),
         info:    logAt('info'),
         warn:    logAt('warn'),
@@ -1354,14 +1581,28 @@ __register_module('console', function(module, exports, require) {
                 logAt('error').apply(null, ['Assertion failed:'].concat(args));
             }
         },
-        group:   function() {},
-        groupEnd:function() {},
-        time:    function() {},
-        timeEnd: function() {},
-        table:   function(t) { logAt('info')(JSON.stringify(t, null, 2)); }
+        group:    function() {},
+        groupCollapsed: function() {},
+        groupEnd: function() {},
+        count:    function() {},
+        countReset: function() {},
+        time:     function() {},
+        timeLog:  function() {},
+        timeEnd:  function() {},
+        timeStamp: function() {},
+        profile:  function() {},
+        profileEnd: function() {},
+        table:    function(t) { logAt('info')(JSON.stringify(t, null, 2)); },
+        dirxml:   function() { logAt('info').apply(null, arguments); },
+        clear:    function() {},
+        Console:  function Console() { return existing; },
     };
-
-    globalThis.console = c;
+    for (var name in defaults) {
+        if (typeof existing[name] !== 'function') {
+            existing[name] = defaults[name];
+        }
+    }
+    globalThis.console = existing;
 })();
 
 // ---- crypto.js ----
@@ -1515,6 +1756,21 @@ __register_module('crypto', function(module, exports, require) {
 
     exports.createHash = function(algorithm) { return new Hash(algorithm); };
     exports.createHmac = function(algorithm, key) { return new Hmac(algorithm, key); };
+
+    // Supported hash + cipher catalogues. Keep these aligned with the
+    // host's crypto bridge — packaging tools (npm/ssri/node-tap) call
+    // `getHashes()` at module-init time and crash with TypeError when
+    // it is missing.
+    var SUPPORTED_HASHES = [
+        'md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512'
+    ];
+    var SUPPORTED_CIPHERS = [
+        'aes-128-cbc', 'aes-192-cbc', 'aes-256-cbc',
+        'aes-128-gcm', 'aes-192-gcm', 'aes-256-gcm'
+    ];
+    exports.getHashes  = function() { return SUPPORTED_HASHES.slice(); };
+    exports.getCiphers = function() { return SUPPORTED_CIPHERS.slice(); };
+    exports.getCurves  = function() { return ['P-256', 'P-384', 'P-521']; };
 
     exports.randomBytes = function(len, encoding) {
         var enc = typeof encoding === 'string' ? encoding : 'hex';
@@ -2893,16 +3149,108 @@ __register_module('fs', function(module, exports, require) {
         return typeof fn === 'function' ? fn(String(path)) : false;
     };
 
+    // Fully fleshed-out Stats object. Node's `Stats` exposes seven
+    // type-test methods (isFile / isDirectory / isSymbolicLink /
+    // isBlockDevice / isCharacterDevice / isSocket / isFIFO) plus a
+    // handful of mode/ino/size/mtime/atime/ctime/birthtime fields and
+    // their `*Ms` counterparts. Libraries like path-scurry and chokidar
+    // call `entToType(s)` over every field; missing methods crash with
+    // "not a function" deep in their walkers. The host gives us file/
+    // directory bits via `stat_sync`; everything else is `false` (we
+    // don't surface block/char/socket/fifo through the bridge today).
+    function shapeStats(parsed) {
+        var s = parsed || {};
+        s.isFile             = wrapBool(!!s.isFile);
+        s.isDirectory        = wrapBool(!!s.isDirectory);
+        s.isSymbolicLink     = wrapBool(!!s.isSymbolicLink);
+        s.isBlockDevice      = wrapBool(!!s.isBlockDevice);
+        s.isCharacterDevice  = wrapBool(!!s.isCharacterDevice);
+        s.isSocket           = wrapBool(!!s.isSocket);
+        s.isFIFO             = wrapBool(!!s.isFIFO);
+        if (typeof s.mode  !== 'number') s.mode  = s.isDirectory() ? 0o040755 : 0o100644;
+        if (typeof s.size  !== 'number') s.size  = 0;
+        if (typeof s.ino   !== 'number') s.ino   = 0;
+        if (typeof s.dev   !== 'number') s.dev   = 0;
+        if (typeof s.nlink !== 'number') s.nlink = 1;
+        if (typeof s.uid   !== 'number') s.uid   = 0;
+        if (typeof s.gid   !== 'number') s.gid   = 0;
+        if (typeof s.rdev  !== 'number') s.rdev  = 0;
+        if (typeof s.blksize !== 'number') s.blksize = 4096;
+        if (typeof s.blocks  !== 'number') s.blocks  = Math.ceil(s.size / 512);
+        // Time fields. Node exposes both `ms` numeric and Date-shaped.
+        var nowMs = (typeof s.mtimeMs === 'number') ? s.mtimeMs : Date.now();
+        if (typeof s.atimeMs !== 'number')    s.atimeMs    = nowMs;
+        if (typeof s.mtimeMs !== 'number')    s.mtimeMs    = nowMs;
+        if (typeof s.ctimeMs !== 'number')    s.ctimeMs    = nowMs;
+        if (typeof s.birthtimeMs !== 'number') s.birthtimeMs = nowMs;
+        if (!s.atime)     s.atime     = new Date(s.atimeMs);
+        if (!s.mtime)     s.mtime     = new Date(s.mtimeMs);
+        if (!s.ctime)     s.ctime     = new Date(s.ctimeMs);
+        if (!s.birthtime) s.birthtime = new Date(s.birthtimeMs);
+        return s;
+    }
+    function wrapBool(v) { return function() { return v; }; }
+
     exports.statSync = function(path) {
         var raw = checkHostError(requireHost('stat_sync')(String(path)), 'statSync');
-        var parsed = JSON.parse(raw);
-        parsed.isFile = (function(v) { return function() { return v; }; })(parsed.isFile);
-        parsed.isDirectory = (function(v) { return function() { return v; }; })(parsed.isDirectory);
-        return parsed;
+        return shapeStats(JSON.parse(raw));
+    };
+    // lstatSync — Node's `lstat` differs from `stat` only for
+    // symlinks (it returns info about the link itself). The sandbox
+    // bridge doesn't surface symlink-specific bits today; falling
+    // back to `statSync` matches the symlink-followed posture we
+    // already have for `readFileSync` / `readdirSync`.
+    exports.lstatSync = function(path) {
+        return exports.statSync(path);
+    };
+
+    // readlinkSync — no host bridge, so fail with ENOSYS so callers
+    // can fall through (most archive / module-resolution code probes
+    // and degrades gracefully when readlink fails).
+    exports.readlinkSync = function(path) {
+        var fn = globalThis.__host_fs_readlink_sync;
+        if (typeof fn === 'function') {
+            return checkHostError(fn(String(path)), 'readlinkSync');
+        }
+        var e = new Error("readlinkSync is not implemented");
+        e.code = 'ENOSYS';
+        throw e;
+    };
+
+    // accessSync — Node uses bitwise mode constants. We map any
+    // mode to `existsSync`, which is the semantic the vast majority
+    // of consumers care about (does the path exist + is reachable).
+    var F_OK = 0, R_OK = 4, W_OK = 2, X_OK = 1;
+    exports.accessSync = function(path, _mode) {
+        if (!exports.existsSync(path)) {
+            var e = new Error("ENOENT: no such file or directory, access '" + String(path) + "'");
+            e.code = 'ENOENT';
+            e.errno = -2;
+            e.path = String(path);
+            throw e;
+        }
     };
 
     exports.readdirSync = function(path) {
-        return requireHost('readdir_sync')(String(path));
+        // The host returns either an array of entries (success) or a
+        // string starting with `__HOST_ERR__:` (failure — non-existent
+        // path, permission denied, etc). Throwing on the error string
+        // matches Node's contract and prevents callers from iterating
+        // a single string as if it were a directory entry.
+        var result = requireHost('readdir_sync')(String(path));
+        if (typeof result === 'string' && result.indexOf('__HOST_ERR__:') === 0) {
+            var msg = result.slice('__HOST_ERR__:'.length);
+            var err = new Error("ENOENT: no such file or directory, scandir '" + String(path) + "'");
+            err.code = 'ENOENT';
+            err.errno = -2;
+            err.syscall = 'scandir';
+            err.path = String(path);
+            // Preserve the original detail in case callers introspect
+            // beyond `code`.
+            err.message = err.message + ' (' + msg + ')';
+            throw err;
+        }
+        return result;
     };
 
     exports.mkdirSync = function(path, options) {
@@ -2916,6 +3264,157 @@ __register_module('fs', function(module, exports, require) {
 
     exports.renameSync = function(from, to) {
         requireHost('rename_sync')(String(from), String(to));
+    };
+
+    // Append. Build on readFileSync + writeFileSync — atomic-ish for
+    // small files which is the only shape we'd hit in the sandbox.
+    exports.appendFileSync = function(path, data, options) {
+        var existing;
+        try { existing = exports.readFileSync(path); } catch (_) { existing = ''; }
+        var combined;
+        if (Buffer.isBuffer(existing) || Buffer.isBuffer(data)) {
+            combined = Buffer.concat([
+                Buffer.isBuffer(existing) ? existing : Buffer.from(String(existing)),
+                Buffer.isBuffer(data) ? data : Buffer.from(String(data))
+            ]);
+        } else {
+            combined = String(existing) + String(data);
+        }
+        exports.writeFileSync(path, combined, options);
+    };
+
+    // copyFileSync — straight read-then-write, matches Node when
+    // `flags` is the default 0 (copy contents, overwrite if exists).
+    exports.copyFileSync = function(src, dst, _flags) {
+        var data = exports.readFileSync(src);
+        exports.writeFileSync(dst, data);
+    };
+
+    // truncateSync — read existing, truncate, rewrite. Sandbox-wide
+    // libraries (npm, tar, etc.) only ever truncate small lockfiles
+    // so the read+write path is fine.
+    exports.truncateSync = function(path, len) {
+        len = len || 0;
+        var existing;
+        try { existing = exports.readFileSync(path); } catch (_) { existing = Buffer.alloc(0); }
+        var buf = Buffer.isBuffer(existing) ? existing : Buffer.from(String(existing));
+        var truncated = buf.slice(0, len);
+        exports.writeFileSync(path, truncated);
+    };
+
+    // rmdirSync / rmSync — no host bridge for recursive dir removal,
+    // so we walk the tree and delete leaves. Slow for huge trees but
+    // correct for lockfile / cache cleanup the sandbox actually sees.
+    function _rmDir(path) {
+        var entries;
+        try { entries = exports.readdirSync(path); } catch (e) { entries = []; }
+        for (var i = 0; i < entries.length; i++) {
+            var child = String(path) + '/' + entries[i];
+            var s;
+            try { s = exports.statSync(child); } catch (_) { continue; }
+            if (s.isDirectory()) _rmDir(child);
+            else { try { exports.unlinkSync(child); } catch (_) {} }
+        }
+        try { requireHost('unlink_sync')(String(path)); } catch (_) {}
+    }
+    exports.rmdirSync = function(path, options) {
+        if (options && options.recursive) { _rmDir(path); return; }
+        try { requireHost('unlink_sync')(String(path)); }
+        catch (e) {
+            // Some hosts route directory removal through a separate fn;
+            // fall back to the recursive walker if it's empty.
+            _rmDir(path);
+        }
+    };
+    exports.rmSync = function(path, options) {
+        options = options || {};
+        if (!exports.existsSync(path)) {
+            if (options.force) return;
+            var e = new Error("ENOENT: no such file or directory, rm '" + String(path) + "'");
+            e.code = 'ENOENT';
+            throw e;
+        }
+        var s;
+        try { s = exports.statSync(path); } catch (_) { s = null; }
+        if (s && s.isDirectory()) {
+            if (options.recursive) _rmDir(path);
+            else {
+                var ee = new Error("EISDIR: illegal operation on a directory, rm '" + String(path) + "'");
+                ee.code = 'EISDIR';
+                throw ee;
+            }
+        } else {
+            try { exports.unlinkSync(path); } catch (e) { if (!options.force) throw e; }
+        }
+    };
+
+    // mkdtempSync — atomic-name temp dir creation. Use a 6-char
+    // suffix matching Node's contract.
+    exports.mkdtempSync = function(prefix) {
+        var p = String(prefix);
+        for (var attempt = 0; attempt < 16; attempt++) {
+            var rnd = Math.floor(Math.random() * 0xFFFFFF).toString(16).padStart(6, '0');
+            var name = p + rnd;
+            try {
+                requireHost('mkdir_sync')(name, false);
+                return name;
+            } catch (_) { /* collision — try again */ }
+        }
+        var e = new Error("mkdtempSync: failed to create unique directory");
+        e.code = 'EEXIST';
+        throw e;
+    };
+
+    // No-op chmod / chown / utimes / link / symlink / lchown —
+    // the sandbox doesn't grant arbitrary metadata mutation, but
+    // libraries that defensively call these (npm cache, tar
+    // extraction) expect them to silently succeed when the
+    // operation is harmless.
+    exports.chmodSync   = function(_p, _m) {};
+    exports.fchmodSync  = function(_fd, _m) {};
+    exports.lchmodSync  = function(_p, _m) {};
+    exports.chownSync   = function(_p, _u, _g) {};
+    exports.fchownSync  = function(_fd, _u, _g) {};
+    exports.lchownSync  = function(_p, _u, _g) {};
+    exports.utimesSync  = function(_p, _a, _m) {};
+    exports.lutimesSync = function(_p, _a, _m) {};
+    exports.futimesSync = function(_fd, _a, _m) {};
+    exports.linkSync    = function(existing, target) {
+        // Best-effort: copy contents. Hard-link semantics are not
+        // representable through the bridge, but most callers only
+        // need the file to exist at the new path.
+        exports.copyFileSync(existing, target);
+    };
+    exports.symlinkSync = function(target, p, _type) {
+        // Same posture as linkSync — copy. Real symlink behavior
+        // (lstat differing from stat) isn't representable.
+        try { exports.copyFileSync(target, p); }
+        catch (e) {
+            // Source missing is the typical npm install case for
+            // workspace symlinks; fail loudly so callers can
+            // fall through to a real install path.
+            throw e;
+        }
+    };
+
+    // fs constants. Most tools probe `fs.constants.{F,R,W,X}_OK`
+    // (access mode flags) and `O_*` (open flag bits). Linux numeric
+    // values; we mirror Node's table.
+    exports.constants = {
+        F_OK: F_OK, R_OK: R_OK, W_OK: W_OK, X_OK: X_OK,
+        O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, O_CREAT: 64, O_EXCL: 128,
+        O_NOCTTY: 256, O_TRUNC: 512, O_APPEND: 1024, O_DIRECTORY: 65536,
+        O_NOATIME: 262144, O_NOFOLLOW: 131072, O_SYNC: 1052672,
+        O_DSYNC: 4096, O_SYMLINK: 0, O_DIRECT: 16384, O_NONBLOCK: 2048,
+        S_IFMT: 0o170000, S_IFREG: 0o100000, S_IFDIR: 0o040000,
+        S_IFCHR: 0o020000, S_IFBLK: 0o060000, S_IFIFO: 0o010000,
+        S_IFLNK: 0o120000, S_IFSOCK: 0o140000,
+        S_IRWXU: 0o700, S_IRUSR: 0o400, S_IWUSR: 0o200, S_IXUSR: 0o100,
+        S_IRWXG: 0o070, S_IRGRP: 0o040, S_IWGRP: 0o020, S_IXGRP: 0o010,
+        S_IRWXO: 0o007, S_IROTH: 0o004, S_IWOTH: 0o002, S_IXOTH: 0o001,
+        UV_FS_COPYFILE_EXCL: 1, COPYFILE_EXCL: 1,
+        UV_FS_COPYFILE_FICLONE: 2, COPYFILE_FICLONE: 2,
+        UV_FS_COPYFILE_FICLONE_FORCE: 4, COPYFILE_FICLONE_FORCE: 4,
     };
 
     // ---- streaming -----------------------------------------------------
@@ -3157,17 +3656,61 @@ __register_module('fs', function(module, exports, require) {
     exports.Dir = Dir;
     exports.Dirent = Dirent;
 
-    // Augment readdirSync with `withFileTypes` support — the existing
-    // overload returns a plain string array; opendir_sync gives us
-    // typed entries.
+    // Augment readdirSync with `withFileTypes` and `recursive` support
+    // (Node 22+). The existing overload returns a plain string array;
+    // opendir_sync gives us typed entries. `recursive: true` walks
+    // the tree depth-first and returns paths relative to `path`.
     var _readdirSyncBasic = exports.readdirSync;
     exports.readdirSync = function(path, options) {
-        if (options && options.withFileTypes) {
+        var recursive = !!(options && options.recursive);
+        var withFileTypes = !!(options && options.withFileTypes);
+        var encoding = options && options.encoding;
+        if (recursive) {
+            // DFS walk. `parentPath` on Dirent is set to the dir we
+            // listed (Node 20+ contract); names are relative to `path`.
+            var rootStr = String(path);
+            var out = [];
+            var stack = [{ dir: rootStr, prefix: '' }];
+            while (stack.length) {
+                var top = stack.pop();
+                var children;
+                try { children = rawDirEntries(top.dir); }
+                catch (_) { children = []; }
+                for (var i = 0; i < children.length; i++) {
+                    var c = children[i];
+                    var rel = top.prefix ? (top.prefix + '/' + c.name) : c.name;
+                    var abs = top.dir + '/' + c.name;
+                    if (withFileTypes) {
+                        var d = new Dirent(c, top.dir);
+                        // Node-26 path field — the absolute joined path.
+                        d.path = abs;
+                        d.parentPath = top.dir;
+                        out.push(d);
+                    } else {
+                        out.push(rel);
+                    }
+                    if (c.isDir) {
+                        stack.push({ dir: abs, prefix: rel });
+                    }
+                }
+            }
+            return out;
+        }
+        if (withFileTypes) {
             var entries = rawDirEntries(path);
             var pp = String(path);
-            return entries.map(function(e) { return new Dirent(e, pp); });
+            return entries.map(function(e) {
+                var d = new Dirent(e, pp);
+                d.parentPath = pp;
+                d.path = pp + '/' + e.name;
+                return d;
+            });
         }
-        return _readdirSyncBasic(path);
+        var raw = _readdirSyncBasic(path);
+        if (encoding === 'buffer') {
+            return raw.map(function(n) { return Buffer.from(String(n)); });
+        }
+        return raw;
     };
 
     // ----- watch (polling-based FSWatcher) ----------------------------
@@ -3369,7 +3912,15 @@ __register_module('fs', function(module, exports, require) {
     // ----- fs.promises ------------------------------------------------
 
     exports.promises = {};
-    ['readFile','writeFile','stat','readdir','mkdir','unlink','rename'].forEach(function(name) {
+    // Auto-promisify every sync function that has a 1:1 promise twin.
+    // Node 26 keeps these stable; if the upstream surface grows,
+    // adding a new entry here is enough.
+    [
+        'readFile','writeFile','stat','lstat','readdir','mkdir',
+        'unlink','rename','readlink','access','chmod','fchmod','lchmod',
+        'chown','fchown','lchown','utimes','lutimes','futimes','link',
+        'symlink','copyFile','appendFile','truncate','mkdtemp','rmdir','rm',
+    ].forEach(function(name) {
         exports.promises[name] = function() {
             var args = [].slice.call(arguments);
             var syncName = name + 'Sync';
@@ -3379,8 +3930,6 @@ __register_module('fs', function(module, exports, require) {
             });
         };
     });
-    // Common aliases.
-    exports.promises.rm = exports.promises.unlink;
 
     // New promise-only entries.
     exports.promises.realpath = function(path) {
@@ -3444,6 +3993,202 @@ __register_module('fs', function(module, exports, require) {
         });
     };
     exports.FileHandle = FileHandle;
+
+    // Node 22+ added `fs.glob` / `fs.globSync` / `fs.promises.glob`
+    // for pattern-matched directory walks. We don't pull in a full
+    // micromatch engine; libraries that genuinely need glob semantics
+    // import the `glob` npm package, which works on top of
+    // `readdirSync` / `lstatSync`. The shim returns the bare-leaf
+    // shape (no globs interpreted) so callers that pass a literal
+    // path get the right answer and pattern callers fall through to
+    // the empty-result path matching Node's no-match behavior.
+    function _matchPattern(pattern, root) {
+        var p = String(pattern);
+        // Literal path passthrough — no `*` / `?` / `[` markers.
+        if (!/[*?[]/.test(p)) {
+            try {
+                exports.statSync(p);
+                return [p];
+            } catch (_) { return []; }
+        }
+        // For pattern globs, walk the directory and return entries
+        // whose name matches the trailing star-segment. Cheap but
+        // correct enough for the npm log-cleanup `*.log` case.
+        var slash = p.lastIndexOf('/');
+        var dir = slash >= 0 ? p.slice(0, slash) : (root || '.');
+        var rest = slash >= 0 ? p.slice(slash + 1) : p;
+        var re = new RegExp('^' + rest
+            .replace(/[.+^${}()|\\]/g, '\\$&')
+            .replace(/\*/g, '.*')
+            .replace(/\?/g, '.') + '$');
+        var entries;
+        try { entries = exports.readdirSync(dir); }
+        catch (_) { return []; }
+        var out = [];
+        for (var i = 0; i < entries.length; i++) {
+            if (re.test(entries[i])) out.push(dir + '/' + entries[i]);
+        }
+        return out;
+    }
+    exports.globSync = function(pattern, options) {
+        var pats = Array.isArray(pattern) ? pattern : [pattern];
+        var cwd = (options && options.cwd) ? String(options.cwd) : (typeof globalThis.__host_cwd === 'string' ? globalThis.__host_cwd : '.');
+        var seen = {};
+        var out = [];
+        for (var i = 0; i < pats.length; i++) {
+            var matches = _matchPattern(pats[i], cwd);
+            for (var j = 0; j < matches.length; j++) {
+                if (!seen[matches[j]]) { seen[matches[j]] = true; out.push(matches[j]); }
+            }
+        }
+        return out;
+    };
+    exports.glob = function(pattern, options, cb) {
+        if (typeof options === 'function') { cb = options; options = undefined; }
+        Promise.resolve().then(function() {
+            try { cb(null, exports.globSync(pattern, options)); }
+            catch (e) { cb(e); }
+        });
+    };
+    exports.promises.glob = function(pattern, options) {
+        return new Promise(function(resolve, reject) {
+            try { resolve(exports.globSync(pattern, options)); }
+            catch (e) { reject(e); }
+        });
+    };
+
+    // Callback-style entry points for every sync function. Node ships
+    // both shapes for the entire fs surface; libraries (path-scurry,
+    // chokidar, npm's lockfile cleanup) call the callback form
+    // directly. We auto-wrap each `*Sync` in an async-callback shim
+    // — the result fires on a microtask so handlers attached after
+    // dispatch see it (matches Node's CB-after-IO contract).
+    var CALLBACK_NAMES = [
+        'readFile','writeFile','appendFile','stat','lstat','fstat','exists',
+        'readdir','mkdir','rmdir','rm','unlink','rename','readlink','access',
+        'chmod','fchmod','lchmod','chown','fchown','lchown','utimes','lutimes',
+        'futimes','link','symlink','copyFile','truncate','mkdtemp','realpath',
+    ];
+    CALLBACK_NAMES.forEach(function(name) {
+        if (typeof exports[name] === 'function') return; // already defined (e.g. realpath)
+        var syncName = name + 'Sync';
+        if (typeof exports[syncName] !== 'function') return; // sync entry missing
+        exports[name] = function() {
+            var args = [].slice.call(arguments);
+            var cb = (typeof args[args.length - 1] === 'function') ? args.pop() : null;
+            // Schedule on a microtask so the cb fires after the
+            // calling expression returns — matches Node's
+            // async-callback contract for code like:
+            //   `const r = fs.readdir(path, opts, cb); /* … */`.
+            Promise.resolve().then(function() {
+                try {
+                    var r = exports[syncName].apply(null, args);
+                    if (cb) cb(null, r);
+                } catch (e) {
+                    if (cb) cb(e);
+                }
+            });
+        };
+    });
+    // existsSync's callback form has a single-arg shape (no err).
+    exports.exists = function(path, cb) {
+        Promise.resolve().then(function() {
+            if (cb) cb(exports.existsSync(path));
+        });
+    };
+
+    // `fs.writev` / `writevSync` — vectored writes. fs-minipass
+    // gates a libuv-binding fallback on `!fs.writev`, so providing
+    // even a sequential implementation skips the binding path
+    // entirely. The fd is the path-keyed handle from FileHandle /
+    // openSync; we serialise the iovec by concatenating buffers
+    // and dispatching one write per call. `position === null` means
+    // "current position" (Node default); a numeric value seeks first.
+    exports.writevSync = function(fd, buffers, position) {
+        var total = 0;
+        var pos = (typeof position === 'number') ? position : 0;
+        // FileHandle stores its path on `_path`; for raw numeric fds
+        // we don't have a path mapping and fall through to sync write
+        // via the chunk bridge.
+        var path = (fd && typeof fd === 'object' && fd._path) ? fd._path : String(fd);
+        var writeFn = globalThis.__host_fs_write_chunk;
+        if (typeof writeFn !== 'function') {
+            throw new Error('fs.writev: not available');
+        }
+        for (var i = 0; i < buffers.length; i++) {
+            var b = buffers[i];
+            var bb = Buffer.isBuffer(b) ? b : Buffer.from(b);
+            var raw = writeFn(path, pos, bb.toString('base64'));
+            if (typeof raw === 'string' && raw.indexOf('__HOST_ERR__:') === 0) {
+                throw new Error('fs: ' + raw.slice('__HOST_ERR__:'.length));
+            }
+            pos += bb.length;
+            total += bb.length;
+        }
+        return total;
+    };
+    exports.writev = function(fd, buffers, position, cb) {
+        if (typeof position === 'function') { cb = position; position = null; }
+        Promise.resolve().then(function() {
+            try {
+                var n = exports.writevSync(fd, buffers, position);
+                if (cb) cb(null, n, buffers);
+            } catch (e) { if (cb) cb(e); }
+        });
+    };
+    // `fs.readv` — gather-read vectored. Same posture: serialise.
+    exports.readvSync = function(fd, buffers, position) {
+        var total = 0;
+        var pos = (typeof position === 'number') ? position : 0;
+        var path = (fd && typeof fd === 'object' && fd._path) ? fd._path : String(fd);
+        var readFn = globalThis.__host_fs_read_chunk;
+        if (typeof readFn !== 'function') {
+            throw new Error('fs.readv: not available');
+        }
+        for (var i = 0; i < buffers.length; i++) {
+            var b = buffers[i];
+            var want = b.length;
+            var raw = readFn(path, pos, want);
+            if (typeof raw === 'string' && raw.indexOf('__HOST_ERR__:') === 0) {
+                throw new Error('fs: ' + raw.slice('__HOST_ERR__:'.length));
+            }
+            var got = Buffer.from(raw, 'base64');
+            got.copy(b, 0, 0, Math.min(got.length, want));
+            pos += got.length;
+            total += got.length;
+            if (got.length < want) break;
+        }
+        return total;
+    };
+    exports.readv = function(fd, buffers, position, cb) {
+        if (typeof position === 'function') { cb = position; position = null; }
+        Promise.resolve().then(function() {
+            try {
+                var n = exports.readvSync(fd, buffers, position);
+                if (cb) cb(null, n, buffers);
+            } catch (e) { if (cb) cb(e); }
+        });
+    };
+
+    // `fs.openAsBlob` — Node 19+. Returns a Blob backed by the
+    // file's content. Sandbox-safe: we read eagerly via the host
+    // bridge (no streaming Blob support yet, but the shape is
+    // there for libraries that probe).
+    exports.openAsBlob = function(path, _options) {
+        var data = exports.readFileSync(path);
+        if (typeof Blob === 'function') {
+            return Promise.resolve(new Blob([data]));
+        }
+        // Pre-Blob runtimes — return a minimal blob-shaped object.
+        var bytes = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
+        return Promise.resolve({
+            size: bytes.length,
+            type: '',
+            arrayBuffer: function() { return Promise.resolve(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)); },
+            text:        function() { return Promise.resolve(bytes.toString('utf8')); },
+            slice:       function() { return this; },
+        });
+    };
 });
 
 // ---- host.js ----
@@ -3502,9 +4247,15 @@ function __plenum_install_http(moduleName) {
             if (typeof globalThis.__host_http_request !== 'function') {
                 throw new Error("Permission denied: http.request is not available");
             }
-            var url = typeof opts === 'string' ? opts
-                : (opts.protocol || 'http:') + '//' + (opts.host || opts.hostname)
-                  + (opts.port ? ':' + opts.port : '') + (opts.path || '/');
+            var url;
+            if (typeof opts === 'string') {
+                url = opts;
+            } else if (opts && typeof opts.url === 'string') {
+                url = opts.url;
+            } else {
+                url = (opts.protocol || 'http:') + '//' + (opts.host || opts.hostname)
+                    + (opts.port ? ':' + opts.port : '') + (opts.path || '/');
+            }
             var method = (opts && opts.method) || 'GET';
             var body = opts && opts.body;
 
@@ -3516,31 +4267,171 @@ function __plenum_install_http(moduleName) {
                 throw err;
             }
 
-            // Shape the response like a minimal IncomingMessage.
-            var resp = {
-                statusCode: result.status,
-                headers: {},
-                body: result.body,
-                _bodyRead: false,
-                on: function(event, handler) {
-                    if (event === 'data') { handler(result.body); return this; }
-                    if (event === 'end')  { handler(); return this; }
-                    return this;
-                },
-                setEncoding: function() {},
-                text: function() { return Promise.resolve(result.body); },
-                json: function() { return Promise.resolve(JSON.parse(result.body)); }
+            // Shape the response like a Node IncomingMessage with a
+            // working EventEmitter contract plus the readable-stream
+            // pieces user code commonly touches: `.resume()`,
+            // `.pause()`, `.pipe(dest)`, `.read()`, async iteration.
+            // The body is materialised eagerly by the host bridge — we
+            // just have to stage it through the listener queue so user
+            // code that registers handlers AFTER the cb fires (the
+            // normal Node pattern) still sees `data` + `end`.
+            var resp = Object.create(EventEmitter.prototype);
+            EventEmitter.call(resp);
+            resp.statusCode    = result.status;
+            resp.statusMessage = '';
+            resp.httpVersion   = '1.1';
+            resp.headers       = result.headers && typeof result.headers === 'object' ? result.headers : {};
+            resp.rawHeaders    = [];
+            for (var hk in resp.headers) {
+                resp.rawHeaders.push(hk, resp.headers[hk]);
+            }
+            resp.trailers      = {};
+            resp.method        = method;
+            resp.url           = url;
+            resp.complete      = false;
+            resp.readable      = true;
+            resp.readableEnded = false;
+            resp.body          = result.body;
+            var _paused = true; // start paused — drain on first listener / resume()
+            var _flushed = false;
+            function flushBody() {
+                if (_flushed) return;
+                _flushed = true;
+                resp.complete      = true;
+                resp.readableEnded = true;
+                if (typeof result.body === 'string' && result.body.length > 0) {
+                    resp.emit('data', result.body);
+                }
+                resp.emit('end');
+                resp.emit('close');
+            }
+            // Schedule the flush as a microtask so user code has a
+            // chance to register `data` / `end` / `close` listeners
+            // *after* calling `resume()` — the canonical Node pattern.
+            // Microtasks fire after the current synchronous turn but
+            // before any timer callback, so the outer envelope's
+            // `await` reliably drains them even for one-shot scripts.
+            function maybeFlush() {
+                if (_paused || _flushed) return;
+                Promise.resolve().then(flushBody);
+            }
+            resp.resume      = function() { _paused = false; maybeFlush(); return resp; };
+            resp.pause       = function() { _paused = true; return resp; };
+            resp.setEncoding = function() { return resp; };
+            resp.read        = function() {
+                if (_flushed) return null;
+                _flushed = true;
+                resp.complete = true;
+                resp.readableEnded = true;
+                return result.body || '';
             };
+            resp.destroy     = function(err) {
+                if (err) resp.emit('error', err);
+                resp.emit('close');
+                return resp;
+            };
+            resp.unpipe      = function() { return resp; };
+            // Convenience body-shaping helpers (Undici `.text()`/`.json()`
+            // shape) — handy for fetch-flavoured callers.
+            resp.text        = function() { return Promise.resolve(result.body); };
+            resp.json        = function() {
+                try { return Promise.resolve(JSON.parse(result.body)); }
+                catch (e) { return Promise.reject(e); }
+            };
+            // Auto-resume when a `data` listener attaches (Node's
+            // backwards-compat path: registering a `data` listener
+            // implicitly switches the stream to flowing mode).
+            var origOn = resp.on.bind(resp);
+            resp.on = resp.addListener = function(event, handler) {
+                origOn(event, handler);
+                if (event === 'data' || event === 'readable') {
+                    _paused = false;
+                    maybeFlush();
+                }
+                return resp;
+            };
+            resp.pipe = function(dest) {
+                resp.on('data', function(chunk) { if (dest && dest.write) dest.write(chunk); });
+                resp.on('end',  function()      { if (dest && dest.end)   dest.end(); });
+                _paused = false;
+                maybeFlush();
+                return dest;
+            };
+            // Async-iterator support so `for await (const chunk of res)`
+            // works. Single-chunk: yield the body once and end.
+            if (typeof Symbol !== 'undefined' && Symbol.asyncIterator) {
+                resp[Symbol.asyncIterator] = function() {
+                    var done = false;
+                    return {
+                        next: function() {
+                            if (done) return Promise.resolve({ value: undefined, done: true });
+                            done = true;
+                            _flushed = true;
+                            resp.complete = true;
+                            resp.readableEnded = true;
+                            return Promise.resolve({ value: result.body || '', done: false });
+                        },
+                        return: function() { done = true; return Promise.resolve({ value: undefined, done: true }); },
+                    };
+                };
+            }
             if (cb) cb(resp);
-            return {
-                end:   function() {},
-                write: function() {},
-                on:    function() { return this; }
-            };
+            // Outbound request stub. Node returns a ClientRequest;
+            // ours is a minimal EventEmitter stand-in that swallows
+            // body writes (we already sent them) and resolves
+            // `response` synchronously via `cb`.
+            var req = Object.create(EventEmitter.prototype);
+            EventEmitter.call(req);
+            req.end          = function() { return req; };
+            req.write        = function() { return true; };
+            req.setHeader    = function() { return req; };
+            req.getHeader    = function() {};
+            req.removeHeader = function() {};
+            req.setTimeout   = function() { return req; };
+            req.destroy      = function() { return req; };
+            req.abort        = function() { return req; };
+            req.flushHeaders = function() { return req; };
+            return req;
         }
 
-        exports.request = requestImpl;
-        exports.get     = function(opts, cb) { return requestImpl(opts, cb); };
+        // Node accepts both `(url[, options][, cb])` and
+        // `(options[, cb])`. Coalesce the URL+options form into a
+        // single opts object before handing off — corepack /
+        // node-fetch / pacote all reach for the 3-arg shape.
+        function normaliseRequestArgs(args) {
+            var arr = Array.prototype.slice.call(args);
+            var cb = (arr.length && typeof arr[arr.length - 1] === 'function') ? arr.pop() : undefined;
+            var first = arr[0];
+            var second = arr[1];
+            var opts;
+            if (typeof first === 'string') {
+                opts = (second && typeof second === 'object') ? Object.assign({}, second) : {};
+                // Stash the URL string for requestImpl's url-or-opts branch.
+                opts.url = first;
+                // Decompose the URL the cheap way so opts.hostname/port
+                // are usable when callers downstream introspect.
+                var m = /^(https?):\/\/([^\/:?#]+)(?::(\d+))?(\/[^?#]*)?(\?[^#]*)?/i.exec(first);
+                if (m) {
+                    if (!opts.protocol) opts.protocol = m[1] + ':';
+                    if (!opts.hostname) opts.hostname = m[2];
+                    if (!opts.port && m[3]) opts.port = parseInt(m[3], 10);
+                    if (!opts.path) opts.path = (m[4] || '/') + (m[5] || '');
+                }
+            } else {
+                opts = first || {};
+            }
+            return { opts: opts, cb: cb };
+        }
+        exports.request = function() {
+            var n = normaliseRequestArgs(arguments);
+            return requestImpl(n.opts, n.cb);
+        };
+        exports.get = function() {
+            var n = normaliseRequestArgs(arguments);
+            // Node's `get` auto-ends the request and forces GET.
+            if (n.opts && typeof n.opts === 'object') n.opts.method = n.opts.method || 'GET';
+            return requestImpl(n.opts, n.cb);
+        };
 
         // -------- server-side createServer ------------------------------
 
@@ -3859,6 +4750,66 @@ function __plenum_install_http(moduleName) {
         };
         exports.ServerResponse.prototype = Object.create(EventEmitter.prototype);
         exports.ServerResponse.prototype.constructor = exports.ServerResponse;
+
+        // `http.Agent` / `https.Agent` — minimal constructable stand-ins.
+        // npm's @npmcli/agent and many keep-alive helpers do
+        // `class MyAgent extends http.Agent { ... }` at module-init time.
+        // Without a real constructor here that fails QuickJS's
+        // "parent class must be constructor" guard before any user
+        // logic runs. We don't pool sockets (host bridge owns
+        // connections); the class exists so subclasses can
+        // instantiate.
+        function Agent(opts) {
+            EventEmitter.call(this);
+            this.options    = opts || {};
+            this.keepAlive  = !!(this.options.keepAlive);
+            this.maxSockets = this.options.maxSockets || Infinity;
+            this.maxFreeSockets = this.options.maxFreeSockets || 256;
+            this.requests   = {};
+            this.sockets    = {};
+            this.freeSockets = {};
+            this.protocol   = (moduleName === 'https') ? 'https:' : 'http:';
+        }
+        Agent.prototype = Object.create(EventEmitter.prototype);
+        Agent.prototype.constructor = Agent;
+        Agent.prototype.addRequest    = function() {};
+        Agent.prototype.createConnection = function() { return null; };
+        Agent.prototype.keepSocketAlive  = function() { return false; };
+        Agent.prototype.reuseSocket      = function() {};
+        Agent.prototype.destroy          = function() {};
+        Agent.prototype.getName          = function() { return 'afterburner-agent'; };
+        exports.Agent = Agent;
+        // The default global agent (Node exposes it; libraries pass it
+        // around). Single instance, idempotent across requires.
+        if (!globalThis.__plenum_default_agents) globalThis.__plenum_default_agents = {};
+        if (!globalThis.__plenum_default_agents[moduleName]) {
+            globalThis.__plenum_default_agents[moduleName] = new Agent({ keepAlive: false });
+        }
+        exports.globalAgent = globalThis.__plenum_default_agents[moduleName];
+
+        // ClientRequest — same posture as Server / IncomingMessage:
+        // exists for `instanceof` plus prototype reads, not callable.
+        function ClientRequest() {
+            throw new Error('new http.ClientRequest() is not implemented; use http.request()');
+        }
+        ClientRequest.prototype = Object.create(EventEmitter.prototype);
+        ClientRequest.prototype.constructor = ClientRequest;
+        exports.ClientRequest = ClientRequest;
+
+        // OutgoingMessage — base class some libs subclass.
+        function OutgoingMessage() { EventEmitter.call(this); }
+        OutgoingMessage.prototype = Object.create(EventEmitter.prototype);
+        OutgoingMessage.prototype.constructor = OutgoingMessage;
+        OutgoingMessage.prototype.setHeader = function() {};
+        OutgoingMessage.prototype.getHeader = function() {};
+        OutgoingMessage.prototype.removeHeader = function() {};
+        OutgoingMessage.prototype.write = function() { return true; };
+        OutgoingMessage.prototype.end = function() {};
+        exports.OutgoingMessage = OutgoingMessage;
+
+        // Maximum number of sockets allowed per host — Node default is
+        // Infinity, but some libraries read it. Match Node.
+        exports.maxHeaderSize = 16384;
     });
 }
 __plenum_install_http('http');
@@ -4981,6 +5932,276 @@ __register_module('path/win32', function(module, exports, require) {
     module.exports = require('path').win32 || require('path');
 });
 
+// readline/promises — Promise-returning Readline. Node 17+. Wraps
+// the callback Interface; we expose `question` returning a Promise.
+__register_module('readline/promises', function(module, exports, require) {
+    var rl = require('readline');
+    function createInterface(opts) {
+        var iface = rl.createInterface(opts);
+        var origQuestion = iface.question.bind(iface);
+        iface.question = function(prompt, options) {
+            options = options || {};
+            return new Promise(function(resolve, reject) {
+                if (options.signal && options.signal.aborted) {
+                    return reject(new Error('aborted'));
+                }
+                origQuestion(prompt, function(answer) { resolve(answer); });
+                if (options.signal) {
+                    options.signal.addEventListener('abort', function() {
+                        reject(new Error('aborted'));
+                    });
+                }
+            });
+        };
+        return iface;
+    }
+    module.exports = Object.assign({}, rl, {
+        createInterface: createInterface,
+        Interface: rl.Interface,
+    });
+});
+
+// inspector/promises — Node 19+. The Session class with promise-style
+// `post` / `connect`. We expose the same shape but every call rejects
+// with ERR_NOT_SUPPORTED_IN_SANDBOX — V8's inspector requires direct
+// engine access we cannot provide through wasm.
+__register_module('inspector/promises', function(module, exports, require) {
+    var inspector = require('inspector');
+    function rej(name) {
+        return Promise.reject(Object.assign(
+            new Error('inspector.' + name + ' not available in sandbox'),
+            { code: 'ERR_NOT_SUPPORTED_IN_SANDBOX' }
+        ));
+    }
+    function Session() { inspector.Session.call(this); }
+    Session.prototype = Object.create(inspector.Session.prototype || Object.prototype);
+    Session.prototype.connect = function() { return rej('connect'); };
+    Session.prototype.connectToMainThread = function() { return rej('connectToMainThread'); };
+    Session.prototype.disconnect = function() { return Promise.resolve(); };
+    Session.prototype.post = function() { return rej('post'); };
+    module.exports = Object.assign({}, inspector, { Session: Session });
+});
+
+// stream/consumers — Node 16.7+. Async helpers that drain a readable
+// stream and return its full contents. Implementation collects every
+// chunk via async-iteration and concatenates Buffer/Uint8Array bytes
+// or string segments.
+__register_module('stream/consumers', function(module, exports, require) {
+    function collect(stream) {
+        return (async function() {
+            var chunks = [];
+            for await (var chunk of stream) chunks.push(chunk);
+            if (chunks.length === 0) {
+                var Buf0 = globalThis.Buffer;
+                return Buf0 ? Buf0.alloc(0) : new Uint8Array(0);
+            }
+            var Buf = globalThis.Buffer;
+            if (Buf && Buf.isBuffer && Buf.isBuffer(chunks[0])) return Buf.concat(chunks);
+            if (chunks[0] instanceof Uint8Array) {
+                var total = 0;
+                for (var i = 0; i < chunks.length; i++) total += chunks[i].length;
+                var out = new Uint8Array(total);
+                var off = 0;
+                for (var j = 0; j < chunks.length; j++) {
+                    out.set(chunks[j], off); off += chunks[j].length;
+                }
+                return out;
+            }
+            return chunks.map(String).join('');
+        })();
+    }
+    module.exports = {
+        text: function(stream) {
+            return collect(stream).then(function(b) {
+                if (typeof b === 'string') return b;
+                if (globalThis.Buffer && globalThis.Buffer.isBuffer && globalThis.Buffer.isBuffer(b))
+                    return b.toString('utf8');
+                return new globalThis.TextDecoder().decode(b);
+            });
+        },
+        json: function(stream) {
+            return module.exports.text(stream).then(JSON.parse);
+        },
+        arrayBuffer: function(stream) {
+            return collect(stream).then(function(b) {
+                if (b instanceof Uint8Array)
+                    return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+                if (typeof b === 'string')
+                    return new globalThis.TextEncoder().encode(b).buffer;
+                return new ArrayBuffer(0);
+            });
+        },
+        buffer: function(stream) {
+            return collect(stream).then(function(b) {
+                var Buf = globalThis.Buffer;
+                if (Buf && Buf.isBuffer && Buf.isBuffer(b)) return b;
+                if (b instanceof Uint8Array) return Buf ? Buf.from(b) : b;
+                return Buf ? Buf.from(String(b), 'utf8')
+                           : new globalThis.TextEncoder().encode(b);
+            });
+        },
+        blob: function(stream) {
+            return collect(stream).then(function(b) {
+                return new globalThis.Blob([b]);
+            });
+        },
+    };
+});
+
+// diagnostics_channel — Node 16+. Pub/sub for in-process tracing.
+// Same-realm impl: channels keyed by name on a global registry,
+// `publish` broadcasts to every subscriber synchronously (matches
+// Node's contract — async work belongs in subscribers if needed).
+__register_module('diagnostics_channel', function(module, exports, require) {
+    if (!globalThis.__plenum_diag_channels) globalThis.__plenum_diag_channels = {};
+    var registry = globalThis.__plenum_diag_channels;
+
+    function Channel(name) {
+        this.name = name;
+        this._subs = [];
+    }
+    Channel.prototype.publish = function(message) {
+        for (var i = 0; i < this._subs.length; i++) {
+            try { this._subs[i](message, this.name); }
+            catch (_) { /* spec: swallow per subscriber */ }
+        }
+    };
+    Channel.prototype.subscribe = function(onMessage) {
+        if (typeof onMessage !== 'function') throw new TypeError('onMessage must be a function');
+        this._subs.push(onMessage);
+    };
+    Channel.prototype.unsubscribe = function(onMessage) {
+        var i = this._subs.indexOf(onMessage);
+        if (i === -1) return false;
+        this._subs.splice(i, 1);
+        return true;
+    };
+    Object.defineProperty(Channel.prototype, 'hasSubscribers', {
+        get: function() { return this._subs.length > 0; },
+    });
+    Channel.prototype.bindStore = function() {};
+    Channel.prototype.runStores = function(_data, fn, ctx) { return fn.call(ctx); };
+
+    function channel(name) {
+        var n = String(name);
+        if (!registry[n]) registry[n] = new Channel(n);
+        return registry[n];
+    }
+    function subscribe(name, onMessage) { channel(name).subscribe(onMessage); }
+    function unsubscribe(name, onMessage) { return channel(name).unsubscribe(onMessage); }
+    function hasSubscribers(name) { return channel(name).hasSubscribers; }
+
+    function tracingChannel(prefix) {
+        var p = (typeof prefix === 'string') ? prefix : 'tracing';
+        return {
+            start: channel(p + ':start'),
+            end: channel(p + ':end'),
+            asyncStart: channel(p + ':asyncStart'),
+            asyncEnd: channel(p + ':asyncEnd'),
+            error: channel(p + ':error'),
+            traceSync: function(fn, ctx, _store, _thisArg, args) {
+                this.start.publish({ self: ctx, args: args });
+                try {
+                    var r = fn.apply(ctx, args || []);
+                    this.end.publish({ self: ctx, result: r });
+                    return r;
+                } catch (e) {
+                    this.error.publish({ self: ctx, error: e });
+                    throw e;
+                }
+            },
+        };
+    }
+
+    module.exports = {
+        Channel: Channel,
+        channel: channel,
+        subscribe: subscribe,
+        unsubscribe: unsubscribe,
+        hasSubscribers: hasSubscribers,
+        tracingChannel: tracingChannel,
+    };
+});
+
+// node:test / node:test/reporters — Node 18+ built-in test runner.
+// Sandbox can't host the runner's child-process worker pool; we
+// expose the API surface so libraries that conditionally import
+// `node:test` for in-source tests don't crash. Minimal recorder
+// runs synchronously in-process.
+__register_module('test', function(module, exports, require) {
+    var current = null;
+    function describe(name, fn) {
+        var prev = current;
+        current = { name: name, children: [] };
+        try { if (typeof fn === 'function') fn(); } finally { current = prev; }
+    }
+    function it(name, fn) {
+        if (current) current.children.push({ name: name, fn: fn });
+    }
+    function test() {
+        var args = [].slice.call(arguments);
+        var name = (typeof args[0] === 'string') ? args.shift() : '<anonymous>';
+        if (args[0] && typeof args[0] === 'object') args.shift();
+        var fn = args[0];
+        return Promise.resolve().then(function() {
+            if (typeof fn === 'function') return fn({ name: name });
+        });
+    }
+    test.describe = describe;
+    test.it = it;
+    test.test = test;
+    test.suite = describe;
+    test.before = function() {};
+    test.after = function() {};
+    test.beforeEach = function() {};
+    test.afterEach = function() {};
+    test.skip = function() {};
+    test.todo = function() {};
+    test.run = function() {
+        return { [Symbol.asyncIterator]: function() {
+            return { next: function() { return Promise.resolve({ value: undefined, done: true }); } };
+        } };
+    };
+    test.mock = {
+        method: function() {}, getter: function() {}, setter: function() {},
+        timers: { enable: function() {}, reset: function() {}, tick: function() {} },
+    };
+    module.exports = test;
+});
+__register_module('test/reporters', function(module, exports, require) {
+    var stream = require('stream');
+    function makeReporter() {
+        return new stream.Transform({
+            transform: function(chunk, _enc, cb) { cb(null, chunk); },
+        });
+    }
+    module.exports = {
+        spec: makeReporter, tap: makeReporter, dot: makeReporter,
+        junit: makeReporter, lcov: makeReporter,
+    };
+});
+
+// sea (Single Executable Applications) — Node 21+. The sandbox is a
+// sealed runtime, so SEA assets aren't applicable. Surface the API
+// but report `isSea() === false` so callers fall through to their
+// non-SEA path.
+__register_module('sea', function(module, exports, require) {
+    function notInSea(name) {
+        return function() {
+            throw Object.assign(
+                new Error('sea.' + name + ': not running as SEA'),
+                { code: 'ERR_NOT_IN_SINGLE_EXECUTABLE_APPLICATION' }
+            );
+        };
+    }
+    module.exports = {
+        isSea: function() { return false; },
+        getAsset: notInSea('getAsset'),
+        getAssetAsBlob: notInSea('getAssetAsBlob'),
+        getRawAsset: notInSea('getRawAsset'),
+    };
+});
+
 __register_module('timers/promises', function(module, exports, require) {
     module.exports = {
         setTimeout: function(ms, value, opts) {
@@ -5044,6 +6265,75 @@ __register_module('os', function(module, exports, require) {
     exports.type      = function() { return 'Linux'; };
     exports.release   = function() { return '0.0.0-afterburner'; };
     exports.endianness = function() { return 'LE'; };
+
+    // Node's `os.constants`. Packagers (npm @npmcli/fs, fs-extra, pacote)
+    // destructure `os.constants.errno.{EEXIST,ENOENT,…}` at module-init
+    // time. Missing the table makes the destructure throw `Cannot
+    // convert undefined or null to object`, which surfaces as an
+    // unrelated-looking failure deep in npm's polyfill chain. Linux x86_64
+    // numeric values, matched against Node's own table — they're a
+    // fixed kernel ABI on Linux and the constants are read by name in
+    // every script we've seen, so the numeric mismatch on other
+    // platforms is harmless.
+    var ERRNO = {
+        E2BIG: 7, EACCES: 13, EADDRINUSE: 98, EADDRNOTAVAIL: 99,
+        EAFNOSUPPORT: 97, EAGAIN: 11, EALREADY: 114, EBADF: 9, EBADMSG: 74,
+        EBUSY: 16, ECANCELED: 125, ECHILD: 10, ECONNABORTED: 103,
+        ECONNREFUSED: 111, ECONNRESET: 104, EDEADLK: 35, EDESTADDRREQ: 89,
+        EDOM: 33, EDQUOT: 122, EEXIST: 17, EFAULT: 14, EFBIG: 27,
+        EHOSTUNREACH: 113, EIDRM: 43, EILSEQ: 84, EINPROGRESS: 115,
+        EINTR: 4, EINVAL: 22, EIO: 5, EISCONN: 106, EISDIR: 21, ELOOP: 40,
+        EMFILE: 24, EMLINK: 31, EMSGSIZE: 90, EMULTIHOP: 72, ENAMETOOLONG: 36,
+        ENETDOWN: 100, ENETRESET: 102, ENETUNREACH: 101, ENFILE: 23,
+        ENOBUFS: 105, ENODATA: 61, ENODEV: 19, ENOENT: 2, ENOEXEC: 8,
+        ENOLCK: 37, ENOLINK: 67, ENOMEM: 12, ENOMSG: 42, ENOPROTOOPT: 92,
+        ENOSPC: 28, ENOSR: 63, ENOSTR: 60, ENOSYS: 38, ENOTCONN: 107,
+        ENOTDIR: 20, ENOTEMPTY: 39, ENOTSOCK: 88, ENOTSUP: 95, ENOTTY: 25,
+        ENXIO: 6, EOPNOTSUPP: 95, EOVERFLOW: 75, EPERM: 1, EPIPE: 32,
+        EPROTO: 71, EPROTONOSUPPORT: 93, EPROTOTYPE: 91, ERANGE: 34,
+        EROFS: 30, ESPIPE: 29, ESRCH: 3, ESTALE: 116, ETIME: 62,
+        ETIMEDOUT: 110, ETXTBSY: 26, EWOULDBLOCK: 11, EXDEV: 18,
+    };
+    var SIGNALS = {
+        SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGILL: 4, SIGTRAP: 5, SIGABRT: 6,
+        SIGIOT: 6, SIGBUS: 7, SIGFPE: 8, SIGKILL: 9, SIGUSR1: 10, SIGSEGV: 11,
+        SIGUSR2: 12, SIGPIPE: 13, SIGALRM: 14, SIGTERM: 15, SIGCHLD: 17,
+        SIGSTKFLT: 16, SIGCONT: 18, SIGSTOP: 19, SIGTSTP: 20, SIGTTIN: 21,
+        SIGTTOU: 22, SIGURG: 23, SIGXCPU: 24, SIGXFSZ: 25, SIGVTALRM: 26,
+        SIGPROF: 27, SIGWINCH: 28, SIGIO: 29, SIGPOLL: 29, SIGPWR: 30,
+        SIGSYS: 31, SIGUNUSED: 31,
+    };
+    var PRIORITY = {
+        PRIORITY_LOW: 19, PRIORITY_BELOW_NORMAL: 10, PRIORITY_NORMAL: 0,
+        PRIORITY_ABOVE_NORMAL: -7, PRIORITY_HIGH: -14, PRIORITY_HIGHEST: -20,
+    };
+    exports.constants = {
+        UV_UDP_REUSEADDR: 4,
+        dlopen: { RTLD_LAZY: 1, RTLD_NOW: 2, RTLD_GLOBAL: 256, RTLD_LOCAL: 0, RTLD_DEEPBIND: 8 },
+        errno: ERRNO,
+        signals: SIGNALS,
+        priority: PRIORITY,
+    };
+
+    // os.networkInterfaces(): Node exposes a per-interface object map.
+    // npm's `npm-pick-manifest` calls it during prefix detection. Empty
+    // map is the right "no enumerable interfaces" answer when we don't
+    // surface them through the host bridge.
+    exports.networkInterfaces = function() { return {}; };
+    exports.userInfo = function(opts) {
+        var enc = (opts && opts.encoding) || 'utf8';
+        return {
+            username: 'afterburner',
+            uid: -1,
+            gid: -1,
+            shell: null,
+            homedir: exports.homedir(),
+        };
+    };
+    exports.loadavg     = function() { return [0, 0, 0]; };
+    exports.machine     = function() { return fallback('arch', 'x86_64'); };
+    exports.version     = function() { return exports.release(); };
+    exports.devNull     = '/dev/null';
 });
 
 // ---- path.js ----
@@ -5187,6 +6477,34 @@ __register_module('path', function(module, exports, require) {
         return p.slice(0, end);
     };
 
+    // path.relative(from, to) — express the relative path from one
+    // absolute path to another. arborist's `relpath`, every workspace
+    // resolver, every test runner, and most build tools depend on
+    // this. Algorithm matches Node's implementation: resolve both
+    // arguments, find the common prefix, walk back from `from` and
+    // forward to `to`.
+    exports.relative = function(from, to) {
+        assertString(from);
+        assertString(to);
+        if (from === to) return '';
+        from = exports.resolve(from);
+        to = exports.resolve(to);
+        if (from === to) return '';
+        // Trim leading slashes for the segment scan; we know both are
+        // absolute after `resolve`.
+        var fromSegs = from.slice(1).split('/').filter(function(s) { return s.length; });
+        var toSegs = to.slice(1).split('/').filter(function(s) { return s.length; });
+        var common = 0;
+        var max = Math.min(fromSegs.length, toSegs.length);
+        while (common < max && fromSegs[common] === toSegs[common]) common++;
+        var up = fromSegs.length - common;
+        var rest = toSegs.slice(common);
+        var out = [];
+        for (var i = 0; i < up; i++) out.push('..');
+        for (var j = 0; j < rest.length; j++) out.push(rest[j]);
+        return out.join('/') || '.';
+    };
+
     exports.basename = function(p, ext) {
         assertString(p);
         if (ext !== undefined) assertString(ext);
@@ -5264,6 +6582,143 @@ __register_module('path', function(module, exports, require) {
     };
 
     exports.posix = exports;
+
+    // path.win32 — Node always exposes both flavours; many libraries
+    // (npm's `tar`, fs-extra, archive utilities) reach for
+    // `require('path').win32.{isAbsolute,parse}` to normalise paths
+    // even on Linux. We provide a Windows-shaped twin: backslash is
+    // an additional separator, drive letters are recognised as
+    // absolute (`c:/foo`, `\\?\drive\...`), and the rest of the
+    // surface mirrors POSIX with `\\` separators.
+    var win32 = {};
+    win32.sep = '\\';
+    win32.delimiter = ';';
+    win32.posix = exports;
+    win32.win32 = win32;
+    function _winSplit(p) {
+        return String(p).replace(/\//g, '\\').split('\\').filter(function(s) { return s.length > 0 || false; });
+    }
+    win32.isAbsolute = function(p) {
+        var s = String(p);
+        if (s.length === 0) return false;
+        if (s.charAt(0) === '/' || s.charAt(0) === '\\') return true;
+        // c:/foo or c:\foo
+        if (s.length >= 3 && /^[a-z]:[\/\\]/i.test(s)) return true;
+        // c:foo (drive-relative — not absolute, but Node treats some
+        // shapes as absolute. Conservative: false here.)
+        return false;
+    };
+    win32.normalize = function(p) {
+        var s = String(p).replace(/\//g, '\\');
+        // Drive letter detection.
+        var rootMatch = /^([a-z]:)?[\\\\]?/i.exec(s);
+        var drive = rootMatch && rootMatch[1] ? rootMatch[1] : '';
+        var rooted = /^([a-z]:)?[\\]/i.test(s);
+        var rest = s.slice((drive.length) + (rooted ? 1 : 0));
+        var parts = rest.split('\\').filter(function(p) { return p && p !== '.'; });
+        var stack = [];
+        for (var i = 0; i < parts.length; i++) {
+            if (parts[i] === '..') {
+                if (stack.length && stack[stack.length-1] !== '..') stack.pop();
+                else if (!rooted) stack.push('..');
+            } else { stack.push(parts[i]); }
+        }
+        return drive + (rooted ? '\\' : '') + stack.join('\\');
+    };
+    win32.join = function() {
+        var args = [].slice.call(arguments).filter(function(a) { return a && a.length; });
+        if (args.length === 0) return '.';
+        return win32.normalize(args.join('\\'));
+    };
+    win32.resolve = function() {
+        var args = [].slice.call(arguments);
+        var resolved = '';
+        for (var i = args.length - 1; i >= -1; i--) {
+            var p = (i >= 0) ? args[i] : '\\';
+            if (!p || p.length === 0) continue;
+            resolved = p + '\\' + resolved;
+            if (win32.isAbsolute(p)) break;
+        }
+        return win32.normalize(resolved);
+    };
+    win32.dirname = function(p) {
+        var s = String(p).replace(/\//g, '\\');
+        var idx = s.lastIndexOf('\\');
+        if (idx < 0) return '.';
+        if (idx === 0) return '\\';
+        return s.slice(0, idx);
+    };
+    win32.basename = function(p, ext) {
+        var s = String(p).replace(/\//g, '\\');
+        var idx = s.lastIndexOf('\\');
+        var base = idx >= 0 ? s.slice(idx + 1) : s;
+        if (ext && base.endsWith(ext)) base = base.slice(0, base.length - ext.length);
+        return base;
+    };
+    win32.extname = function(p) {
+        var b = win32.basename(p);
+        var idx = b.lastIndexOf('.');
+        if (idx <= 0) return '';
+        return b.slice(idx);
+    };
+    win32.parse = function(p) {
+        var s = String(p).replace(/\//g, '\\');
+        var ret = { root: '', dir: '', base: '', ext: '', name: '' };
+        // Detect drive root.
+        var driveMatch = /^([a-z]:)([\\]?)/i.exec(s);
+        if (driveMatch) {
+            ret.root = driveMatch[1] + (driveMatch[2] || '');
+        } else if (s.charAt(0) === '\\') {
+            ret.root = '\\';
+        }
+        ret.base = win32.basename(p);
+        ret.dir = win32.dirname(p);
+        ret.ext = win32.extname(ret.base);
+        ret.name = ret.ext ? ret.base.slice(0, ret.base.length - ret.ext.length) : ret.base;
+        return ret;
+    };
+    win32.format = function(obj) {
+        var dir = obj.dir || obj.root || '';
+        var base = obj.base || ((obj.name || '') + (obj.ext || ''));
+        if (!dir) return base;
+        if (dir === obj.root) return dir + base;
+        return dir + '\\' + base;
+    };
+    win32.toNamespacedPath = function(p) { return String(p); };
+    win32.relative = function(from, to) {
+        from = win32.resolve(String(from));
+        to = win32.resolve(String(to));
+        if (from === to) return '';
+        var fromSegs = from.split('\\').filter(function(s) { return s.length; });
+        var toSegs = to.split('\\').filter(function(s) { return s.length; });
+        var common = 0;
+        var max = Math.min(fromSegs.length, toSegs.length);
+        while (common < max && fromSegs[common].toLowerCase() === toSegs[common].toLowerCase()) common++;
+        var up = fromSegs.length - common;
+        var rest = toSegs.slice(common);
+        var out = [];
+        for (var i = 0; i < up; i++) out.push('..');
+        for (var j = 0; j < rest.length; j++) out.push(rest[j]);
+        return out.join('\\') || '.';
+    };
+    win32.matchesGlob = function(p, pattern) {
+        var re = new RegExp('^' + String(pattern)
+            .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+            .replace(/\*/g, '.*')
+            .replace(/\?/g, '.') + '$');
+        return re.test(String(p));
+    };
+    exports.win32 = win32;
+
+    // Posix-side `toNamespacedPath` and `matchesGlob` (Node 22+).
+    exports.toNamespacedPath = function(p) { return String(p); };
+    exports.matchesGlob = function(p, pattern) {
+        var re = new RegExp('^' + String(pattern)
+            .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+            .replace(/\*/g, '.*')
+            .replace(/\?/g, '.') + '$');
+        return re.test(String(p));
+    };
 });
 
 // ---- perf_hooks.js ----
@@ -5514,8 +6969,14 @@ __register_module('perf_hooks', function(module, exports, require) {
     var fields = {
         platform: globalThis.__host_platform || 'linux',
         arch:     globalThis.__host_arch     || 'x64',
-        version:  'v20.0.0-afterburner',
-        versions: { node: '20.0.0', afterburner: '0.1.0' },
+        // We claim Node 26 (latest stable, the project's target). Most
+        // libraries gate features on numeric ranges (`>=18.17.0`,
+        // `>=20.5.0`, `>=22.0.0`) — claiming the current major
+        // version unblocks every reasonable engines check while
+        // still surfacing the `-afterburner` suffix so version-aware
+        // code paths (rare) can detect us.
+        version:  'v26.0.0-afterburner',
+        versions: { node: '26.0.0', v8: '13.0.0.0', afterburner: '0.1.0' },
         env:      hostEnv,
         argv:     argv,
         execPath: '/usr/bin/afterburner',
@@ -5524,6 +6985,57 @@ __register_module('perf_hooks', function(module, exports, require) {
 
         cwd:      function() { return globalThis.__host_cwd || '/'; },
         chdir:    function() { throw new Error('process.chdir is not supported'); },
+
+        // `umask([mask])` — Node returns the previous mask; with an
+        // arg, sets it. Sandbox doesn't surface umask through the
+        // bridge; return a sensible default and accept (silent) the
+        // setter call. Node reduced the deprecation noise around
+        // calling umask() with no args; we mirror that.
+        umask:    function(_mask) { return 0o022; },
+
+        // `process.getuid` / `getgid` / `geteuid` / `getegid` — POSIX
+        // identity functions. Sandbox returns 0 for everything; some
+        // libraries (npm install, sqlite open) probe these to decide
+        // whether to drop privileges.
+        getuid:   function() { return 0; },
+        getgid:   function() { return 0; },
+        geteuid:  function() { return 0; },
+        getegid:  function() { return 0; },
+        getgroups: function() { return [0]; },
+        // `setuid`/`setgid` — sandbox doesn't allow privilege change.
+        // Throw a Node-style typed error so callers can fall through.
+        setuid:   function() { var e = new Error('setuid not supported'); e.code = 'EPERM'; throw e; },
+        setgid:   function() { var e = new Error('setgid not supported'); e.code = 'EPERM'; throw e; },
+        seteuid:  function() { var e = new Error('seteuid not supported'); e.code = 'EPERM'; throw e; },
+        setegid:  function() { var e = new Error('setegid not supported'); e.code = 'EPERM'; throw e; },
+        setgroups: function() { var e = new Error('setgroups not supported'); e.code = 'EPERM'; throw e; },
+
+        // Node 18+ `process.permission` / `process.constrainedMemory`
+        // / `process.availableMemory` — light probe surface that
+        // libraries (express's inspector, nodemon) check at module
+        // init.
+        constrainedMemory:  function() { return 0; },
+        availableMemory:    function() { return 0; },
+        memoryUsage:        Object.assign(function() {
+            return { rss: 0, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 };
+        }, { rss: function() { return 0; } }),
+        // Node 24+ `process.threadCpuUsage` — return a zeroed object.
+        threadCpuUsage:     function() { return { user: 0, system: 0 }; },
+        cpuUsage:           function(_prev) { return { user: 0, system: 0 }; },
+        resourceUsage:      function() {
+            return {
+                userCPUTime: 0, systemCPUTime: 0, maxRSS: 0,
+                sharedMemorySize: 0, unsharedDataSize: 0, unsharedStackSize: 0,
+                minorPageFault: 0, majorPageFault: 0, swappedOut: 0,
+                fsRead: 0, fsWrite: 0, ipcSent: 0, ipcReceived: 0,
+                signalsCount: 0, voluntaryContextSwitches: 0, involuntaryContextSwitches: 0,
+            };
+        },
+        loadEnvFile: function(_path) { /* no-op: we read env at startup */ },
+        // process.permission — Node 20.x experimental. Always-allow
+        // posture matches the sandbox's "manifold gates everything"
+        // model; permission checks happen at the manifold layer.
+        permission: { has: function(_scope, _ref) { return true; } },
 
         // Real Node drains the nextTick queue synchronously between
         // each macrotask but BEFORE the microtask queue. Express's
@@ -5614,6 +7126,43 @@ __register_module('perf_hooks', function(module, exports, require) {
         // unsupported internal.
         binding: function(name) {
             var which = typeof name === 'string' ? name : String(name);
+            // Return narrow stubs for the bindings real-world libraries
+            // probe at module-init for limit/feature flags — eager
+            // throws here break safer-buffer / fs-minipass / pacote at
+            // module load, which is far enough from any actual native
+            // primitive use that the user has no way to act on the
+            // error. Keep the throw for everything else so honest
+            // libuv consumers (rare in the sandbox) still surface a
+            // typed error pointing at the missing binding.
+            switch (which) {
+                case 'buffer':
+                    return {
+                        kStringMaxLength: 0x3fffffe7,        // ~1 GiB - 8
+                        kMaxLength:       0x7fffffff,        // INT32_MAX
+                    };
+                case 'fs':
+                    // fs-minipass gates a libuv fallback on
+                    // `!fs.writev`. We provide writev now, so the
+                    // binding is dead code; an empty object lets the
+                    // module-init `process.binding('fs')` complete
+                    // without exposing any libuv methods.
+                    return {};
+                case 'constants':
+                    // Return the merged fs+os+crypto constants so
+                    // legacy `require('process').binding('constants')`
+                    // gets a usable map (Node had this for years).
+                    try {
+                        var c = {};
+                        var fs = require('fs');
+                        var os = require('os');
+                        if (fs && fs.constants) Object.assign(c, fs.constants);
+                        if (os && os.constants) {
+                            if (os.constants.errno) Object.assign(c, os.constants.errno);
+                            if (os.constants.signals) Object.assign(c, os.constants.signals);
+                        }
+                        return c;
+                    } catch (_) { return {}; }
+            }
             var err = new Error(
                 "process.binding('" + which + "') is not supported in the " +
                 "Afterburner sandbox: native bindings (libuv internals and " +
@@ -9084,15 +10633,57 @@ __register_module('url', function(module, exports, require) {
     exports.format = format;
     exports.resolve = resolve;
 
-    exports.URL = typeof URL === 'function' ? URL : undefined;
-    exports.URLSearchParams = typeof URLSearchParams === 'function' ? URLSearchParams : undefined;
+    // Lazy-bind to the runtime's URL / URLSearchParams. Direct
+    // assignment at module-init snapshots the global, which on Javy /
+    // QuickJS isn't always installed when the bundle loads — a
+    // direct `exports.URL = URL` would then cache `undefined` and
+    // every downstream `require('url').URL` (npm's nerf-dart, every
+    // proxy-agent variant) breaks with `not a function`. Getters
+    // resolve at call-site so the URL constructor binds the moment
+    // it becomes available.
+    Object.defineProperty(exports, 'URL', {
+        configurable: true,
+        enumerable: true,
+        get: function() { return globalThis.URL; },
+    });
+    Object.defineProperty(exports, 'URLSearchParams', {
+        configurable: true,
+        enumerable: true,
+        get: function() { return globalThis.URLSearchParams; },
+    });
     exports.fileURLToPath = function(u) {
-        var s = typeof u === 'string' ? u : String(u);
-        return s.replace(/^file:\/\//, '');
+        var s = typeof u === 'string' ? u : (u && u.href) ? u.href : String(u);
+        // file:// → /; file:///foo/bar → /foo/bar; file://host/path → /path
+        var m = /^file:\/\/([^/]*)?(\/[^?#]*)?/i.exec(s);
+        return m ? (m[2] || '/') : s;
     };
     exports.pathToFileURL = function(p) {
-        return { href: 'file://' + p };
+        var s = String(p);
+        var path = s.charAt(0) === '/' ? s : '/' + s;
+        var encoded = path.replace(/[#?]/g, function(ch) { return encodeURIComponent(ch); });
+        // Return a URL-shaped object so callers that read .href / .pathname work.
+        var URLCtor = globalThis.URL;
+        if (typeof URLCtor === 'function') {
+            try { return new URLCtor('file://' + encoded); } catch (_) {}
+        }
+        return { href: 'file://' + encoded, pathname: path, protocol: 'file:' };
     };
+    exports.urlToHttpOptions = function(u) {
+        if (!u || typeof u !== 'object') return null;
+        return {
+            protocol: u.protocol,
+            hostname: u.hostname && u.hostname.replace(/^\[|\]$/g, ''),
+            hash: u.hash,
+            search: u.search,
+            pathname: u.pathname,
+            path: (u.pathname || '') + (u.search || ''),
+            href: u.href,
+            port: u.port ? Number(u.port) : undefined,
+            auth: (u.username || u.password) ? (decodeURIComponent(u.username || '') + (u.password ? ':' + decodeURIComponent(u.password) : '')) : undefined,
+        };
+    };
+    exports.domainToASCII = function(s) { return String(s).toLowerCase(); };
+    exports.domainToUnicode = function(s) { return String(s); };
 });
 
 // ---- util.js ----
@@ -9198,15 +10789,17 @@ __register_module('util', function(module, exports, require) {
 
     exports.deprecate = function(fn, _msg) { return fn; };
 
-    exports.types = {
-        isDate: function(v)      { return Object.prototype.toString.call(v) === '[object Date]'; },
-        isRegExp: function(v)    { return v instanceof RegExp; },
-        isPromise: function(v)   { return v && typeof v.then === 'function'; },
-        isMap: function(v)       { return v instanceof Map; },
-        isSet: function(v)       { return v instanceof Set; },
-        isTypedArray: function(v){ return ArrayBuffer.isView(v) && !(v instanceof DataView); },
-        isUint8Array: function(v){ return v instanceof Uint8Array; }
-    };
+    // util.types — deferred to the full `util/types` module so the
+    // surface stays in one place and `require('util').types` returns
+    // the same object as `require('util/types')`. The ALL ~40
+    // type-test methods (`isFloat64Array`, `isAnyArrayBuffer`, etc.)
+    // are a hard dependency for many libraries that probe object
+    // shapes (oxc / acorn-walkers / koa-context, etc.).
+    Object.defineProperty(exports, 'types', {
+        configurable: true,
+        enumerable: true,
+        get: function() { return require('util/types'); },
+    });
 
     exports.TextEncoder = typeof TextEncoder === 'function' ? TextEncoder : undefined;
     exports.TextDecoder = typeof TextDecoder === 'function' ? TextDecoder : undefined;
@@ -9766,6 +11359,570 @@ __register_module('wasi', function(module, exports, require) {
     }
     if (typeof globalThis.global !== 'object') {
         globalThis.global = globalThis;
+    }
+
+    // ----- EventTarget / Event / CustomEvent ------------------------
+    // Node 15 made these globals; nearly every modern web-API
+    // building block (AbortSignal, MessagePort, the streams family)
+    // either extends EventTarget or fires Events through it. Anything
+    // that does `class X extends EventTarget {}` falls over without
+    // a real constructor, even when the extending code never actually
+    // dispatches an event.
+    if (typeof globalThis.Event !== 'function') {
+        var Event = function Event(type, init) {
+            init = init || {};
+            this.type = String(type);
+            this.bubbles = !!init.bubbles;
+            this.cancelable = !!init.cancelable;
+            this.composed = !!init.composed;
+            this.defaultPrevented = false;
+            this.timeStamp = Date.now();
+            this.target = null;
+            this.currentTarget = null;
+            this.eventPhase = 0;
+            this.isTrusted = false;
+            this._propagationStopped = false;
+            this._immediatePropagationStopped = false;
+        };
+        Event.prototype.preventDefault = function() {
+            if (this.cancelable) this.defaultPrevented = true;
+        };
+        Event.prototype.stopPropagation = function() { this._propagationStopped = true; };
+        Event.prototype.stopImmediatePropagation = function() {
+            this._propagationStopped = true;
+            this._immediatePropagationStopped = true;
+        };
+        Event.prototype.composedPath = function() { return []; };
+        Event.NONE = 0; Event.CAPTURING_PHASE = 1; Event.AT_TARGET = 2; Event.BUBBLING_PHASE = 3;
+        globalThis.Event = Event;
+    }
+    if (typeof globalThis.CustomEvent !== 'function') {
+        globalThis.CustomEvent = function CustomEvent(type, init) {
+            globalThis.Event.call(this, type, init);
+            this.detail = init && 'detail' in init ? init.detail : null;
+        };
+        globalThis.CustomEvent.prototype = Object.create(globalThis.Event.prototype);
+        globalThis.CustomEvent.prototype.constructor = globalThis.CustomEvent;
+    }
+    if (typeof globalThis.EventTarget !== 'function') {
+        var EventTarget = function EventTarget() { this._listeners = {}; };
+        EventTarget.prototype.addEventListener = function(type, listener, _options) {
+            if (!this._listeners) this._listeners = {};
+            (this._listeners[type] = this._listeners[type] || []).push(listener);
+        };
+        EventTarget.prototype.removeEventListener = function(type, listener) {
+            if (!this._listeners || !this._listeners[type]) return;
+            var arr = this._listeners[type];
+            for (var i = arr.length - 1; i >= 0; i--) {
+                if (arr[i] === listener) arr.splice(i, 1);
+            }
+        };
+        EventTarget.prototype.dispatchEvent = function(event) {
+            if (!event || typeof event.type !== 'string') {
+                throw new TypeError('dispatchEvent: argument must be an Event');
+            }
+            event.target = this;
+            event.currentTarget = this;
+            event.eventPhase = 2; // AT_TARGET
+            var arr = (this._listeners && this._listeners[event.type]) || [];
+            for (var i = 0; i < arr.length; i++) {
+                if (event._immediatePropagationStopped) break;
+                try {
+                    var fn = arr[i];
+                    if (typeof fn === 'function') fn.call(this, event);
+                    else if (fn && typeof fn.handleEvent === 'function') fn.handleEvent(event);
+                } catch (e) {
+                    // Swallow per Web spec — an exceptional handler
+                    // shouldn't prevent siblings from firing. Surface
+                    // via the runtime's error reporting path.
+                    if (typeof globalThis.queueMicrotask === 'function') {
+                        globalThis.queueMicrotask(function() { throw e; });
+                    }
+                }
+            }
+            event.eventPhase = 0;
+            return !event.defaultPrevented;
+        };
+        globalThis.EventTarget = EventTarget;
+    }
+
+    // ----- DOMException ---------------------------------------------
+    // Used by AbortController.abort() (DOMException 'AbortError'),
+    // various Streams APIs, and Cache/IndexedDB shims. Most callers
+    // construct it as `new DOMException(message, name)` and read
+    // `.name` to discriminate error types.
+    if (typeof globalThis.DOMException !== 'function') {
+        var DOMException = function DOMException(message, name) {
+            this.message = message === undefined ? '' : String(message);
+            this.name = name === undefined ? 'Error' : String(name);
+            // .code: legacy numeric. 0 if name doesn't map.
+            var legacy = {
+                IndexSizeError: 1, HierarchyRequestError: 3, WrongDocumentError: 4,
+                InvalidCharacterError: 5, NoModificationAllowedError: 7,
+                NotFoundError: 8, NotSupportedError: 9, InUseAttributeError: 10,
+                InvalidStateError: 11, SyntaxError: 12, InvalidModificationError: 13,
+                NamespaceError: 14, InvalidAccessError: 15, SecurityError: 18,
+                NetworkError: 19, AbortError: 20, URLMismatchError: 21,
+                QuotaExceededError: 22, TimeoutError: 23, InvalidNodeTypeError: 24,
+                DataCloneError: 25,
+            };
+            this.code = legacy[this.name] || 0;
+            // Stack trace via Error to make it inspectable.
+            try { Error.captureStackTrace(this, DOMException); }
+            catch (_) { this.stack = (new Error(this.message)).stack; }
+        };
+        DOMException.prototype = Object.create(Error.prototype);
+        DOMException.prototype.constructor = DOMException;
+        DOMException.prototype.toString = function() { return this.name + ': ' + this.message; };
+        // Static legacy code constants on the constructor.
+        var codes = ['INDEX_SIZE_ERR','DOMSTRING_SIZE_ERR','HIERARCHY_REQUEST_ERR','WRONG_DOCUMENT_ERR','INVALID_CHARACTER_ERR','NO_DATA_ALLOWED_ERR','NO_MODIFICATION_ALLOWED_ERR','NOT_FOUND_ERR','NOT_SUPPORTED_ERR','INUSE_ATTRIBUTE_ERR','INVALID_STATE_ERR','SYNTAX_ERR','INVALID_MODIFICATION_ERR','NAMESPACE_ERR','INVALID_ACCESS_ERR','VALIDATION_ERR','TYPE_MISMATCH_ERR','SECURITY_ERR','NETWORK_ERR','ABORT_ERR','URL_MISMATCH_ERR','QUOTA_EXCEEDED_ERR','TIMEOUT_ERR','INVALID_NODE_TYPE_ERR','DATA_CLONE_ERR'];
+        for (var ci = 0; ci < codes.length; ci++) DOMException[codes[ci]] = ci + 1;
+        globalThis.DOMException = DOMException;
+    }
+
+    // ----- Blob / File / FormData -----------------------------------
+    // Node 18+ globals. node-fetch / undici-style clients construct
+    // Blobs to wrap response bodies; multer / form-data libraries
+    // build FormData. Buffer-backed implementations — covers the API
+    // shape; binary streaming is best-effort sync.
+    if (typeof globalThis.Blob !== 'function') {
+        var Blob = function Blob(parts, options) {
+            options = options || {};
+            this.type = options.type ? String(options.type).toLowerCase() : '';
+            var arr = parts || [];
+            // Coerce each part to bytes.
+            var Buf = (typeof globalThis.Buffer === 'function') ? globalThis.Buffer : null;
+            var pieces = [];
+            for (var i = 0; i < arr.length; i++) {
+                var p = arr[i];
+                if (Buf && Buf.isBuffer && Buf.isBuffer(p)) pieces.push(p);
+                else if (p instanceof Uint8Array) pieces.push(Buf ? Buf.from(p) : p);
+                else if (p instanceof ArrayBuffer) pieces.push(Buf ? Buf.from(new Uint8Array(p)) : new Uint8Array(p));
+                else if (typeof p === 'string') pieces.push(Buf ? Buf.from(p, 'utf8') : new globalThis.TextEncoder().encode(p));
+                else if (p && typeof p.arrayBuffer === 'function') {
+                    // Nested Blob — sync access to its internal bytes.
+                    pieces.push(Buf ? Buf.from(p._bytes || []) : (p._bytes || new Uint8Array(0)));
+                } else {
+                    var s = String(p);
+                    pieces.push(Buf ? Buf.from(s, 'utf8') : new globalThis.TextEncoder().encode(s));
+                }
+            }
+            // Concatenate.
+            var total = 0;
+            for (var j = 0; j < pieces.length; j++) total += pieces[j].length;
+            var out = Buf ? Buf.alloc(total) : new Uint8Array(total);
+            var off = 0;
+            for (var k = 0; k < pieces.length; k++) {
+                if (Buf) pieces[k].copy(out, off);
+                else out.set(pieces[k], off);
+                off += pieces[k].length;
+            }
+            this._bytes = out;
+            this.size = total;
+        };
+        Blob.prototype.arrayBuffer = function() {
+            var b = this._bytes;
+            return Promise.resolve(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength));
+        };
+        Blob.prototype.text = function() {
+            return Promise.resolve(new globalThis.TextDecoder().decode(this._bytes));
+        };
+        Blob.prototype.bytes = function() {
+            return Promise.resolve(new Uint8Array(this._bytes.buffer, this._bytes.byteOffset, this._bytes.byteLength));
+        };
+        Blob.prototype.slice = function(start, end, type) {
+            var s = (start === undefined) ? 0 : (start | 0);
+            var e = (end === undefined) ? this.size : (end | 0);
+            if (s < 0) s = Math.max(this.size + s, 0);
+            if (e < 0) e = Math.max(this.size + e, 0);
+            s = Math.min(s, this.size); e = Math.min(e, this.size);
+            var sub = this._bytes.slice(s, e);
+            var out = Object.create(Blob.prototype);
+            out._bytes = sub; out.size = sub.length;
+            out.type = type ? String(type).toLowerCase() : '';
+            return out;
+        };
+        Blob.prototype.stream = function() {
+            // Best-effort: a stream-shaped object with one chunk.
+            var bytes = this._bytes;
+            var done = false;
+            return {
+                getReader: function() {
+                    return {
+                        read: function() {
+                            if (done) return Promise.resolve({ value: undefined, done: true });
+                            done = true;
+                            return Promise.resolve({ value: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength), done: false });
+                        },
+                        cancel: function() { done = true; return Promise.resolve(); },
+                        releaseLock: function() {},
+                    };
+                },
+                [Symbol.asyncIterator]: function() {
+                    return {
+                        next: function() {
+                            if (done) return Promise.resolve({ value: undefined, done: true });
+                            done = true;
+                            return Promise.resolve({ value: bytes, done: false });
+                        },
+                    };
+                },
+            };
+        };
+        globalThis.Blob = Blob;
+    }
+    if (typeof globalThis.File !== 'function') {
+        globalThis.File = function File(parts, name, options) {
+            globalThis.Blob.call(this, parts, options);
+            this.name = String(name);
+            this.lastModified = (options && typeof options.lastModified === 'number') ? options.lastModified : Date.now();
+            this.webkitRelativePath = '';
+        };
+        globalThis.File.prototype = Object.create(globalThis.Blob.prototype);
+        globalThis.File.prototype.constructor = globalThis.File;
+    }
+    if (typeof globalThis.FormData !== 'function') {
+        globalThis.FormData = function FormData() {
+            this._entries = [];
+        };
+        var FP = globalThis.FormData.prototype;
+        FP.append = function(key, value, filename) {
+            this._entries.push([String(key), value, filename]);
+        };
+        FP.set = function(key, value, filename) {
+            this._entries = this._entries.filter(function(e) { return e[0] !== String(key); });
+            this._entries.push([String(key), value, filename]);
+        };
+        FP.delete = function(key) {
+            this._entries = this._entries.filter(function(e) { return e[0] !== String(key); });
+        };
+        FP.has = function(key) {
+            return this._entries.some(function(e) { return e[0] === String(key); });
+        };
+        FP.get = function(key) {
+            for (var i = 0; i < this._entries.length; i++)
+                if (this._entries[i][0] === String(key)) return this._entries[i][1];
+            return null;
+        };
+        FP.getAll = function(key) {
+            return this._entries.filter(function(e) { return e[0] === String(key); }).map(function(e) { return e[1]; });
+        };
+        FP.entries = function() {
+            var arr = this._entries.map(function(e) { return [e[0], e[1]]; });
+            var idx = 0;
+            return {
+                next: function() {
+                    if (idx >= arr.length) return { value: undefined, done: true };
+                    return { value: arr[idx++], done: false };
+                },
+                [Symbol.iterator]: function() { return this; },
+            };
+        };
+        FP.keys = function() {
+            var arr = this._entries.map(function(e) { return e[0]; });
+            var idx = 0;
+            return { next: function() { return idx < arr.length ? { value: arr[idx++], done: false } : { value: undefined, done: true }; }, [Symbol.iterator]: function() { return this; } };
+        };
+        FP.values = function() {
+            var arr = this._entries.map(function(e) { return e[1]; });
+            var idx = 0;
+            return { next: function() { return idx < arr.length ? { value: arr[idx++], done: false } : { value: undefined, done: true }; }, [Symbol.iterator]: function() { return this; } };
+        };
+        FP.forEach = function(cb, thisArg) {
+            for (var i = 0; i < this._entries.length; i++) cb.call(thisArg, this._entries[i][1], this._entries[i][0], this);
+        };
+        FP[Symbol.iterator] = FP.entries;
+    }
+
+    // ----- MessageChannel / MessagePort / MessageEvent ---------------
+    // Same-realm message passing. Worker code uses the API surface
+    // even when the actual cross-thread mechanism is provided by the
+    // worker_threads polyfill — we expose a same-realm impl so user
+    // code that does `new MessageChannel()` doesn't crash.
+    if (typeof globalThis.MessageEvent !== 'function') {
+        globalThis.MessageEvent = function MessageEvent(type, init) {
+            globalThis.Event.call(this, type, init);
+            init = init || {};
+            this.data = init.data === undefined ? null : init.data;
+            this.origin = init.origin || '';
+            this.lastEventId = init.lastEventId || '';
+            this.source = init.source || null;
+            this.ports = init.ports || [];
+        };
+        globalThis.MessageEvent.prototype = Object.create(globalThis.Event.prototype);
+        globalThis.MessageEvent.prototype.constructor = globalThis.MessageEvent;
+    }
+    if (typeof globalThis.MessagePort !== 'function') {
+        var MessagePort = function MessagePort() {
+            globalThis.EventTarget.call(this);
+            this._other = null;
+            this._started = false;
+            this._queued = [];
+            this._onmessage = null;
+        };
+        MessagePort.prototype = Object.create(globalThis.EventTarget.prototype);
+        MessagePort.prototype.constructor = MessagePort;
+        Object.defineProperty(MessagePort.prototype, 'onmessage', {
+            get: function() { return this._onmessage; },
+            set: function(fn) {
+                this._onmessage = fn;
+                this.start();
+            },
+        });
+        MessagePort.prototype.postMessage = function(data, transferList) {
+            var other = this._other;
+            if (!other) return;
+            var ev = new globalThis.MessageEvent('message', { data: data, ports: transferList || [] });
+            if (other._started || other._onmessage) {
+                if (typeof globalThis.queueMicrotask === 'function') {
+                    globalThis.queueMicrotask(function() {
+                        if (typeof other._onmessage === 'function') other._onmessage(ev);
+                        other.dispatchEvent(ev);
+                    });
+                } else {
+                    Promise.resolve().then(function() {
+                        if (typeof other._onmessage === 'function') other._onmessage(ev);
+                        other.dispatchEvent(ev);
+                    });
+                }
+            } else {
+                other._queued.push(ev);
+            }
+        };
+        MessagePort.prototype.start = function() {
+            if (this._started) return;
+            this._started = true;
+            var self = this;
+            for (var i = 0; i < this._queued.length; i++) {
+                (function(ev) {
+                    Promise.resolve().then(function() {
+                        if (typeof self._onmessage === 'function') self._onmessage(ev);
+                        self.dispatchEvent(ev);
+                    });
+                })(this._queued[i]);
+            }
+            this._queued.length = 0;
+        };
+        MessagePort.prototype.close = function() {
+            this._other = null;
+            this._onmessage = null;
+        };
+        globalThis.MessagePort = MessagePort;
+    }
+    if (typeof globalThis.MessageChannel !== 'function') {
+        globalThis.MessageChannel = function MessageChannel() {
+            this.port1 = new globalThis.MessagePort();
+            this.port2 = new globalThis.MessagePort();
+            this.port1._other = this.port2;
+            this.port2._other = this.port1;
+        };
+    }
+    if (typeof globalThis.BroadcastChannel !== 'function') {
+        // Sandbox is single-realm, so a BroadcastChannel just delivers
+        // messages to other channels with the same name in this same
+        // process. Useful for in-process module-coordination patterns.
+        if (!globalThis.__ab_bc_registry) globalThis.__ab_bc_registry = {};
+        var BroadcastChannel = function BroadcastChannel(name) {
+            globalThis.EventTarget.call(this);
+            this.name = String(name);
+            this._closed = false;
+            this._onmessage = null;
+            var reg = globalThis.__ab_bc_registry;
+            (reg[this.name] = reg[this.name] || []).push(this);
+        };
+        BroadcastChannel.prototype = Object.create(globalThis.EventTarget.prototype);
+        BroadcastChannel.prototype.constructor = BroadcastChannel;
+        Object.defineProperty(BroadcastChannel.prototype, 'onmessage', {
+            get: function() { return this._onmessage; },
+            set: function(v) { this._onmessage = v; },
+        });
+        BroadcastChannel.prototype.postMessage = function(data) {
+            if (this._closed) return;
+            var ev = new globalThis.MessageEvent('message', { data: data });
+            var peers = (globalThis.__ab_bc_registry[this.name] || []).filter(function(c) { return c !== this; }, this);
+            var self = this;
+            peers.forEach(function(peer) {
+                if (peer._closed) return;
+                Promise.resolve().then(function() {
+                    if (typeof peer._onmessage === 'function') peer._onmessage(ev);
+                    peer.dispatchEvent(ev);
+                });
+            });
+        };
+        BroadcastChannel.prototype.close = function() {
+            this._closed = true;
+            var reg = globalThis.__ab_bc_registry;
+            if (reg[this.name]) {
+                reg[this.name] = reg[this.name].filter(function(c) { return c !== this; }, this);
+            }
+        };
+        globalThis.BroadcastChannel = BroadcastChannel;
+    }
+
+    // ----- Web Crypto (globalThis.crypto) ---------------------------
+    // Modern crypto is via the SubtleCrypto WebCrypto API. Most uses
+    // we see in Node code are `crypto.randomUUID()`,
+    // `crypto.getRandomValues()`, `crypto.subtle.digest()`. Lazy-load
+    // node:crypto on first call so module-init time doesn't reach
+    // into the host bridge before host imports are wired (Wizer
+    // pre-init runs the bundle without our custom wasm imports
+    // bound; eager require here trips the linker).
+    if (typeof globalThis.crypto !== 'object' || !globalThis.crypto || typeof globalThis.crypto.randomUUID !== 'function') {
+        var webCrypto = globalThis.crypto || {};
+        function _hexToBytes(hex) {
+            var out = new Uint8Array(hex.length / 2);
+            for (var i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i*2, 2), 16);
+            return out;
+        }
+        webCrypto.randomUUID = function() {
+            try {
+                var nc = require('crypto');
+                if (typeof nc.randomUUID === 'function') return nc.randomUUID();
+            } catch (_) {}
+            var r = '';
+            for (var i = 0; i < 32; i++) {
+                if (i === 8 || i === 12 || i === 16 || i === 20) r += '-';
+                r += Math.floor(Math.random() * 16).toString(16);
+            }
+            return r;
+        };
+        webCrypto.getRandomValues = function(typed) {
+            if (!typed || typeof typed.length !== 'number') {
+                throw new TypeError('getRandomValues: typed-array required');
+            }
+            var n = typed.byteLength || typed.length;
+            try {
+                var nc = require('crypto');
+                if (nc && nc.randomBytes) {
+                    var hex = nc.randomBytes(n);
+                    var bytes = (typeof hex === 'string') ? _hexToBytes(hex) : hex;
+                    var view = new Uint8Array(typed.buffer || typed, typed.byteOffset || 0, n);
+                    for (var i = 0; i < n; i++) view[i] = bytes[i];
+                    return typed;
+                }
+            } catch (_) {}
+            var view2 = new Uint8Array(typed.buffer || typed, typed.byteOffset || 0, n);
+            for (var j = 0; j < n; j++) view2[j] = Math.floor(Math.random() * 256);
+            return typed;
+        };
+        webCrypto.subtle = webCrypto.subtle || {
+            digest: function(algo, data) {
+                var algorithm = (typeof algo === 'string') ? algo : (algo && algo.name) || '';
+                var nodeAlgo = algorithm.toLowerCase().replace('-', '');
+                try {
+                    var nc = require('crypto');
+                    var hash = nc.createHash(nodeAlgo);
+                    var bytes = (data instanceof ArrayBuffer) ? new Uint8Array(data)
+                              : (data && data.buffer) ? new Uint8Array(data.buffer, data.byteOffset || 0, data.byteLength)
+                              : data;
+                    hash.update(bytes);
+                    var hex = hash.digest('hex');
+                    return Promise.resolve(_hexToBytes(hex).buffer);
+                } catch (e) { return Promise.reject(e); }
+            },
+        };
+        globalThis.crypto = webCrypto;
+    }
+
+    // ----- navigator (Node 22+) -------------------------------------
+    if (typeof globalThis.navigator !== 'object' || !globalThis.navigator) {
+        globalThis.navigator = {
+            userAgent: 'Node.js/26.0.0 (Afterburner)',
+            language: 'en-US',
+            languages: ['en-US'],
+            hardwareConcurrency: 1,
+            platform: globalThis.process && globalThis.process.platform || 'linux',
+            onLine: true,
+        };
+    }
+
+    // ----- Streams Web globals --------------------------------------
+    // The polyfill bundle registers `stream/web` as a require target
+    // but Node 18+ also exposes the constructors as globals. Bring
+    // them onto globalThis so undici / web-streams-polyfill probes
+    // see them.
+    try {
+        var sw = require('stream/web');
+        ['ReadableStream','WritableStream','TransformStream',
+         'ByteLengthQueuingStrategy','CountQueuingStrategy',
+         'ReadableStreamDefaultReader','ReadableStreamBYOBReader',
+         'WritableStreamDefaultWriter','TransformStreamDefaultController'
+        ].forEach(function(name) {
+            if (sw[name] && !globalThis[name]) globalThis[name] = sw[name];
+        });
+    } catch (_) {}
+
+    // ----- TextEncoderStream / TextDecoderStream --------------------
+    // TransformStream subclasses that pump chunks through encode/decode.
+    // Defer until ReadableStream is available so we can compose.
+    if (typeof globalThis.TextEncoderStream !== 'function' && typeof globalThis.TransformStream === 'function') {
+        var TES = function TextEncoderStream() {
+            var enc = new globalThis.TextEncoder();
+            globalThis.TransformStream.call(this, {
+                transform: function(chunk, controller) {
+                    controller.enqueue(enc.encode(String(chunk)));
+                },
+            });
+            this.encoding = enc.encoding;
+        };
+        TES.prototype = Object.create(globalThis.TransformStream && globalThis.TransformStream.prototype || Object.prototype);
+        globalThis.TextEncoderStream = TES;
+    }
+    if (typeof globalThis.TextDecoderStream !== 'function' && typeof globalThis.TransformStream === 'function') {
+        var TDS = function TextDecoderStream(label, options) {
+            var dec = new globalThis.TextDecoder(label, options);
+            globalThis.TransformStream.call(this, {
+                transform: function(chunk, controller) {
+                    controller.enqueue(dec.decode(chunk));
+                },
+            });
+            this.encoding = dec.encoding;
+        };
+        TDS.prototype = Object.create(globalThis.TransformStream && globalThis.TransformStream.prototype || Object.prototype);
+        globalThis.TextDecoderStream = TDS;
+    }
+
+    // ----- CompressionStream / DecompressionStream ------------------
+    // Node 17+. Wrap zlib for the underlying codec; defer the
+    // require to first call so Wizer pre-init doesn't reach the
+    // host bridge.
+    if (typeof globalThis.CompressionStream !== 'function' && typeof globalThis.TransformStream === 'function') {
+        var CS = function CompressionStream(format) {
+            globalThis.TransformStream.call(this, {
+                transform: function(chunk, controller) {
+                    try {
+                        var nz = require('zlib');
+                        var Buf = globalThis.Buffer;
+                        var buf = Buf && Buf.from ? Buf.from(chunk) : chunk;
+                        var syncFn = (format === 'gzip') ? nz.gzipSync :
+                                     (format === 'deflate') ? nz.deflateSync :
+                                     (format === 'deflate-raw') ? nz.deflateRawSync : null;
+                        if (syncFn) controller.enqueue(syncFn(buf));
+                        else controller.enqueue(chunk);
+                    } catch (e) { controller.error(e); }
+                },
+            });
+        };
+        globalThis.CompressionStream = CS;
+    }
+    if (typeof globalThis.DecompressionStream !== 'function' && typeof globalThis.TransformStream === 'function') {
+        var DS = function DecompressionStream(format) {
+            globalThis.TransformStream.call(this, {
+                transform: function(chunk, controller) {
+                    try {
+                        var nz = require('zlib');
+                        var Buf = globalThis.Buffer;
+                        var buf = Buf && Buf.from ? Buf.from(chunk) : chunk;
+                        var syncFn = (format === 'gzip') ? nz.gunzipSync :
+                                     (format === 'deflate') ? nz.inflateSync :
+                                     (format === 'deflate-raw') ? nz.inflateRawSync : null;
+                        if (syncFn) controller.enqueue(syncFn(buf));
+                        else controller.enqueue(chunk);
+                    } catch (e) { controller.error(e); }
+                },
+            });
+        };
+        globalThis.DecompressionStream = DS;
     }
     if (typeof globalThis.URL !== 'function') {
         var urlMod = require('url');

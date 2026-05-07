@@ -1471,7 +1471,7 @@
     <div class="demo__layout reveal">
       <div class="demo__tabs" role="tablist">
         <button class="demo__tab active" data-tab="0"><span class="num">1</span><span>HTTP server<span class="sub">burn server.js</span></span></button>
-        <button class="demo__tab" data-tab="1"><span class="num">2</span><span>npm pass-through<span class="sub">burn npm install</span></span></button>
+        <button class="demo__tab" data-tab="1"><span class="num">2</span><span>Package-mgr pass-through<span class="sub">burn bun add …</span></span></button>
         <button class="demo__tab" data-tab="2"><span class="num">3</span><span>TypeScript<span class="sub">burn app.ts</span></span></button>
         <button class="demo__tab" data-tab="3"><span class="num">4</span><span>Postgres + TLS<span class="sub">net &middot; tls &middot; pg</span></span></button>
         <button class="demo__tab" data-tab="4"><span class="num">5</span><span>Workers<span class="sub">worker_threads</span></span></button>
@@ -1613,8 +1613,8 @@
       <div class="runs__cell">
         <div class="runs__check">✓</div>
         <div>
-          <h4>npm install</h4>
-          <p><code>burn npm install</code>, <code>burn pnpm run dev</code>, <code>burn yarn</code>, <code>burn bun</code>. Every nested <code>node</code> routes home.</p>
+          <h4>Package managers</h4>
+          <p><code>burn bun add</code> installs end-to-end — bun is a native binary, args pass through cleanly. <code>burn npm</code> / <code>pnpm</code> / <code>yarn</code> are best-effort: the PATH shim re-enters the sandbox so every nested <code>node</code> routes home, but their async dispatch chains exercise more Node fidelity than the runtime currently provides. Use <code>bun</code> if you want it to just work today.</p>
         </div>
       </div>
       <div class="runs__cell">
@@ -1890,8 +1890,8 @@
     { p: '$', t: 'burn server.js', d: 500 },
     { o: 'listening on http://localhost:3000', c: 'var(--action-soft)', d: 350 },
     { o: '✓ ready in 3ms', c: 'var(--color-accent-green)', d: 700 },
-    { p: '$', t: 'burn npm install express pg jsonwebtoken', d: 500 },
-    { o: 'added 73 packages in 1.2s', c: 'var(--color-accent-green)', d: 500 },
+    { p: '$', t: 'burn bun add express pg jsonwebtoken', d: 500 },
+    { o: 'installed 3 packages in 0.4s', c: 'var(--color-accent-green)', d: 500 },
     { p: '$', t: 'burn app.ts', d: 500 },
     { o: '⟶ types stripped (oxc) · ESM → CJS · ready', c: 'var(--accent)', d: 500 },
     { p: '$', t: 'echo \'{"n":21}\' | burn thrust transform.js', d: 500 },
@@ -2036,16 +2036,18 @@ app.listen(3000, () => {
       file: 'shell', lang: 'sh',
       output: 'every nested node call routes through burn',
       code:
-`# burn shims itself onto PATH. npm's child node calls route home.
-$ burn npm install express pg jsonwebtoken
-$ burn npx tsc --init
-$ burn pnpm run dev
-$ burn yarn build
+`# burn shims itself onto PATH. The shim re-enters burn for every
+# nested 'node script.js' invocation, no matter how deeply it nests.
+$ burn bun add express pg jsonwebtoken    # bun: native, just works
 $ burn bun run start
 
 # Pass-through. burn node behaves like node, but inside the burn runtime.
 $ burn node -e "console.log(process.versions.node)"
-20.11.0`
+20.11.0
+
+# npm/pnpm/yarn pass-through is wired (PATH shim re-enters), but the
+# JS-script package managers ride deep async chains we don't yet drain
+# fully. Use burn bun for now if you want it to just work.`
     },
     {
       file: 'app.ts', lang: 'js',

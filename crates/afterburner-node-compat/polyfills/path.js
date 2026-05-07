@@ -138,6 +138,34 @@ __register_module('path', function(module, exports, require) {
         return p.slice(0, end);
     };
 
+    // path.relative(from, to) — express the relative path from one
+    // absolute path to another. arborist's `relpath`, every workspace
+    // resolver, every test runner, and most build tools depend on
+    // this. Algorithm matches Node's implementation: resolve both
+    // arguments, find the common prefix, walk back from `from` and
+    // forward to `to`.
+    exports.relative = function(from, to) {
+        assertString(from);
+        assertString(to);
+        if (from === to) return '';
+        from = exports.resolve(from);
+        to = exports.resolve(to);
+        if (from === to) return '';
+        // Trim leading slashes for the segment scan; we know both are
+        // absolute after `resolve`.
+        var fromSegs = from.slice(1).split('/').filter(function(s) { return s.length; });
+        var toSegs = to.slice(1).split('/').filter(function(s) { return s.length; });
+        var common = 0;
+        var max = Math.min(fromSegs.length, toSegs.length);
+        while (common < max && fromSegs[common] === toSegs[common]) common++;
+        var up = fromSegs.length - common;
+        var rest = toSegs.slice(common);
+        var out = [];
+        for (var i = 0; i < up; i++) out.push('..');
+        for (var j = 0; j < rest.length; j++) out.push(rest[j]);
+        return out.join('/') || '.';
+    };
+
     exports.basename = function(p, ext) {
         assertString(p);
         if (ext !== undefined) assertString(ext);
@@ -215,4 +243,141 @@ __register_module('path', function(module, exports, require) {
     };
 
     exports.posix = exports;
+
+    // path.win32 — Node always exposes both flavours; many libraries
+    // (npm's `tar`, fs-extra, archive utilities) reach for
+    // `require('path').win32.{isAbsolute,parse}` to normalise paths
+    // even on Linux. We provide a Windows-shaped twin: backslash is
+    // an additional separator, drive letters are recognised as
+    // absolute (`c:/foo`, `\\?\drive\...`), and the rest of the
+    // surface mirrors POSIX with `\\` separators.
+    var win32 = {};
+    win32.sep = '\\';
+    win32.delimiter = ';';
+    win32.posix = exports;
+    win32.win32 = win32;
+    function _winSplit(p) {
+        return String(p).replace(/\//g, '\\').split('\\').filter(function(s) { return s.length > 0 || false; });
+    }
+    win32.isAbsolute = function(p) {
+        var s = String(p);
+        if (s.length === 0) return false;
+        if (s.charAt(0) === '/' || s.charAt(0) === '\\') return true;
+        // c:/foo or c:\foo
+        if (s.length >= 3 && /^[a-z]:[\/\\]/i.test(s)) return true;
+        // c:foo (drive-relative — not absolute, but Node treats some
+        // shapes as absolute. Conservative: false here.)
+        return false;
+    };
+    win32.normalize = function(p) {
+        var s = String(p).replace(/\//g, '\\');
+        // Drive letter detection.
+        var rootMatch = /^([a-z]:)?[\\\\]?/i.exec(s);
+        var drive = rootMatch && rootMatch[1] ? rootMatch[1] : '';
+        var rooted = /^([a-z]:)?[\\]/i.test(s);
+        var rest = s.slice((drive.length) + (rooted ? 1 : 0));
+        var parts = rest.split('\\').filter(function(p) { return p && p !== '.'; });
+        var stack = [];
+        for (var i = 0; i < parts.length; i++) {
+            if (parts[i] === '..') {
+                if (stack.length && stack[stack.length-1] !== '..') stack.pop();
+                else if (!rooted) stack.push('..');
+            } else { stack.push(parts[i]); }
+        }
+        return drive + (rooted ? '\\' : '') + stack.join('\\');
+    };
+    win32.join = function() {
+        var args = [].slice.call(arguments).filter(function(a) { return a && a.length; });
+        if (args.length === 0) return '.';
+        return win32.normalize(args.join('\\'));
+    };
+    win32.resolve = function() {
+        var args = [].slice.call(arguments);
+        var resolved = '';
+        for (var i = args.length - 1; i >= -1; i--) {
+            var p = (i >= 0) ? args[i] : '\\';
+            if (!p || p.length === 0) continue;
+            resolved = p + '\\' + resolved;
+            if (win32.isAbsolute(p)) break;
+        }
+        return win32.normalize(resolved);
+    };
+    win32.dirname = function(p) {
+        var s = String(p).replace(/\//g, '\\');
+        var idx = s.lastIndexOf('\\');
+        if (idx < 0) return '.';
+        if (idx === 0) return '\\';
+        return s.slice(0, idx);
+    };
+    win32.basename = function(p, ext) {
+        var s = String(p).replace(/\//g, '\\');
+        var idx = s.lastIndexOf('\\');
+        var base = idx >= 0 ? s.slice(idx + 1) : s;
+        if (ext && base.endsWith(ext)) base = base.slice(0, base.length - ext.length);
+        return base;
+    };
+    win32.extname = function(p) {
+        var b = win32.basename(p);
+        var idx = b.lastIndexOf('.');
+        if (idx <= 0) return '';
+        return b.slice(idx);
+    };
+    win32.parse = function(p) {
+        var s = String(p).replace(/\//g, '\\');
+        var ret = { root: '', dir: '', base: '', ext: '', name: '' };
+        // Detect drive root.
+        var driveMatch = /^([a-z]:)([\\]?)/i.exec(s);
+        if (driveMatch) {
+            ret.root = driveMatch[1] + (driveMatch[2] || '');
+        } else if (s.charAt(0) === '\\') {
+            ret.root = '\\';
+        }
+        ret.base = win32.basename(p);
+        ret.dir = win32.dirname(p);
+        ret.ext = win32.extname(ret.base);
+        ret.name = ret.ext ? ret.base.slice(0, ret.base.length - ret.ext.length) : ret.base;
+        return ret;
+    };
+    win32.format = function(obj) {
+        var dir = obj.dir || obj.root || '';
+        var base = obj.base || ((obj.name || '') + (obj.ext || ''));
+        if (!dir) return base;
+        if (dir === obj.root) return dir + base;
+        return dir + '\\' + base;
+    };
+    win32.toNamespacedPath = function(p) { return String(p); };
+    win32.relative = function(from, to) {
+        from = win32.resolve(String(from));
+        to = win32.resolve(String(to));
+        if (from === to) return '';
+        var fromSegs = from.split('\\').filter(function(s) { return s.length; });
+        var toSegs = to.split('\\').filter(function(s) { return s.length; });
+        var common = 0;
+        var max = Math.min(fromSegs.length, toSegs.length);
+        while (common < max && fromSegs[common].toLowerCase() === toSegs[common].toLowerCase()) common++;
+        var up = fromSegs.length - common;
+        var rest = toSegs.slice(common);
+        var out = [];
+        for (var i = 0; i < up; i++) out.push('..');
+        for (var j = 0; j < rest.length; j++) out.push(rest[j]);
+        return out.join('\\') || '.';
+    };
+    win32.matchesGlob = function(p, pattern) {
+        var re = new RegExp('^' + String(pattern)
+            .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+            .replace(/\*/g, '.*')
+            .replace(/\?/g, '.') + '$');
+        return re.test(String(p));
+    };
+    exports.win32 = win32;
+
+    // Posix-side `toNamespacedPath` and `matchesGlob` (Node 22+).
+    exports.toNamespacedPath = function(p) { return String(p); };
+    exports.matchesGlob = function(p, pattern) {
+        var re = new RegExp('^' + String(pattern)
+            .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+            .replace(/\*/g, '.*')
+            .replace(/\?/g, '.') + '$');
+        return re.test(String(p));
+    };
 });

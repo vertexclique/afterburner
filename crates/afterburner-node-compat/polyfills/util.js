@@ -100,15 +100,17 @@ __register_module('util', function(module, exports, require) {
 
     exports.deprecate = function(fn, _msg) { return fn; };
 
-    exports.types = {
-        isDate: function(v)      { return Object.prototype.toString.call(v) === '[object Date]'; },
-        isRegExp: function(v)    { return v instanceof RegExp; },
-        isPromise: function(v)   { return v && typeof v.then === 'function'; },
-        isMap: function(v)       { return v instanceof Map; },
-        isSet: function(v)       { return v instanceof Set; },
-        isTypedArray: function(v){ return ArrayBuffer.isView(v) && !(v instanceof DataView); },
-        isUint8Array: function(v){ return v instanceof Uint8Array; }
-    };
+    // util.types — deferred to the full `util/types` module so the
+    // surface stays in one place and `require('util').types` returns
+    // the same object as `require('util/types')`. The ALL ~40
+    // type-test methods (`isFloat64Array`, `isAnyArrayBuffer`, etc.)
+    // are a hard dependency for many libraries that probe object
+    // shapes (oxc / acorn-walkers / koa-context, etc.).
+    Object.defineProperty(exports, 'types', {
+        configurable: true,
+        enumerable: true,
+        get: function() { return require('util/types'); },
+    });
 
     exports.TextEncoder = typeof TextEncoder === 'function' ? TextEncoder : undefined;
     exports.TextDecoder = typeof TextDecoder === 'function' ? TextDecoder : undefined;

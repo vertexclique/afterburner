@@ -28,6 +28,73 @@ use afterburner_core::{
     AfterburnerError, Combustor, EngineMode, FuelGauge, InMemoryStateStore, Result, ScriptId,
     ScriptInvocation, ScriptOutcome, SharedStateStore, ab_event, sha256,
 };
+
+/// Normalise a leading hashbang/BOM and bare dynamic `import(...)`
+/// expressions so QuickJS will parse and run the source. Same
+/// rationale as the wasm-side wrappers in
+/// `afterburner-plugin/src/envelope.rs` — we mirror the fix-up here
+/// so script files / npm-installed CLI entry points / TS-stripped
+/// sources behave identically across the native and wasm engines.
+/// Hashbang replacement is length-preserving (`#!` → `//`) so error
+/// columns stay aligned with the on-disk file.
+fn normalize_user_source(source: &str) -> String {
+    let stripped = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let after = if let Some(rest) = stripped.strip_prefix("#!") {
+        let mut out = String::with_capacity(stripped.len());
+        out.push_str("//");
+        out.push_str(rest);
+        out
+    } else if stripped.len() == source.len() {
+        source.to_string()
+    } else {
+        stripped.to_string()
+    };
+    rewrite_dynamic_imports(&after)
+}
+
+/// Twin of the wasm-side rewriter — see envelope.rs for the rationale.
+/// QuickJS has no module loader registered so `import('foo')` throws
+/// at runtime; we redirect to `globalThis.__ab_dyn_import(foo)`,
+/// which the plenum bundle wires to the require resolver.
+fn rewrite_dynamic_imports(source: &str) -> String {
+    if !source.contains("import") {
+        return source.to_string();
+    }
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len() + 32);
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'i'
+            && i + 6 <= bytes.len()
+            && &bytes[i..i + 6] == b"import"
+            && (i == 0 || !is_ident_char(bytes[i - 1]))
+        {
+            let mut j = i + 6;
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'(' {
+                out.push_str("globalThis.__ab_dyn_import");
+                out.push_str(&source[i + 6..j]);
+                out.push_str("(require,");
+                i = j + 1;
+                continue;
+            }
+        }
+        let ch_len = source[i..]
+            .chars()
+            .next()
+            .map(|c| c.len_utf8())
+            .unwrap_or(1);
+        out.push_str(&source[i..i + ch_len]);
+        i += ch_len;
+    }
+    out
+}
+
+fn is_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
 use kovan_map::HopscotchMap;
 use rquickjs::{Context, Ctx, Error as RquickjsError, Runtime, Value as RqValue};
 use serde_json::Value as JsonValue;
@@ -278,6 +345,15 @@ impl NativeCombustor {
 impl Combustor for NativeCombustor {
     #[fastrace::trace(name = "NativeCombustor::ignite")]
     fn ignite(&self, source: &str) -> Result<ScriptId> {
+        // Strip a leading hashbang/BOM before storing or probing —
+        // every downstream wrap (probe, thrust stage, script stage)
+        // inlines the source either as raw code or as a string
+        // literal handed to `new Function(...)`, and QuickJS rejects
+        // `#!` in both contexts. Normalising on entry means the
+        // source_store, the bytecode hash, and every consumer all see
+        // the same `//`-prefixed first line.
+        let normalized = normalize_user_source(source);
+        let source = normalized.as_str();
         let hash = sha256(source.as_bytes());
         // Fast-path: source already registered — skip the parse probe.
         if self.source_store.get(&hash).is_some() {
@@ -338,6 +414,13 @@ impl Combustor for NativeCombustor {
         invocation: &ScriptInvocation,
         limits: &FuelGauge,
     ) -> Result<ScriptOutcome> {
+        // Same shebang/BOM normalisation `ignite` performs — script
+        // mode bypasses ignite, so without this pass a `#!/usr/bin/env
+        // node` prologue would land verbatim inside the user-source
+        // string literal handed to `new Function(...)` and trip the
+        // QuickJS private-name parser.
+        let normalized = normalize_user_source(source);
+        let source = normalized.as_str();
         let argv_json = serde_json::to_string(&invocation.argv)
             .map_err(|e| AfterburnerError::Engine(format!("argv json: {e}")))?;
         let env_json = serde_json::to_string(&invocation.env)

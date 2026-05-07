@@ -22,8 +22,14 @@
     var fields = {
         platform: globalThis.__host_platform || 'linux',
         arch:     globalThis.__host_arch     || 'x64',
-        version:  'v20.0.0-afterburner',
-        versions: { node: '20.0.0', afterburner: '0.1.0' },
+        // We claim Node 26 (latest stable, the project's target). Most
+        // libraries gate features on numeric ranges (`>=18.17.0`,
+        // `>=20.5.0`, `>=22.0.0`) — claiming the current major
+        // version unblocks every reasonable engines check while
+        // still surfacing the `-afterburner` suffix so version-aware
+        // code paths (rare) can detect us.
+        version:  'v26.0.0-afterburner',
+        versions: { node: '26.0.0', v8: '13.0.0.0', afterburner: '0.1.0' },
         env:      hostEnv,
         argv:     argv,
         execPath: '/usr/bin/afterburner',
@@ -32,6 +38,57 @@
 
         cwd:      function() { return globalThis.__host_cwd || '/'; },
         chdir:    function() { throw new Error('process.chdir is not supported'); },
+
+        // `umask([mask])` — Node returns the previous mask; with an
+        // arg, sets it. Sandbox doesn't surface umask through the
+        // bridge; return a sensible default and accept (silent) the
+        // setter call. Node reduced the deprecation noise around
+        // calling umask() with no args; we mirror that.
+        umask:    function(_mask) { return 0o022; },
+
+        // `process.getuid` / `getgid` / `geteuid` / `getegid` — POSIX
+        // identity functions. Sandbox returns 0 for everything; some
+        // libraries (npm install, sqlite open) probe these to decide
+        // whether to drop privileges.
+        getuid:   function() { return 0; },
+        getgid:   function() { return 0; },
+        geteuid:  function() { return 0; },
+        getegid:  function() { return 0; },
+        getgroups: function() { return [0]; },
+        // `setuid`/`setgid` — sandbox doesn't allow privilege change.
+        // Throw a Node-style typed error so callers can fall through.
+        setuid:   function() { var e = new Error('setuid not supported'); e.code = 'EPERM'; throw e; },
+        setgid:   function() { var e = new Error('setgid not supported'); e.code = 'EPERM'; throw e; },
+        seteuid:  function() { var e = new Error('seteuid not supported'); e.code = 'EPERM'; throw e; },
+        setegid:  function() { var e = new Error('setegid not supported'); e.code = 'EPERM'; throw e; },
+        setgroups: function() { var e = new Error('setgroups not supported'); e.code = 'EPERM'; throw e; },
+
+        // Node 18+ `process.permission` / `process.constrainedMemory`
+        // / `process.availableMemory` — light probe surface that
+        // libraries (express's inspector, nodemon) check at module
+        // init.
+        constrainedMemory:  function() { return 0; },
+        availableMemory:    function() { return 0; },
+        memoryUsage:        Object.assign(function() {
+            return { rss: 0, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 };
+        }, { rss: function() { return 0; } }),
+        // Node 24+ `process.threadCpuUsage` — return a zeroed object.
+        threadCpuUsage:     function() { return { user: 0, system: 0 }; },
+        cpuUsage:           function(_prev) { return { user: 0, system: 0 }; },
+        resourceUsage:      function() {
+            return {
+                userCPUTime: 0, systemCPUTime: 0, maxRSS: 0,
+                sharedMemorySize: 0, unsharedDataSize: 0, unsharedStackSize: 0,
+                minorPageFault: 0, majorPageFault: 0, swappedOut: 0,
+                fsRead: 0, fsWrite: 0, ipcSent: 0, ipcReceived: 0,
+                signalsCount: 0, voluntaryContextSwitches: 0, involuntaryContextSwitches: 0,
+            };
+        },
+        loadEnvFile: function(_path) { /* no-op: we read env at startup */ },
+        // process.permission — Node 20.x experimental. Always-allow
+        // posture matches the sandbox's "manifold gates everything"
+        // model; permission checks happen at the manifold layer.
+        permission: { has: function(_scope, _ref) { return true; } },
 
         // Real Node drains the nextTick queue synchronously between
         // each macrotask but BEFORE the microtask queue. Express's
@@ -122,6 +179,43 @@
         // unsupported internal.
         binding: function(name) {
             var which = typeof name === 'string' ? name : String(name);
+            // Return narrow stubs for the bindings real-world libraries
+            // probe at module-init for limit/feature flags — eager
+            // throws here break safer-buffer / fs-minipass / pacote at
+            // module load, which is far enough from any actual native
+            // primitive use that the user has no way to act on the
+            // error. Keep the throw for everything else so honest
+            // libuv consumers (rare in the sandbox) still surface a
+            // typed error pointing at the missing binding.
+            switch (which) {
+                case 'buffer':
+                    return {
+                        kStringMaxLength: 0x3fffffe7,        // ~1 GiB - 8
+                        kMaxLength:       0x7fffffff,        // INT32_MAX
+                    };
+                case 'fs':
+                    // fs-minipass gates a libuv fallback on
+                    // `!fs.writev`. We provide writev now, so the
+                    // binding is dead code; an empty object lets the
+                    // module-init `process.binding('fs')` complete
+                    // without exposing any libuv methods.
+                    return {};
+                case 'constants':
+                    // Return the merged fs+os+crypto constants so
+                    // legacy `require('process').binding('constants')`
+                    // gets a usable map (Node had this for years).
+                    try {
+                        var c = {};
+                        var fs = require('fs');
+                        var os = require('os');
+                        if (fs && fs.constants) Object.assign(c, fs.constants);
+                        if (os && os.constants) {
+                            if (os.constants.errno) Object.assign(c, os.constants.errno);
+                            if (os.constants.signals) Object.assign(c, os.constants.signals);
+                        }
+                        return c;
+                    } catch (_) { return {}; }
+            }
             var err = new Error(
                 "process.binding('" + which + "') is not supported in the " +
                 "Afterburner sandbox: native bindings (libuv internals and " +

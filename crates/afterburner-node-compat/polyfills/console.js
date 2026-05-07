@@ -17,11 +17,6 @@ __register_module('console', function(module, exports, require) {
 });
 
 (function bootstrapConsole() {
-    if (globalThis.console) {
-        // Runtime already has a console (Javy on wasm, etc.) — leave it.
-        return;
-    }
-
     function resolveHost() {
         return typeof globalThis.__host_log === 'function' ? globalThis.__host_log : null;
     }
@@ -53,7 +48,15 @@ __register_module('console', function(module, exports, require) {
         };
     }
 
-    var c = {
+    // Build the full Node-shaped console contract. On wasm Javy ships
+    // its own `globalThis.console` with just `log`/`error`; we keep
+    // those (they write directly to fd 1/2 — strictly better than the
+    // host-log bridge) and only fill in the methods Javy doesn't
+    // provide. Missing methods like `assert`/`warn`/`info`/`debug`
+    // are what break npm/pnpm/clipanion deep in their bundles, so the
+    // fill-in is non-optional.
+    var existing = globalThis.console || {};
+    var defaults = {
         log:     logAt('info'),
         info:    logAt('info'),
         warn:    logAt('warn'),
@@ -74,12 +77,26 @@ __register_module('console', function(module, exports, require) {
                 logAt('error').apply(null, ['Assertion failed:'].concat(args));
             }
         },
-        group:   function() {},
-        groupEnd:function() {},
-        time:    function() {},
-        timeEnd: function() {},
-        table:   function(t) { logAt('info')(JSON.stringify(t, null, 2)); }
+        group:    function() {},
+        groupCollapsed: function() {},
+        groupEnd: function() {},
+        count:    function() {},
+        countReset: function() {},
+        time:     function() {},
+        timeLog:  function() {},
+        timeEnd:  function() {},
+        timeStamp: function() {},
+        profile:  function() {},
+        profileEnd: function() {},
+        table:    function(t) { logAt('info')(JSON.stringify(t, null, 2)); },
+        dirxml:   function() { logAt('info').apply(null, arguments); },
+        clear:    function() {},
+        Console:  function Console() { return existing; },
     };
-
-    globalThis.console = c;
+    for (var name in defaults) {
+        if (typeof existing[name] !== 'function') {
+            existing[name] = defaults[name];
+        }
+    }
+    globalThis.console = existing;
 })();

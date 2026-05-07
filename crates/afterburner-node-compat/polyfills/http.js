@@ -19,9 +19,15 @@ function __plenum_install_http(moduleName) {
             if (typeof globalThis.__host_http_request !== 'function') {
                 throw new Error("Permission denied: http.request is not available");
             }
-            var url = typeof opts === 'string' ? opts
-                : (opts.protocol || 'http:') + '//' + (opts.host || opts.hostname)
-                  + (opts.port ? ':' + opts.port : '') + (opts.path || '/');
+            var url;
+            if (typeof opts === 'string') {
+                url = opts;
+            } else if (opts && typeof opts.url === 'string') {
+                url = opts.url;
+            } else {
+                url = (opts.protocol || 'http:') + '//' + (opts.host || opts.hostname)
+                    + (opts.port ? ':' + opts.port : '') + (opts.path || '/');
+            }
             var method = (opts && opts.method) || 'GET';
             var body = opts && opts.body;
 
@@ -33,31 +39,171 @@ function __plenum_install_http(moduleName) {
                 throw err;
             }
 
-            // Shape the response like a minimal IncomingMessage.
-            var resp = {
-                statusCode: result.status,
-                headers: {},
-                body: result.body,
-                _bodyRead: false,
-                on: function(event, handler) {
-                    if (event === 'data') { handler(result.body); return this; }
-                    if (event === 'end')  { handler(); return this; }
-                    return this;
-                },
-                setEncoding: function() {},
-                text: function() { return Promise.resolve(result.body); },
-                json: function() { return Promise.resolve(JSON.parse(result.body)); }
+            // Shape the response like a Node IncomingMessage with a
+            // working EventEmitter contract plus the readable-stream
+            // pieces user code commonly touches: `.resume()`,
+            // `.pause()`, `.pipe(dest)`, `.read()`, async iteration.
+            // The body is materialised eagerly by the host bridge — we
+            // just have to stage it through the listener queue so user
+            // code that registers handlers AFTER the cb fires (the
+            // normal Node pattern) still sees `data` + `end`.
+            var resp = Object.create(EventEmitter.prototype);
+            EventEmitter.call(resp);
+            resp.statusCode    = result.status;
+            resp.statusMessage = '';
+            resp.httpVersion   = '1.1';
+            resp.headers       = result.headers && typeof result.headers === 'object' ? result.headers : {};
+            resp.rawHeaders    = [];
+            for (var hk in resp.headers) {
+                resp.rawHeaders.push(hk, resp.headers[hk]);
+            }
+            resp.trailers      = {};
+            resp.method        = method;
+            resp.url           = url;
+            resp.complete      = false;
+            resp.readable      = true;
+            resp.readableEnded = false;
+            resp.body          = result.body;
+            var _paused = true; // start paused — drain on first listener / resume()
+            var _flushed = false;
+            function flushBody() {
+                if (_flushed) return;
+                _flushed = true;
+                resp.complete      = true;
+                resp.readableEnded = true;
+                if (typeof result.body === 'string' && result.body.length > 0) {
+                    resp.emit('data', result.body);
+                }
+                resp.emit('end');
+                resp.emit('close');
+            }
+            // Schedule the flush as a microtask so user code has a
+            // chance to register `data` / `end` / `close` listeners
+            // *after* calling `resume()` — the canonical Node pattern.
+            // Microtasks fire after the current synchronous turn but
+            // before any timer callback, so the outer envelope's
+            // `await` reliably drains them even for one-shot scripts.
+            function maybeFlush() {
+                if (_paused || _flushed) return;
+                Promise.resolve().then(flushBody);
+            }
+            resp.resume      = function() { _paused = false; maybeFlush(); return resp; };
+            resp.pause       = function() { _paused = true; return resp; };
+            resp.setEncoding = function() { return resp; };
+            resp.read        = function() {
+                if (_flushed) return null;
+                _flushed = true;
+                resp.complete = true;
+                resp.readableEnded = true;
+                return result.body || '';
             };
+            resp.destroy     = function(err) {
+                if (err) resp.emit('error', err);
+                resp.emit('close');
+                return resp;
+            };
+            resp.unpipe      = function() { return resp; };
+            // Convenience body-shaping helpers (Undici `.text()`/`.json()`
+            // shape) — handy for fetch-flavoured callers.
+            resp.text        = function() { return Promise.resolve(result.body); };
+            resp.json        = function() {
+                try { return Promise.resolve(JSON.parse(result.body)); }
+                catch (e) { return Promise.reject(e); }
+            };
+            // Auto-resume when a `data` listener attaches (Node's
+            // backwards-compat path: registering a `data` listener
+            // implicitly switches the stream to flowing mode).
+            var origOn = resp.on.bind(resp);
+            resp.on = resp.addListener = function(event, handler) {
+                origOn(event, handler);
+                if (event === 'data' || event === 'readable') {
+                    _paused = false;
+                    maybeFlush();
+                }
+                return resp;
+            };
+            resp.pipe = function(dest) {
+                resp.on('data', function(chunk) { if (dest && dest.write) dest.write(chunk); });
+                resp.on('end',  function()      { if (dest && dest.end)   dest.end(); });
+                _paused = false;
+                maybeFlush();
+                return dest;
+            };
+            // Async-iterator support so `for await (const chunk of res)`
+            // works. Single-chunk: yield the body once and end.
+            if (typeof Symbol !== 'undefined' && Symbol.asyncIterator) {
+                resp[Symbol.asyncIterator] = function() {
+                    var done = false;
+                    return {
+                        next: function() {
+                            if (done) return Promise.resolve({ value: undefined, done: true });
+                            done = true;
+                            _flushed = true;
+                            resp.complete = true;
+                            resp.readableEnded = true;
+                            return Promise.resolve({ value: result.body || '', done: false });
+                        },
+                        return: function() { done = true; return Promise.resolve({ value: undefined, done: true }); },
+                    };
+                };
+            }
             if (cb) cb(resp);
-            return {
-                end:   function() {},
-                write: function() {},
-                on:    function() { return this; }
-            };
+            // Outbound request stub. Node returns a ClientRequest;
+            // ours is a minimal EventEmitter stand-in that swallows
+            // body writes (we already sent them) and resolves
+            // `response` synchronously via `cb`.
+            var req = Object.create(EventEmitter.prototype);
+            EventEmitter.call(req);
+            req.end          = function() { return req; };
+            req.write        = function() { return true; };
+            req.setHeader    = function() { return req; };
+            req.getHeader    = function() {};
+            req.removeHeader = function() {};
+            req.setTimeout   = function() { return req; };
+            req.destroy      = function() { return req; };
+            req.abort        = function() { return req; };
+            req.flushHeaders = function() { return req; };
+            return req;
         }
 
-        exports.request = requestImpl;
-        exports.get     = function(opts, cb) { return requestImpl(opts, cb); };
+        // Node accepts both `(url[, options][, cb])` and
+        // `(options[, cb])`. Coalesce the URL+options form into a
+        // single opts object before handing off — corepack /
+        // node-fetch / pacote all reach for the 3-arg shape.
+        function normaliseRequestArgs(args) {
+            var arr = Array.prototype.slice.call(args);
+            var cb = (arr.length && typeof arr[arr.length - 1] === 'function') ? arr.pop() : undefined;
+            var first = arr[0];
+            var second = arr[1];
+            var opts;
+            if (typeof first === 'string') {
+                opts = (second && typeof second === 'object') ? Object.assign({}, second) : {};
+                // Stash the URL string for requestImpl's url-or-opts branch.
+                opts.url = first;
+                // Decompose the URL the cheap way so opts.hostname/port
+                // are usable when callers downstream introspect.
+                var m = /^(https?):\/\/([^\/:?#]+)(?::(\d+))?(\/[^?#]*)?(\?[^#]*)?/i.exec(first);
+                if (m) {
+                    if (!opts.protocol) opts.protocol = m[1] + ':';
+                    if (!opts.hostname) opts.hostname = m[2];
+                    if (!opts.port && m[3]) opts.port = parseInt(m[3], 10);
+                    if (!opts.path) opts.path = (m[4] || '/') + (m[5] || '');
+                }
+            } else {
+                opts = first || {};
+            }
+            return { opts: opts, cb: cb };
+        }
+        exports.request = function() {
+            var n = normaliseRequestArgs(arguments);
+            return requestImpl(n.opts, n.cb);
+        };
+        exports.get = function() {
+            var n = normaliseRequestArgs(arguments);
+            // Node's `get` auto-ends the request and forces GET.
+            if (n.opts && typeof n.opts === 'object') n.opts.method = n.opts.method || 'GET';
+            return requestImpl(n.opts, n.cb);
+        };
 
         // -------- server-side createServer ------------------------------
 
@@ -376,6 +522,66 @@ function __plenum_install_http(moduleName) {
         };
         exports.ServerResponse.prototype = Object.create(EventEmitter.prototype);
         exports.ServerResponse.prototype.constructor = exports.ServerResponse;
+
+        // `http.Agent` / `https.Agent` — minimal constructable stand-ins.
+        // npm's @npmcli/agent and many keep-alive helpers do
+        // `class MyAgent extends http.Agent { ... }` at module-init time.
+        // Without a real constructor here that fails QuickJS's
+        // "parent class must be constructor" guard before any user
+        // logic runs. We don't pool sockets (host bridge owns
+        // connections); the class exists so subclasses can
+        // instantiate.
+        function Agent(opts) {
+            EventEmitter.call(this);
+            this.options    = opts || {};
+            this.keepAlive  = !!(this.options.keepAlive);
+            this.maxSockets = this.options.maxSockets || Infinity;
+            this.maxFreeSockets = this.options.maxFreeSockets || 256;
+            this.requests   = {};
+            this.sockets    = {};
+            this.freeSockets = {};
+            this.protocol   = (moduleName === 'https') ? 'https:' : 'http:';
+        }
+        Agent.prototype = Object.create(EventEmitter.prototype);
+        Agent.prototype.constructor = Agent;
+        Agent.prototype.addRequest    = function() {};
+        Agent.prototype.createConnection = function() { return null; };
+        Agent.prototype.keepSocketAlive  = function() { return false; };
+        Agent.prototype.reuseSocket      = function() {};
+        Agent.prototype.destroy          = function() {};
+        Agent.prototype.getName          = function() { return 'afterburner-agent'; };
+        exports.Agent = Agent;
+        // The default global agent (Node exposes it; libraries pass it
+        // around). Single instance, idempotent across requires.
+        if (!globalThis.__plenum_default_agents) globalThis.__plenum_default_agents = {};
+        if (!globalThis.__plenum_default_agents[moduleName]) {
+            globalThis.__plenum_default_agents[moduleName] = new Agent({ keepAlive: false });
+        }
+        exports.globalAgent = globalThis.__plenum_default_agents[moduleName];
+
+        // ClientRequest — same posture as Server / IncomingMessage:
+        // exists for `instanceof` plus prototype reads, not callable.
+        function ClientRequest() {
+            throw new Error('new http.ClientRequest() is not implemented; use http.request()');
+        }
+        ClientRequest.prototype = Object.create(EventEmitter.prototype);
+        ClientRequest.prototype.constructor = ClientRequest;
+        exports.ClientRequest = ClientRequest;
+
+        // OutgoingMessage — base class some libs subclass.
+        function OutgoingMessage() { EventEmitter.call(this); }
+        OutgoingMessage.prototype = Object.create(EventEmitter.prototype);
+        OutgoingMessage.prototype.constructor = OutgoingMessage;
+        OutgoingMessage.prototype.setHeader = function() {};
+        OutgoingMessage.prototype.getHeader = function() {};
+        OutgoingMessage.prototype.removeHeader = function() {};
+        OutgoingMessage.prototype.write = function() { return true; };
+        OutgoingMessage.prototype.end = function() {};
+        exports.OutgoingMessage = OutgoingMessage;
+
+        // Maximum number of sockets allowed per host — Node default is
+        // Infinity, but some libraries read it. Match Node.
+        exports.maxHeaderSize = 16384;
     });
 }
 __plenum_install_http('http');

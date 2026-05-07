@@ -87,13 +87,55 @@ __register_module('url', function(module, exports, require) {
     exports.format = format;
     exports.resolve = resolve;
 
-    exports.URL = typeof URL === 'function' ? URL : undefined;
-    exports.URLSearchParams = typeof URLSearchParams === 'function' ? URLSearchParams : undefined;
+    // Lazy-bind to the runtime's URL / URLSearchParams. Direct
+    // assignment at module-init snapshots the global, which on Javy /
+    // QuickJS isn't always installed when the bundle loads — a
+    // direct `exports.URL = URL` would then cache `undefined` and
+    // every downstream `require('url').URL` (npm's nerf-dart, every
+    // proxy-agent variant) breaks with `not a function`. Getters
+    // resolve at call-site so the URL constructor binds the moment
+    // it becomes available.
+    Object.defineProperty(exports, 'URL', {
+        configurable: true,
+        enumerable: true,
+        get: function() { return globalThis.URL; },
+    });
+    Object.defineProperty(exports, 'URLSearchParams', {
+        configurable: true,
+        enumerable: true,
+        get: function() { return globalThis.URLSearchParams; },
+    });
     exports.fileURLToPath = function(u) {
-        var s = typeof u === 'string' ? u : String(u);
-        return s.replace(/^file:\/\//, '');
+        var s = typeof u === 'string' ? u : (u && u.href) ? u.href : String(u);
+        // file:// → /; file:///foo/bar → /foo/bar; file://host/path → /path
+        var m = /^file:\/\/([^/]*)?(\/[^?#]*)?/i.exec(s);
+        return m ? (m[2] || '/') : s;
     };
     exports.pathToFileURL = function(p) {
-        return { href: 'file://' + p };
+        var s = String(p);
+        var path = s.charAt(0) === '/' ? s : '/' + s;
+        var encoded = path.replace(/[#?]/g, function(ch) { return encodeURIComponent(ch); });
+        // Return a URL-shaped object so callers that read .href / .pathname work.
+        var URLCtor = globalThis.URL;
+        if (typeof URLCtor === 'function') {
+            try { return new URLCtor('file://' + encoded); } catch (_) {}
+        }
+        return { href: 'file://' + encoded, pathname: path, protocol: 'file:' };
     };
+    exports.urlToHttpOptions = function(u) {
+        if (!u || typeof u !== 'object') return null;
+        return {
+            protocol: u.protocol,
+            hostname: u.hostname && u.hostname.replace(/^\[|\]$/g, ''),
+            hash: u.hash,
+            search: u.search,
+            pathname: u.pathname,
+            path: (u.pathname || '') + (u.search || ''),
+            href: u.href,
+            port: u.port ? Number(u.port) : undefined,
+            auth: (u.username || u.password) ? (decodeURIComponent(u.username || '') + (u.password ? ':' + decodeURIComponent(u.password) : '')) : undefined,
+        };
+    };
+    exports.domainToASCII = function(s) { return String(s).toLowerCase(); };
+    exports.domainToUnicode = function(s) { return String(s); };
 });

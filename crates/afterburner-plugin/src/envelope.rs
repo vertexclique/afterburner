@@ -7,12 +7,93 @@
 //!    surfaces unhandled rejections as module-evaluation errors).
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
+
+/// Normalise a leading hashbang/BOM and bare dynamic `import(...)`
+/// expressions so the source parses *and runs* cleanly under QuickJS,
+/// which (a) rejects `#!` (it tokenises `#` as the start of a private
+/// name and chokes on `!`) and (b) has no registered module loader so
+/// `import('foo')` throws "could not load module" at runtime.
+///
+/// Node performs the shebang fix-up at module-load time; the dynamic
+/// import is rewritten to `globalThis.__ab_dyn_import(...)` so it
+/// resolves through our CJS require resolver. Hashbang replacement is
+/// length-preserving (`#!` → `//`) so error line/column numbers still
+/// line up with the user's file.
+fn normalize_leading_hashbang(source: &str) -> String {
+    let stripped = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let after = if let Some(rest) = stripped.strip_prefix("#!") {
+        let mut out = String::with_capacity(stripped.len());
+        out.push_str("//");
+        out.push_str(rest);
+        out
+    } else if stripped.len() == source.len() {
+        source.to_string()
+    } else {
+        stripped.to_string()
+    };
+    rewrite_dynamic_imports(&after)
+}
+
+/// Rewrite bare `import(spec)` expressions to a require-based shim.
+/// Pattern: any non-identifier char (or BOL) followed by `import`
+/// followed by optional whitespace + `(`. Excludes `import.meta`,
+/// member access on an identifier called `import`, and identifier-
+/// prefixed forms like `oimport(`. Strings / comments containing the
+/// literal token are a known false positive but vanishingly rare in
+/// real code; the alternative (registering a real QuickJS module
+/// loader through the wasm guest) is much larger surface for the same
+/// outcome.
+fn rewrite_dynamic_imports(source: &str) -> String {
+    if !source.contains("import") {
+        return source.to_string();
+    }
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len() + 32);
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'i'
+            && i + 6 <= bytes.len()
+            && &bytes[i..i + 6] == b"import"
+            && (i == 0 || !is_ident_char(bytes[i - 1]))
+        {
+            // Skip whitespace after `import`.
+            let mut j = i + 6;
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'(' {
+                // Emit `globalThis.__ab_dyn_import(require, ` (with the
+                // trailing `(` consumed) and skip past the original `(`.
+                out.push_str("globalThis.__ab_dyn_import");
+                // Preserve any whitespace between `import` and `(`.
+                out.push_str(&source[i + 6..j]);
+                out.push_str("(require,");
+                i = j + 1;
+                continue;
+            }
+        }
+        // Copy one UTF-8 char.
+        let ch_len = source[i..]
+            .chars()
+            .next()
+            .map(|c| c.len_utf8())
+            .unwrap_or(1);
+        out.push_str(&source[i..i + ch_len]);
+        i += ch_len;
+    }
+    out
+}
+
+fn is_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
 
 /// Envelope for the legacy mode: user source is compiled and run
 /// together, with the input literal inlined into the JS text.
 pub fn wrap_user_source(user: &str, input_json: &str) -> String {
-    let user_lit = js_string_literal(user);
+    let user = normalize_leading_hashbang(user);
+    let user_lit = js_string_literal(&user);
     let input_lit = js_string_literal(input_json);
     format!(
         r#"
@@ -41,7 +122,8 @@ pub fn wrap_user_source(user: &str, input_json: &str) -> String {
 /// source. Skipping the per-call preamble compile cuts ~150 µs from
 /// the hot path.
 pub fn wrap_user_source_with_input_global(user: &str) -> String {
-    let user_lit = js_string_literal(user);
+    let user = normalize_leading_hashbang(user);
+    let user_lit = js_string_literal(&user);
     format!(
         r#"
         function __ab_write_stdout(s) {{
@@ -73,7 +155,8 @@ pub fn wrap_user_source_with_input_global(user: &str) -> String {
 /// to Phase 1.5+. The vast majority of analytical columnar UDFs are
 /// pure compute and sync, so this is the right default.
 pub fn wrap_user_source_columnar(user: &str) -> String {
-    let user_lit = js_string_literal(user);
+    let user = normalize_leading_hashbang(user);
+    let user_lit = js_string_literal(&user);
     format!(
         r#"
         const __ab_module = {{ exports: undefined }};
@@ -110,7 +193,8 @@ pub fn wrap_user_source_columnar(user: &str) -> String {
 /// error that `invoke` returns as `Err` — exactly how we want script
 /// errors to flow back to the host as a WASM trap.
 pub fn wrap_script_source(user: &str, argv_json: &str, env_json: &str, cwd_json: &str) -> String {
-    let user_lit = js_string_literal(user);
+    let user = normalize_leading_hashbang(user);
+    let user_lit = js_string_literal(&user);
     // The user wrapper is an `AsyncFunction` so top-level `await`
     // inside the user's source compiles. The plain `Function`
     // constructor creates a sync function body; an `await` inside

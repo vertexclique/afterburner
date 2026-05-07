@@ -65,14 +65,14 @@ fn run_columnar_int32_sum_two_columns() {
         name: "c0",
         dtype: ColumnDtype::Int32,
         data: &c0,
-            heap: None,
+        heap: None,
         validity: None,
     });
     batch.push(ColumnRef {
         name: "c1",
         dtype: ColumnDtype::Int32,
         data: &c1,
-            heap: None,
+        heap: None,
         validity: None,
     });
 
@@ -154,7 +154,7 @@ fn run_columnar_zero_rows_round_trip() {
         name: "c0",
         dtype: ColumnDtype::Int32,
         data: &[],
-            heap: None,
+        heap: None,
         validity: None,
     });
     let out = burn.run_columnar(&id, &batch).unwrap();
@@ -182,7 +182,7 @@ fn run_columnar_single_row_single_column() {
         name: "x",
         dtype: ColumnDtype::Float64,
         data: &data,
-            heap: None,
+        heap: None,
         validity: None,
     });
     let out = burn.run_columnar(&id, &batch).unwrap();
@@ -212,7 +212,7 @@ fn run_columnar_idempotent_under_repeated_calls() {
         name: "x",
         dtype: ColumnDtype::Int32,
         data: &data,
-            heap: None,
+        heap: None,
         validity: None,
     });
     for _ in 0..16 {
@@ -250,7 +250,7 @@ fn run_columnar_distinct_scripts_dont_cross_contaminate() {
         name: "x",
         dtype: ColumnDtype::Int32,
         data: &data,
-            heap: None,
+        heap: None,
         validity: None,
     });
     let out_add = burn.run_columnar(&add1, &batch).unwrap();
@@ -271,7 +271,7 @@ fn run_columnar_throws_clean_error_on_unsupported_phase1_dtype() {
         name: "amount",
         dtype: ColumnDtype::Decimal128,
         data: &data,
-            heap: None,
+        heap: None,
         validity: None,
     });
     let err = burn.run_columnar(&id, &batch).unwrap_err();
@@ -283,9 +283,7 @@ fn run_columnar_throws_clean_error_on_unsupported_phase1_dtype() {
 fn run_columnar_user_thrown_error_surfaces_as_trap() {
     let burn = ab();
     let id = burn
-        .register(
-            r#"module.exports = (b) => { throw new Error("user-thrown"); };"#,
-        )
+        .register(r#"module.exports = (b) => { throw new Error("user-thrown"); };"#)
         .unwrap();
     let data = i32_le_bytes(&[1]);
     let mut batch = ColumnarBatch::new(1);
@@ -293,7 +291,7 @@ fn run_columnar_user_thrown_error_surfaces_as_trap() {
         name: "c",
         dtype: ColumnDtype::Int32,
         data: &data,
-            heap: None,
+        heap: None,
         validity: None,
     });
     let err = burn.run_columnar(&id, &batch).unwrap_err();
@@ -329,7 +327,7 @@ fn run_columnar_bool_input_produces_int32_count() {
         name: "flag",
         dtype: ColumnDtype::Bool,
         data: &data,
-            heap: None,
+        heap: None,
         validity: None,
     });
     let out = burn.run_columnar(&id, &batch).unwrap();
@@ -374,11 +372,11 @@ fn run_columnar_utf8_uppercase_e2e() {
         .unwrap();
 
     let inputs: Vec<&[u8]> = vec![
-        b"hi",                                               // 2 bytes inline
-        b"hello world",                                      // 11 bytes inline (≤12)
-        b"twelve_bytes",                                     // 12 bytes inline (boundary)
-        b"thirteenbytes!",                                   // 14 bytes heap
-        b"abcdefghijklmnopqrstuvwxyz_a_long_one",            // 37 bytes heap
+        b"hi",                                    // 2 bytes inline
+        b"hello world",                           // 11 bytes inline (≤12)
+        b"twelve_bytes",                          // 12 bytes inline (boundary)
+        b"thirteenbytes!",                        // 14 bytes heap
+        b"abcdefghijklmnopqrstuvwxyz_a_long_one", // 37 bytes heap
     ];
     let (slots, heap) = build_var_column(&inputs);
     let mut batch = ColumnarBatch::new(inputs.len() as u32);
@@ -523,7 +521,7 @@ fn run_columnar_typedarray_view_does_not_outlive_call() {
         name: "x",
         dtype: ColumnDtype::Int32,
         data: &d1,
-            heap: None,
+        heap: None,
         validity: None,
     });
     let out1 = burn.run_columnar(&id, &b1).unwrap();
@@ -535,7 +533,7 @@ fn run_columnar_typedarray_view_does_not_outlive_call() {
         name: "x",
         dtype: ColumnDtype::Int32,
         data: &d2,
-            heap: None,
+        heap: None,
         validity: None,
     });
     let out2 = burn.run_columnar(&id, &b2).unwrap();
