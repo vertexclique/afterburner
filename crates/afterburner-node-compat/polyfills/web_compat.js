@@ -1292,6 +1292,25 @@
     // no-op once the engine catches up. Idempotent + safe.
     // ============================================================
 
+    // ---- Symbol.dispose / Symbol.asyncDispose (Node 20+) ------------
+    // Required for `using x = …;` / `await using x = …;` (TC39
+    // explicit-resource-management). The well-known Symbols sit on
+    // Symbol itself; consumers reference `Symbol.dispose` to register
+    // their cleanup callback. Idempotent if QuickJS already added
+    // them.
+    if (typeof Symbol.dispose === 'undefined') {
+        Object.defineProperty(Symbol, 'dispose', {
+            value: Symbol.for('Symbol.dispose'),
+            writable: false, configurable: false, enumerable: false,
+        });
+    }
+    if (typeof Symbol.asyncDispose === 'undefined') {
+        Object.defineProperty(Symbol, 'asyncDispose', {
+            value: Symbol.for('Symbol.asyncDispose'),
+            writable: false, configurable: false, enumerable: false,
+        });
+    }
+
     // ---- Promise.withResolvers (Stage 4, Node 22) -------------------
     if (typeof Promise.withResolvers !== 'function') {
         Object.defineProperty(Promise, 'withResolvers', {
