@@ -471,6 +471,60 @@ __register_module('buffer', function(module, exports, require) {
     /// createObjectURL (no DOM), so this always returns undefined.
     exports.resolveObjectURL = function() { return undefined; };
 
+    /// `buffer.isUtf8(input)` / `buffer.isAscii(input)` — Node 19.4+
+    /// validators that check whether a Buffer / TypedArray / ArrayBuffer
+    /// holds well-formed UTF-8 or 7-bit ASCII bytes. We accept the same
+    /// argument shape as Node and walk the underlying byte view.
+    function _coerceToBytes(input, fnName) {
+        if (input == null) {
+            var e = new TypeError(
+                fnName + ': argument must be a Buffer, TypedArray, DataView or ArrayBuffer');
+            e.code = 'ERR_INVALID_ARG_TYPE';
+            throw e;
+        }
+        if (input instanceof ArrayBuffer) return new Uint8Array(input);
+        if (ArrayBuffer.isView(input)) {
+            return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+        }
+        var e2 = new TypeError(
+            fnName + ': argument must be a Buffer, TypedArray, DataView or ArrayBuffer');
+        e2.code = 'ERR_INVALID_ARG_TYPE';
+        throw e2;
+    }
+
+    exports.isUtf8 = function isUtf8(input) {
+        var bytes = _coerceToBytes(input, 'isUtf8');
+        var i = 0, n = bytes.length;
+        while (i < n) {
+            var b = bytes[i];
+            if (b < 0x80) { i += 1; continue; }
+            var trailing;
+            if ((b & 0xe0) === 0xc0) { trailing = 1; if (b < 0xc2) return false; }
+            else if ((b & 0xf0) === 0xe0) { trailing = 2; }
+            else if ((b & 0xf8) === 0xf0) { trailing = 3; if (b > 0xf4) return false; }
+            else return false;
+            if (i + trailing >= n) return false;
+            // Overlong / surrogate / out-of-range filters per RFC 3629.
+            if (trailing === 2 && b === 0xe0 && bytes[i + 1] < 0xa0) return false;
+            if (trailing === 2 && b === 0xed && bytes[i + 1] >= 0xa0) return false;
+            if (trailing === 3 && b === 0xf0 && bytes[i + 1] < 0x90) return false;
+            if (trailing === 3 && b === 0xf4 && bytes[i + 1] >= 0x90) return false;
+            for (var j = 1; j <= trailing; j++) {
+                if ((bytes[i + j] & 0xc0) !== 0x80) return false;
+            }
+            i += 1 + trailing;
+        }
+        return true;
+    };
+
+    exports.isAscii = function isAscii(input) {
+        var bytes = _coerceToBytes(input, 'isAscii');
+        for (var i = 0; i < bytes.length; i++) {
+            if (bytes[i] > 0x7f) return false;
+        }
+        return true;
+    };
+
     /// buffer.SlowBuffer — alias for `Buffer.allocUnsafeSlow` per
     /// Node's documented re-export.
     exports.SlowBuffer = function SlowBuffer(size) {

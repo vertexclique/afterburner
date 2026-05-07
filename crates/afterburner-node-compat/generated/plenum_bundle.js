@@ -1521,6 +1521,60 @@ __register_module('buffer', function(module, exports, require) {
     /// createObjectURL (no DOM), so this always returns undefined.
     exports.resolveObjectURL = function() { return undefined; };
 
+    /// `buffer.isUtf8(input)` / `buffer.isAscii(input)` — Node 19.4+
+    /// validators that check whether a Buffer / TypedArray / ArrayBuffer
+    /// holds well-formed UTF-8 or 7-bit ASCII bytes. We accept the same
+    /// argument shape as Node and walk the underlying byte view.
+    function _coerceToBytes(input, fnName) {
+        if (input == null) {
+            var e = new TypeError(
+                fnName + ': argument must be a Buffer, TypedArray, DataView or ArrayBuffer');
+            e.code = 'ERR_INVALID_ARG_TYPE';
+            throw e;
+        }
+        if (input instanceof ArrayBuffer) return new Uint8Array(input);
+        if (ArrayBuffer.isView(input)) {
+            return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+        }
+        var e2 = new TypeError(
+            fnName + ': argument must be a Buffer, TypedArray, DataView or ArrayBuffer');
+        e2.code = 'ERR_INVALID_ARG_TYPE';
+        throw e2;
+    }
+
+    exports.isUtf8 = function isUtf8(input) {
+        var bytes = _coerceToBytes(input, 'isUtf8');
+        var i = 0, n = bytes.length;
+        while (i < n) {
+            var b = bytes[i];
+            if (b < 0x80) { i += 1; continue; }
+            var trailing;
+            if ((b & 0xe0) === 0xc0) { trailing = 1; if (b < 0xc2) return false; }
+            else if ((b & 0xf0) === 0xe0) { trailing = 2; }
+            else if ((b & 0xf8) === 0xf0) { trailing = 3; if (b > 0xf4) return false; }
+            else return false;
+            if (i + trailing >= n) return false;
+            // Overlong / surrogate / out-of-range filters per RFC 3629.
+            if (trailing === 2 && b === 0xe0 && bytes[i + 1] < 0xa0) return false;
+            if (trailing === 2 && b === 0xed && bytes[i + 1] >= 0xa0) return false;
+            if (trailing === 3 && b === 0xf0 && bytes[i + 1] < 0x90) return false;
+            if (trailing === 3 && b === 0xf4 && bytes[i + 1] >= 0x90) return false;
+            for (var j = 1; j <= trailing; j++) {
+                if ((bytes[i + j] & 0xc0) !== 0x80) return false;
+            }
+            i += 1 + trailing;
+        }
+        return true;
+    };
+
+    exports.isAscii = function isAscii(input) {
+        var bytes = _coerceToBytes(input, 'isAscii');
+        for (var i = 0; i < bytes.length; i++) {
+            if (bytes[i] > 0x7f) return false;
+        }
+        return true;
+    };
+
     /// buffer.SlowBuffer — alias for `Buffer.allocUnsafeSlow` per
     /// Node's documented re-export.
     exports.SlowBuffer = function SlowBuffer(size) {
@@ -5124,6 +5178,10 @@ __register_module('fs', function(module, exports, require) {
             catch (e) { reject(e); }
         });
     };
+    /// fs.promises.constants — Node 18.4+ alias for fs.constants. Some
+    /// libraries import only the promises namespace and expect the
+    /// flag bag to be reachable from there too.
+    exports.promises.constants = exports.constants;
 
     // Callback-style entry points for every sync function. Node ships
     // both shapes for the entire fs surface; libraries (path-scurry,
@@ -7878,12 +7936,66 @@ __register_module('test', function(module, exports, require) {
             } };
         } };
     };
-    test.mock = {
-        method: function() {}, getter: function() {}, setter: function() {},
-        fn: function(impl) { return impl || function() {}; },
-        module: function() {}, restoreAll: function() {},
-        timers: { enable: function() {}, reset: function() {}, tick: function() {},
-                  runAll: function() {} },
+    /// MockFunctionContext (Node 19.1+) — the per-call record that
+    /// `mock.fn` gives back. We track calls in an array so libraries
+    /// that probe for `ctx.calls.length`, `ctx.callCount()`, or
+    /// `ctx.resetCalls()` work even if the actual mock invocation is
+    /// a no-op.
+    function MockFunctionContext() {
+        this.calls = [];
+    }
+    MockFunctionContext.prototype.callCount = function() {
+        return this.calls.length;
+    };
+    MockFunctionContext.prototype.resetCalls = function() {
+        this.calls = [];
+    };
+    MockFunctionContext.prototype.restore = function() {};
+    MockFunctionContext.prototype.mockImplementation = function() {};
+    MockFunctionContext.prototype.mockImplementationOnce = function() {};
+
+    /// MockTracker (Node 19.1+) — the registry returned as `test.mock`.
+    /// Real Node tracks every mock created so `restoreAll` can undo
+    /// them. Our mocks are no-ops, but we keep the same shape so
+    /// `mockTracker.fn().mock.calls` works.
+    function MockTracker() {}
+    MockTracker.prototype.fn = function(impl) {
+        var fn = function() {
+            fn.mock.calls.push({
+                arguments: Array.prototype.slice.call(arguments),
+                this: this, result: undefined, error: undefined,
+            });
+            return typeof impl === 'function' ? impl.apply(this, arguments) : undefined;
+        };
+        fn.mock = new MockFunctionContext();
+        return fn;
+    };
+    MockTracker.prototype.method = function() { return function() {}; };
+    MockTracker.prototype.getter = function() {};
+    MockTracker.prototype.setter = function() {};
+    MockTracker.prototype.module = function() {};
+    MockTracker.prototype.restoreAll = function() {};
+    MockTracker.prototype.reset = function() {};
+    Object.defineProperty(MockTracker.prototype, 'timers', {
+        get: function() {
+            return {
+                enable: function() {}, reset: function() {}, tick: function() {},
+                runAll: function() {}, setTime: function() {},
+            };
+        },
+    });
+
+    test.mock = new MockTracker();
+    test.MockFunctionContext = MockFunctionContext;
+    test.MockTracker = MockTracker;
+
+    /// `test.snapshot` (Node 22.3+) — namespace for snapshot config.
+    /// We expose `setResolveSnapshotPath` / `setDefaultSnapshotSerializers`
+    /// as no-op setters so snapshot-using suites can register their
+    /// preferences without crashing.
+    test.snapshot = {
+        setResolveSnapshotPath: function() {},
+        setDefaultSnapshotSerializers: function() {},
     };
 
     // Dual surface: `import test from 'node:test'` / `require('node:test')`
@@ -7896,6 +8008,8 @@ __register_module('test', function(module, exports, require) {
         before: before, after: after, beforeEach: beforeEach, afterEach: afterEach,
         skip: test.skip, todo: test.todo, only: test.only,
         run: test.run, mock: test.mock,
+        MockFunctionContext: MockFunctionContext, MockTracker: MockTracker,
+        snapshot: test.snapshot,
     });
 });
 

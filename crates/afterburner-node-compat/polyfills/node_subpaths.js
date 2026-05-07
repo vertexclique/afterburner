@@ -556,12 +556,66 @@ __register_module('test', function(module, exports, require) {
             } };
         } };
     };
-    test.mock = {
-        method: function() {}, getter: function() {}, setter: function() {},
-        fn: function(impl) { return impl || function() {}; },
-        module: function() {}, restoreAll: function() {},
-        timers: { enable: function() {}, reset: function() {}, tick: function() {},
-                  runAll: function() {} },
+    /// MockFunctionContext (Node 19.1+) — the per-call record that
+    /// `mock.fn` gives back. We track calls in an array so libraries
+    /// that probe for `ctx.calls.length`, `ctx.callCount()`, or
+    /// `ctx.resetCalls()` work even if the actual mock invocation is
+    /// a no-op.
+    function MockFunctionContext() {
+        this.calls = [];
+    }
+    MockFunctionContext.prototype.callCount = function() {
+        return this.calls.length;
+    };
+    MockFunctionContext.prototype.resetCalls = function() {
+        this.calls = [];
+    };
+    MockFunctionContext.prototype.restore = function() {};
+    MockFunctionContext.prototype.mockImplementation = function() {};
+    MockFunctionContext.prototype.mockImplementationOnce = function() {};
+
+    /// MockTracker (Node 19.1+) — the registry returned as `test.mock`.
+    /// Real Node tracks every mock created so `restoreAll` can undo
+    /// them. Our mocks are no-ops, but we keep the same shape so
+    /// `mockTracker.fn().mock.calls` works.
+    function MockTracker() {}
+    MockTracker.prototype.fn = function(impl) {
+        var fn = function() {
+            fn.mock.calls.push({
+                arguments: Array.prototype.slice.call(arguments),
+                this: this, result: undefined, error: undefined,
+            });
+            return typeof impl === 'function' ? impl.apply(this, arguments) : undefined;
+        };
+        fn.mock = new MockFunctionContext();
+        return fn;
+    };
+    MockTracker.prototype.method = function() { return function() {}; };
+    MockTracker.prototype.getter = function() {};
+    MockTracker.prototype.setter = function() {};
+    MockTracker.prototype.module = function() {};
+    MockTracker.prototype.restoreAll = function() {};
+    MockTracker.prototype.reset = function() {};
+    Object.defineProperty(MockTracker.prototype, 'timers', {
+        get: function() {
+            return {
+                enable: function() {}, reset: function() {}, tick: function() {},
+                runAll: function() {}, setTime: function() {},
+            };
+        },
+    });
+
+    test.mock = new MockTracker();
+    test.MockFunctionContext = MockFunctionContext;
+    test.MockTracker = MockTracker;
+
+    /// `test.snapshot` (Node 22.3+) — namespace for snapshot config.
+    /// We expose `setResolveSnapshotPath` / `setDefaultSnapshotSerializers`
+    /// as no-op setters so snapshot-using suites can register their
+    /// preferences without crashing.
+    test.snapshot = {
+        setResolveSnapshotPath: function() {},
+        setDefaultSnapshotSerializers: function() {},
     };
 
     // Dual surface: `import test from 'node:test'` / `require('node:test')`
@@ -574,6 +628,8 @@ __register_module('test', function(module, exports, require) {
         before: before, after: after, beforeEach: beforeEach, afterEach: afterEach,
         skip: test.skip, todo: test.todo, only: test.only,
         run: test.run, mock: test.mock,
+        MockFunctionContext: MockFunctionContext, MockTracker: MockTracker,
+        snapshot: test.snapshot,
     });
 });
 

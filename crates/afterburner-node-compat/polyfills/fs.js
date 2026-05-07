@@ -1308,6 +1308,10 @@ __register_module('fs', function(module, exports, require) {
             catch (e) { reject(e); }
         });
     };
+    /// fs.promises.constants — Node 18.4+ alias for fs.constants. Some
+    /// libraries import only the promises namespace and expect the
+    /// flag bag to be reachable from there too.
+    exports.promises.constants = exports.constants;
 
     // Callback-style entry points for every sync function. Node ships
     // both shapes for the entire fs surface; libraries (path-scurry,
