@@ -1342,13 +1342,13 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
       </table></div>
 
       <h2 id="node-compat"><span class="anchor">#</span>Node compat surface</h2>
-      <p>Afterburner targets the <strong>Node.js 20 LTS</strong> baseline today, with the <strong>Node 22 / 24 / 26</strong> stable surface landing on a published roadmap. <code>require('express')</code> from a real <code>node_modules</code> installation works end-to-end — see <a href="https://github.com/vertexclique/afterburner/tree/master/examples/express-app" style="color: var(--action);"><code>examples/express-app</code></a>. Pure-JS modules are always available. Host-backed ones are gated by the <code>Manifold</code>. Surface-only entries load and expose the right shapes; runtime methods either route through other modules or throw a clear error explaining the limitation.</p>
+      <p>Afterburner targets the <strong>Node.js 26</strong> surface. <code>burn npm install</code> and <code>require('express')</code> from a real <code>node_modules</code> tree both work end-to-end — see <a href="https://github.com/vertexclique/afterburner/tree/master/examples/express-app" style="color: var(--action);"><code>examples/express-app</code></a>. Pure-JS modules are always available; host-backed ones are gated by the <code>Manifold</code>; surface-only entries load and expose the right shapes.</p>
 
       <div class="callout callout--ok">
         <div class="callout__icon">✓</div>
         <div>
-          <strong>Real Express, real npm packages</strong>
-          <p>The <code>examples/express-app</code> demo runs unmodified <code>express@^4.21</code> from <code>node_modules</code> inside the Afterburner sandbox. <code>express()</code>, <code>app.get/post</code>, path params, JSON responses, ETag, the 404 / 500 fallbacks — all working through a thin axum-side adapter that bridges HTTP envelopes to Express's <code>(req, res)</code> contract. The five canonical routes (<code>/</code>, <code>/health</code>, <code>/hello/:name</code>, <code>/echo</code>, <code>/sum</code>) ship as the regression gate.</p>
+          <strong>Real npm install, real Express</strong>
+          <p><code>burn npm install</code> runs end-to-end. <code>examples/express-app</code> runs unmodified <code>express@^4.21</code> from <code>node_modules</code>.</p>
         </div>
       </div>
 
@@ -1430,14 +1430,14 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
       </div>
       <p><code>http2</code> throws <code>ERR_HTTP2_NOT_IMPLEMENTED</code> on connect; HTTP/1.1 over TLS via <code>https</code> covers the canonical case. The <code>cluster</code> module's master + worker fork model isn't implemented, but the multi-core throughput it was meant to deliver is built into the daemon: <strong>burn runs HTTP servers across all your CPUs out of the box</strong>, same per-request-state model <code>cluster</code> users already plan around. Native <code>.node</code> addons cannot load inside the sandbox; for the popular ones, use the L3 shadows above.</p>
 
-      <h3>Node 22 / 24 / 26 roadmap</h3>
-      <p>The Node 20 LTS baseline above is the floor. Active work brings the surface forward toward Node 26 stable in priority bands:</p>
+      <h3>Node 26 surface roadmap</h3>
+      <p>The surface above is in place. Remaining work fills in newer-Node APIs within those modules and the last few standalone APIs from Node 22–26:</p>
       <div class="table-scroll"><table class="doc-table">
         <thead><tr><th>Band</th><th>Items</th></tr></thead>
         <tbody>
-          <tr><td><strong>Shipped</strong></td><td>Stream dual-shape, V8 CallSite proto patch, IncomingMessage Buffer chunks, <code>process.nextTick</code> queueing, <code>Afterburner::builder().cwd()</code>, <code>EventEmitter</code> lazy <code>_events</code> init, <code>http.IncomingMessage</code>/<code>ServerResponse</code> prototype chain → real <code>require('express')</code> works.</td></tr>
-          <tr><td><strong>Next</strong></td><td><code>node:test</code> + reporters, <code>node:sqlite</code> built-in, Permission Model surface (<code>--permission</code>, <code>process.permission.has</code>), <code>--watch</code> mode, <code>--env-file</code>, TS-strip default-on, <code>WebSocket</code> client.</td></tr>
-          <tr><td><strong>Then</strong></td><td><code>crypto.subtle</code> full Web Crypto, <code>URLPattern</code>, <code>FormData</code> / <code>Blob</code> / <code>File</code> globals, <code>EventSource</code>, <code>BroadcastChannel</code>, <code>CompressionStream</code> / <code>DecompressionStream</code>, <code>module.register</code> hooks, zstd in zlib, <code>import.meta.dirname</code>/<code>filename</code>/<code>resolve</code>, source maps in TS-strip + ESM-rewrite.</td></tr>
+          <tr><td><strong>Shipped</strong></td><td>Full Node 26 stdlib surface. <code>burn npm install</code> end-to-end. Real <code>require('express')</code>. <code>worker_threads</code>, raw <code>net</code> / <code>tls</code> / <code>dgram</code>, TLS SNI multi-cert, async outbound HTTP, TS-strip + ESM lower.</td></tr>
+          <tr><td><strong>Next</strong></td><td><code>node:test</code>, <code>node:sqlite</code>, Permission Model surface, <code>--watch</code>, <code>--env-file</code>, <code>--require</code>/<code>--import</code>, <code>WebSocket</code> client, <code>fs.watch</code>, pnpm/yarn corepack chunked imports.</td></tr>
+          <tr><td><strong>Then</strong></td><td>Full <code>crypto.subtle</code>, <code>URLPattern</code>, <code>FormData</code> / <code>Blob</code> / <code>File</code>, <code>EventSource</code>, <code>BroadcastChannel</code>, <code>CompressionStream</code>, <code>module.register</code>, zstd, <code>import.meta.dirname</code>, source maps, ES2024 set methods + <code>Promise.withResolvers</code>.</td></tr>
           <tr><td><strong>Out of scope</strong></td><td>Native <code>.node</code> addons, <code>cluster</code> child-fork model (multi-core HTTP throughput is built into daemon mode — see "Daemon mode runs across all your CPUs" above), full <code>async_hooks</code> hook firing, <code>vm.SourceTextModule</code>, listening sockets in JS (host owns the listener).</td></tr>
         </tbody>
       </table></div>

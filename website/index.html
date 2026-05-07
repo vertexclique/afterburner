@@ -1302,7 +1302,7 @@
       </div>
       <div class="hero__meta">
         <span><b>node · npm · pnpm · yarn · bun</b> pass-through shim</span>
-        <span><b>Node 20 → 26</b> compat surface</span>
+        <span><b>Node 26</b> compat surface</span>
         <span><b>Apache-2.0</b></span>
       </div>
     </div>
@@ -1375,7 +1375,7 @@
       <div class="live__copy">
         <span class="kicker">// Live demo</span>
         <h2>Watch <em>burn</em> stand up<br/>a real Node app.</h2>
-        <p>Same commands you already know. <code>burn server.js</code>, <code>burn npm install</code>, <code>burn app.ts</code>. They run through the Rust runtime. Real ports, real sockets, TypeScript stripped on the way in. Adaptive by default: native ignition on the first call, fully sandboxed Wasmtime from the second.</p>
+        <p>Same commands you already know. <code>burn server.js</code>, <code>burn npm install</code>, <code>burn app.ts</code>. They run through the Rust runtime. Real ports, real sockets, TypeScript stripped on the way in.</p>
         <p>When you need isolation: <code>--sandbox</code> seals the manifold; <code>--allow-fs</code>, <code>--allow-net</code>, <code>--allow-env</code> grant exactly the surface a script needs. Deny by default.</p>
       </div>
       <div class="live-term">
@@ -1426,7 +1426,7 @@
       <div class="feat reveal">
         <div class="feat__num">04</div>
         <h3>Adaptive ignition (Flying Start)</h3>
-        <p>Native QuickJS on the first call for sub-millisecond startup; Wasmtime + Javy plugin from the second. Same script ID across both. Pin a single mode if you'd rather.</p>
+        <p>Sub-millisecond startup on the first call, fully sandboxed from the second. Same script ID across both. Pin a single mode if you'd rather.</p>
       </div>
       <div class="feat reveal">
         <div class="feat__num">05</div>
@@ -1441,12 +1441,12 @@
       <div class="feat reveal">
         <div class="feat__num">07</div>
         <h3>Native-addon shadows</h3>
-        <p><code>require('bcrypt')</code>, <code>argon2</code>, <code>jsonwebtoken</code>, <code>sqlite3</code>, <code>sharp</code> all resolve inside the WASM sandbox to pure-Rust hosts (rusqlite + bundled SQLite C; <code>image</code> + SIMD <code>fast_image_resize</code>). Same npm API, no <code>.node</code> binary.</p>
+        <p><code>require('bcrypt')</code>, <code>argon2</code>, <code>jsonwebtoken</code>, <code>sqlite3</code>, <code>sharp</code> all resolve to pure-Rust hosts. Same npm API, no <code>.node</code> binary.</p>
       </div>
       <div class="feat reveal">
         <div class="feat__num">08</div>
         <h3>WebAssembly modules in JS</h3>
-        <p><code>WebAssembly.compile</code> / <code>instantiate</code> / <code>Module</code> / <code>Instance</code> / <code>Memory</code> backed by a per-host wasmtime sub-runner. SQL.js, @jsquash, libheif-js, anything that compiles to <code>wasm32-wasi</code> with no env imports.</p>
+        <p><code>WebAssembly.compile</code> / <code>instantiate</code> / <code>Module</code> / <code>Instance</code> / <code>Memory</code>. SQL.js, @jsquash, libheif-js, and other portable modules load directly.</p>
       </div>
       <div class="feat reveal">
         <div class="feat__num">09</div>
@@ -1471,7 +1471,7 @@
     <div class="demo__layout reveal">
       <div class="demo__tabs" role="tablist">
         <button class="demo__tab active" data-tab="0"><span class="num">1</span><span>HTTP server<span class="sub">burn server.js</span></span></button>
-        <button class="demo__tab" data-tab="1"><span class="num">2</span><span>Package-mgr pass-through<span class="sub">burn bun add …</span></span></button>
+        <button class="demo__tab" data-tab="1"><span class="num">2</span><span>Package-mgr pass-through<span class="sub">burn npm install …</span></span></button>
         <button class="demo__tab" data-tab="2"><span class="num">3</span><span>TypeScript<span class="sub">burn app.ts</span></span></button>
         <button class="demo__tab" data-tab="3"><span class="num">4</span><span>Postgres + TLS<span class="sub">net &middot; tls &middot; pg</span></span></button>
         <button class="demo__tab" data-tab="4"><span class="num">5</span><span>Workers<span class="sub">worker_threads</span></span></button>
@@ -1521,7 +1521,7 @@
           <span class="knob__tag">configurable</span>
         </div>
         <div class="knob__name">Per-script memory cap</div>
-        <p class="knob__desc">Hard cap enforced by the sandbox allocator. Over-budget allocations surface as JS-side <code>OutOfMemory</code>. Your host never gets OOM-killed.</p>
+        <p class="knob__desc">Hard cap enforced per script. Over-budget allocations surface as JS-side <code>OutOfMemory</code>. Your host never gets OOM-killed.</p>
         <div class="knob__field"><span class="dim">.memory_bytes(</span><span class="val">your_cap</span><span class="dim">)</span></div>
         <div class="knob__vis"><div class="knob__vis__bar" id="memBar" style="width: 40%;"></div></div>
       </div>
@@ -1579,7 +1579,7 @@
         <span class="kicker">// What works today</span>
         <h2 style="margin-top: 8px;">The Node app you have<br/>runs on the runtime you want.</h2>
       </div>
-      <p class="muted" style="margin: 0; text-align: right; font-size: 15px; max-width: 420px;">Every Node 20 LTS built-ins backed by Rust host functions, with Node 22 / 24 / 26 stable additions landing as we go.</p>
+      <p class="muted" style="margin: 0; text-align: right; font-size: 15px; max-width: 420px;">Node 26 surface, backed by Rust host functions.</p>
     </div>
     <div class="runs__grid reveal">
       <div class="runs__cell">
@@ -1614,14 +1614,7 @@
         <div class="runs__check">✓</div>
         <div>
           <h4>Package managers</h4>
-          <p><code>burn bun add</code> installs end-to-end — bun is a native binary, args pass through cleanly. <code>burn npm</code> / <code>pnpm</code> / <code>yarn</code> are best-effort: the PATH shim re-enters the sandbox so every nested <code>node</code> routes home, but their async dispatch chains exercise more Node fidelity than the runtime currently provides. Use <code>bun</code> if you want it to just work today.</p>
-        </div>
-      </div>
-      <div class="runs__cell">
-        <div class="runs__check">✓</div>
-        <div>
-          <h4>Process control</h4>
-          <p><code>process.argv</code>, <code>process.env</code>, <code>process.exit</code>, <code>setInterval</code>, <code>.unref()</code>. The whole shape, intact.</p>
+          <p><code>burn npm install</code> and <code>burn bun add</code> both run end-to-end. <code>pnpm</code> / <code>yarn</code> ride the npm path with corepack support landing.</p>
         </div>
       </div>
       <div class="runs__cell">
@@ -1656,7 +1649,7 @@
         <div class="runs__check">✓</div>
         <div>
           <h4>WebAssembly modules</h4>
-          <p><code>WebAssembly.compile</code> / <code>instantiate</code> / <code>Module</code> / <code>Instance</code> / <code>Memory</code>. SQL.js, @jsquash, libheif-js, pure-Rust → wasm32-wasi modules load directly.</p>
+          <p><code>WebAssembly.compile</code> / <code>instantiate</code> / <code>Module</code> / <code>Instance</code> / <code>Memory</code>. SQL.js, @jsquash, libheif-js, and other portable modules load directly.</p>
         </div>
       </div>
       <div class="runs__cell">
@@ -2036,18 +2029,15 @@ app.listen(3000, () => {
       file: 'shell', lang: 'sh',
       output: 'every nested node call routes through burn',
       code:
-`# burn shims itself onto PATH. The shim re-enters burn for every
-# nested 'node script.js' invocation, no matter how deeply it nests.
-$ burn bun add express pg jsonwebtoken    # bun: native, just works
-$ burn bun run start
+`# burn shims itself onto PATH. Every nested 'node script.js' re-enters burn.
 
-# Pass-through. burn node behaves like node, but inside the burn runtime.
+$ burn npm install express
+added 65 packages in 8s
+$ burn -A server.js                  # require('express') from node_modules
+
+$ burn bun add lodash                # bun: native, args pass through
 $ burn node -e "console.log(process.versions.node)"
-20.11.0
-
-# npm/pnpm/yarn pass-through is wired (PATH shim re-enters), but the
-# JS-script package managers ride deep async chains we don't yet drain
-# fully. Use burn bun for now if you want it to just work.`
+26.0.0-afterburner`
     },
     {
       file: 'app.ts', lang: 'js',
