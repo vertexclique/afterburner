@@ -771,11 +771,55 @@ __register_module('timers/promises', function(module, exports, require) {
                 setImmediate(function() { resolve(value); });
             });
         },
-        // AsyncIterator surface for `setInterval(ms)` lands with
-        // a consumer. Throw until then so scripts that reach for
-        // it see a clear error rather than silently hanging.
-        setInterval: function() {
-            throw new Error('timers/promises.setInterval (async iterator) is not implemented');
+        // AsyncIterator surface for `setInterval(ms)` — yields one
+        // value per interval until the abort signal fires (or
+        // forever, if no signal).
+        setInterval: function(ms, value, opts) {
+            var signal = opts && opts.signal;
+            return {
+                [Symbol.asyncIterator]: function() {
+                    var done = false;
+                    if (signal) {
+                        signal.addEventListener('abort', function() { done = true; }, { once: true });
+                    }
+                    return {
+                        next: function() {
+                            if (done) return Promise.resolve({ value: undefined, done: true });
+                            return new Promise(function(resolve) {
+                                setTimeout(function() {
+                                    if (done) resolve({ value: undefined, done: true });
+                                    else resolve({ value: value, done: false });
+                                }, ms);
+                            });
+                        },
+                        return: function() {
+                            done = true;
+                            return Promise.resolve({ value: undefined, done: true });
+                        },
+                    };
+                },
+            };
+        },
+        // timers/promises.scheduler — Node 18+. wait(ms[, opts])
+        // promises a delay-then-resolve; yield() collapses to a
+        // microtask so cooperative scheduling works.
+        scheduler: {
+            wait: function(ms, opts) {
+                var signal = opts && opts.signal;
+                return new Promise(function(resolve, reject) {
+                    if (signal && signal.aborted) {
+                        return reject(signal.reason || new Error('Aborted'));
+                    }
+                    var t = setTimeout(function() { resolve(); }, ms | 0);
+                    if (signal) {
+                        signal.addEventListener('abort', function() {
+                            clearTimeout(t);
+                            reject(signal.reason || new Error('Aborted'));
+                        }, { once: true });
+                    }
+                });
+            },
+            yield: function() { return new Promise(function(r) { queueMicrotask(r); }); },
         },
     };
 });

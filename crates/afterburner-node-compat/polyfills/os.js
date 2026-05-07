@@ -18,6 +18,11 @@ __register_module('os', function(module, exports, require) {
         for (var i = 0; i < n; i++) out.push({ model: 'afterburner', speed: 0 });
         return out;
     };
+    /// os.availableParallelism (Node 19+) — number of logical CPUs
+    /// the process can use for parallel work. Same value as cpus().length.
+    exports.availableParallelism = function() {
+        return fallback('cpus', 1);
+    };
     exports.totalmem  = function() { return 0; };
     exports.freemem   = function() { return 0; };
     exports.uptime    = function() { return 0; };
