@@ -35,7 +35,7 @@ fn assert_marker(out: &std::process::Output, marker: &str) {
 }
 
 #[test]
-fn self_references_globalThis() {
+fn self_references_global_this() {
     let out = run_inline(
         r#"
         if (typeof self !== 'undefined' && self === globalThis) console.log('SELF-OK');
@@ -46,7 +46,7 @@ fn self_references_globalThis() {
 }
 
 #[test]
-fn top_level_addEventListener_dispatches_to_handlers() {
+fn top_level_add_event_listener_dispatches_to_handlers() {
     let out = run_inline(
         r#"
         let fired = false;
@@ -81,7 +81,7 @@ fn remove_event_listener_drops_handler() {
 }
 
 #[test]
-fn progress_event_carries_loaded_total_lengthComputable() {
+fn progress_event_carries_loaded_total_length_computable() {
     let out = run_inline(
         r#"
         const e = new ProgressEvent('progress', {
