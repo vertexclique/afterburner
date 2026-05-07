@@ -2182,11 +2182,76 @@ __register_module('crypto', function(module, exports, require) {
                   typeof b === 'string' ? b : String(b));
     };
 
-    // `randomFillSync` — filled for completeness; returns a string too.
-    exports.randomFillSync = function(buffer) {
-        var len = buffer && buffer.length ? buffer.length : 16;
-        return ensureHost('random_bytes')(len, 'hex');
+    // `randomFillSync(buffer[, offset[, size]])` — fills the buffer
+    // in-place with cryptographically random bytes. Returns the buffer.
+    exports.randomFillSync = function(buffer, offset, size) {
+        if (!buffer || typeof buffer.length !== 'number') {
+            throw new TypeError('randomFillSync: buffer must be a TypedArray');
+        }
+        var off = (offset | 0) || 0;
+        var len = (typeof size === 'number') ? (size | 0) : (buffer.length - off);
+        if (len <= 0) return buffer;
+        var hex = ensureHost('random_bytes')(len, 'hex');
+        if (typeof hex !== 'string') return buffer;
+        var view = (buffer.buffer && typeof buffer.buffer === 'object')
+            ? new Uint8Array(buffer.buffer, buffer.byteOffset || 0, buffer.byteLength || buffer.length)
+            : buffer;
+        for (var i = 0; i < len; i++) {
+            view[off + i] = parseInt(hex.substr(i * 2, 2), 16);
+        }
+        return buffer;
     };
+
+    /// `randomFill(buffer[, offset[, size]], cb)` — async variant.
+    /// Same operation; calls cb on next microtask.
+    exports.randomFill = function(buffer, offset, size, cb) {
+        if (typeof offset === 'function') { cb = offset; offset = undefined; size = undefined; }
+        else if (typeof size === 'function') { cb = size; size = undefined; }
+        try {
+            exports.randomFillSync(buffer, offset, size);
+            if (typeof cb === 'function') Promise.resolve().then(function() { cb(null, buffer); });
+        } catch (e) {
+            if (typeof cb === 'function') Promise.resolve().then(function() { cb(e); });
+        }
+    };
+
+    /// `crypto.randomInt([min, ]max[, callback])` — uniform integer
+    /// in `[min, max)`. Sync if no callback. Min defaults to 0.
+    exports.randomInt = function(min, max, cb) {
+        if (typeof min === 'function') { cb = min; min = 0; max = 0xffffffff; }
+        else if (typeof max === 'function') { cb = max; max = min; min = 0; }
+        else if (max === undefined) { max = min; min = 0; }
+        if (min < 0 || max <= min || max - min > Math.pow(2, 48)) {
+            var err = new RangeError('randomInt: min/max out of range');
+            if (typeof cb === 'function') {
+                Promise.resolve().then(function() { cb(err); });
+                return;
+            }
+            throw err;
+        }
+        var range = max - min;
+        // Sample 6 bytes (2^48), reject + retry to avoid modulo bias.
+        function sample() {
+            var hex = ensureHost('random_bytes')(6, 'hex');
+            var n = 0;
+            for (var i = 0; i < 12; i++) n = n * 16 + parseInt(hex.charAt(i), 16);
+            var max48 = Math.pow(2, 48);
+            var fold = max48 - (max48 % range);
+            if (n >= fold) return sample(); // discard biased range
+            return min + (n % range);
+        }
+        var v = sample();
+        if (typeof cb === 'function') {
+            Promise.resolve().then(function() { cb(null, v); });
+            return;
+        }
+        return v;
+    };
+
+    /// `crypto.timingSafeEqual` already exists (inline below); the
+    /// alias below matches Node's Web Crypto export for callers that
+    /// reach for `crypto.webcrypto.subtle`.
+    exports.webcrypto = (typeof globalThis.crypto === 'object') ? globalThis.crypto : undefined;
 
     // ---- ciphers (AES-GCM / AES-CBC) --------------------------------
     var Buffer = require('buffer').Buffer;
