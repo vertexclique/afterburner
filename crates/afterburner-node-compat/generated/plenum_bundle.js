@@ -3049,6 +3049,57 @@ __register_module('events', function(module, exports, require) {
             return { value: [k, self._m[k]], done: false };
         } };
     };
+    Headers.prototype.keys = function() {
+        var keys = Object.keys(this._m);
+        var i = 0;
+        return { next: function() {
+            if (i >= keys.length) return { done: true };
+            return { value: keys[i++], done: false };
+        } };
+    };
+    Headers.prototype.values = function() {
+        var keys = Object.keys(this._m);
+        var self = this;
+        var i = 0;
+        return { next: function() {
+            if (i >= keys.length) return { done: true };
+            return { value: self._m[keys[i++]], done: false };
+        } };
+    };
+    Headers.prototype[Symbol.iterator] = Headers.prototype.entries;
+    /// Headers.prototype.getSetCookie — Node 19+. Returns each
+    /// Set-Cookie header as a separate array entry. Our internal
+    /// storage joins same-name headers with `, `; Set-Cookie is
+    /// the one header where that join is wrong per spec, but we
+    /// recover by splitting on the canonical separator.
+    Headers.prototype.getSetCookie = function() {
+        var raw = this._m['set-cookie'];
+        if (!raw) return [];
+        // Split on `, ` only when the next chunk looks like a new
+        // cookie name (matches `[A-Za-z0-9!#$%&'*+\-.^_`|~]+=`).
+        // Single-cookie value may contain `, ` inside `Expires=...`
+        // weekday names — naive split would corrupt those.
+        var parts = [];
+        var cur = '';
+        var i = 0;
+        while (i < raw.length) {
+            if (raw[i] === ',' && raw[i + 1] === ' ') {
+                // Lookahead: does what's next look like NAME= ?
+                var j = i + 2;
+                var k = j;
+                while (k < raw.length && /[A-Za-z0-9!#$%&'*+\-.^_`|~]/.test(raw[k])) k++;
+                if (k > j && raw[k] === '=') {
+                    parts.push(cur);
+                    cur = '';
+                    i = j;
+                    continue;
+                }
+            }
+            cur += raw[i++];
+        }
+        if (cur) parts.push(cur);
+        return parts;
+    };
 
     function Request(url, init) {
         init = init || {};
@@ -3108,6 +3159,40 @@ __register_module('events', function(module, exports, require) {
             bodyB64: this._bodyB64,
         });
         return r;
+    };
+    /// Response.json(data, init) — Node 18.0+. Serialises `data` and
+    /// returns a Response with `Content-Type: application/json`.
+    Response.json = function(data, init) {
+        init = init || {};
+        var headers = new Headers(init.headers || {});
+        if (!headers.has('content-type')) {
+            headers.set('content-type', 'application/json');
+        }
+        return new Response(JSON.stringify(data), {
+            status: init.status,
+            statusText: init.statusText,
+            headers: headers,
+            url: init.url,
+        });
+    };
+    /// Response.error() — Node 18.0+. Synthesises a network-error
+    /// response: status 0, empty body, type 'error'.
+    Response.error = function() {
+        var r = new Response('', { status: 0, statusText: '' });
+        r.type = 'error';
+        return r;
+    };
+    /// Response.redirect(url, status) — Node 18.0+. Returns a Response
+    /// with the URL in `Location:` and the given redirect status.
+    Response.redirect = function(url, status) {
+        status = status || 302;
+        if (status < 300 || status >= 400) {
+            throw new RangeError('Response.redirect: invalid status ' + status);
+        }
+        return new Response('', {
+            status: status,
+            headers: { Location: String(url) },
+        });
     };
 
     function fetch(input, init) {
