@@ -335,6 +335,71 @@ __register_module('buffer', function(module, exports, require) {
         return utf8Encode(str).length;
     };
 
+    /// Buffer.compare(a, b) — static byte-wise comparator. Returns
+    /// -1 / 0 / 1 like a memcmp; useful for sorted-by-bytes
+    /// containers (Map keys, sorted indexes).
+    Buffer.compare = function(a, b) {
+        if (!Buffer.isBuffer(a) || !Buffer.isBuffer(b)) {
+            throw new TypeError('Buffer.compare: both arguments must be Buffer');
+        }
+        var n = Math.min(a.length, b.length);
+        for (var i = 0; i < n; i++) {
+            if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+        }
+        if (a.length === b.length) return 0;
+        return a.length < b.length ? -1 : 1;
+    };
+
+    /// Buffer.isEncoding(name) — true if `name` is a known encoding.
+    Buffer.isEncoding = function(encoding) {
+        if (typeof encoding !== 'string') return false;
+        switch (encoding.toLowerCase()) {
+            case 'utf8': case 'utf-8':
+            case 'utf16le': case 'utf-16le': case 'ucs2': case 'ucs-2':
+            case 'latin1': case 'binary':
+            case 'ascii':
+            case 'base64': case 'base64url':
+            case 'hex':
+                return true;
+            default:
+                return false;
+        }
+    };
+
+    /// Buffer.prototype.swap16 / swap32 / swap64 — byte-swap pairs
+    /// of bytes in-place. Throws if length isn't a multiple of the
+    /// swap unit. Returns `this` so calls chain.
+    function _swap(self, unit) {
+        if ((self.length % unit) !== 0) {
+            throw new RangeError('Buffer.swap' + (unit * 8) + ': length must be multiple of ' + unit);
+        }
+        for (var i = 0; i < self.length; i += unit) {
+            for (var j = 0; j < unit / 2; j++) {
+                var tmp = self[i + j];
+                self[i + j] = self[i + unit - 1 - j];
+                self[i + unit - 1 - j] = tmp;
+            }
+        }
+        return self;
+    }
+    function _installSwapMethods(proto) {
+        if (!proto) return;
+        if (typeof proto.swap16 !== 'function') {
+            proto.swap16 = function() { return _swap(this, 2); };
+        }
+        if (typeof proto.swap32 !== 'function') {
+            proto.swap32 = function() { return _swap(this, 4); };
+        }
+        if (typeof proto.swap64 !== 'function') {
+            proto.swap64 = function() { return _swap(this, 8); };
+        }
+    }
+    // makeBuffer either returns a fresh Uint8Array with `__isBuffer`
+    // tagged or extends prototypes; `swap*` lives on the per-buffer
+    // augmentation. Install on the canonical Uint8Array prototype
+    // since Buffers ARE Uint8Arrays under the hood.
+    _installSwapMethods(Uint8Array.prototype);
+
     exports.Buffer = Buffer;
     exports.kMaxLength = 0x7fffffff;
     exports.INSPECT_MAX_BYTES = 50;

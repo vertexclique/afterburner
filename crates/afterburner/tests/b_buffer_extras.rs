@@ -33,6 +33,74 @@ fn assert_marker(out: &std::process::Output, marker: &str) {
 }
 
 #[test]
+fn buffer_compare_returns_signed_byte_order() {
+    let out = run_inline(
+        r#"
+        const a = Buffer.from('abc');
+        const b = Buffer.from('abd');
+        if (Buffer.compare(a, b) < 0 && Buffer.compare(b, a) > 0 && Buffer.compare(a, a) === 0)
+            console.log('CMP-OK');
+        else console.log('FAIL');
+        "#,
+    );
+    assert_marker(&out, "CMP-OK");
+}
+
+#[test]
+fn buffer_is_encoding_recognises_canonical_set() {
+    let out = run_inline(
+        r#"
+        if (Buffer.isEncoding('utf8') && Buffer.isEncoding('UTF-8') &&
+            Buffer.isEncoding('hex') && Buffer.isEncoding('base64') &&
+            Buffer.isEncoding('latin1') && !Buffer.isEncoding('xyz') &&
+            !Buffer.isEncoding(123)) console.log('ENC-OK');
+        else console.log('FAIL');
+        "#,
+    );
+    assert_marker(&out, "ENC-OK");
+}
+
+#[test]
+fn buffer_swap16_reverses_byte_pairs() {
+    let out = run_inline(
+        r#"
+        const b = Buffer.from([1, 2, 3, 4, 5, 6]);
+        b.swap16();
+        if (Array.from(b).join(',') === '2,1,4,3,6,5') console.log('SW16-OK');
+        else console.log('FAIL', Array.from(b).join(','));
+        "#,
+    );
+    assert_marker(&out, "SW16-OK");
+}
+
+#[test]
+fn buffer_swap32_reverses_byte_quads() {
+    let out = run_inline(
+        r#"
+        const b = Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]);
+        b.swap32();
+        if (Array.from(b).join(',') === '4,3,2,1,8,7,6,5') console.log('SW32-OK');
+        else console.log('FAIL', Array.from(b).join(','));
+        "#,
+    );
+    assert_marker(&out, "SW32-OK");
+}
+
+#[test]
+fn buffer_swap16_rejects_odd_length() {
+    let out = run_inline(
+        r#"
+        const b = Buffer.from([1, 2, 3]);
+        try {
+            b.swap16();
+            console.log('FAIL no-throw');
+        } catch (_) { console.log('SW-RANGE-OK'); }
+        "#,
+    );
+    assert_marker(&out, "SW-RANGE-OK");
+}
+
+#[test]
 fn buffer_pool_size_is_node_default() {
     let out = run_inline(
         r#"
