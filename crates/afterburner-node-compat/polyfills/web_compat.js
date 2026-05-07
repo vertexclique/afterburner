@@ -742,28 +742,112 @@
             globalThis.URL = urlMod.URL;
             globalThis.URLSearchParams = urlMod.URLSearchParams;
         } else {
-            // Minimal regex-based parser when neither host nor url
-            // module exposes a URL constructor. Doesn't claim WHATWG
-            // conformance — covers `new URL(href).{protocol,host,
-            // pathname,search,searchParams}` which is what most Node
-            // code actually uses.
+            // Regex-based parser with proper RFC 3986 reference
+            // resolution for the 2-arg form. Covers WHATWG-shape
+            // properties (`protocol`/`host`/`pathname`/`search`/
+            // `searchParams`) plus the redirect-following cases
+            // node-fetch / minipass-fetch / pacote depend on:
+            //   * `new URL('/p', 'https://h.com/x')`   → `https://h.com/p`
+            //   * `new URL('p', 'https://h.com/x/y')`  → `https://h.com/x/p`
+            //   * `new URL('https://o.com/p', 'https://h.com/x')` → `https://o.com/p`
+            //   * `new URL('?q=1', 'https://h.com/x')` → `https://h.com/x?q=1`
+            // Without these, every redirect-followed download breaks
+            // with empty-host options and the upstream HTTP client
+            // synthesises a malformed `https:///path` URL.
+            function _parseAbs(s) {
+                var m = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/([^/?#]*)([^?#]*)?(\?[^#]*)?(#.*)?$/.exec(s);
+                if (!m) return null;
+                return { protocol: m[1] + ':', authority: m[2] || '', path: m[3] || '', query: m[4] || '', fragment: m[5] || '' };
+            }
+            function _normalizePath(p) {
+                // RFC 3986 §5.2.4 — remove `.` and `..` segments.
+                if (!p) return '';
+                var leading = p.charAt(0) === '/';
+                var trailing = p.charAt(p.length - 1) === '/';
+                var parts = p.split('/').filter(function(s) { return s.length > 0; });
+                var stack = [];
+                for (var i = 0; i < parts.length; i++) {
+                    var seg = parts[i];
+                    if (seg === '.') continue;
+                    if (seg === '..') { if (stack.length) stack.pop(); continue; }
+                    stack.push(seg);
+                }
+                return (leading ? '/' : '') + stack.join('/') + (trailing && stack.length ? '/' : '');
+            }
             globalThis.URL = function URL(href, base) {
-                if (base) href = String(base).replace(/[^/]*$/, '') + href;
-                var s = String(href);
-                var m = /^(?:([a-zA-Z][a-zA-Z0-9+.-]*):)?(?:\/\/([^/?#]*))?([^?#]*)(\?[^#]*)?(#.*)?$/.exec(s);
-                this.href = s;
-                this.protocol = m && m[1] ? m[1] + ':' : '';
-                this.host = (m && m[2]) || '';
-                var hp = this.host.split(':');
-                this.hostname = hp[0] || '';
-                this.port = hp[1] || '';
-                this.pathname = (m && m[3]) || '';
-                this.search = (m && m[4]) || '';
-                this.hash = (m && m[5]) || '';
-                this.origin = this.protocol + (this.host ? '//' + this.host : '');
+                var input = String(href);
+                var parsed = _parseAbs(input);
+                if (!parsed && base) {
+                    // Reference resolution per RFC 3986 §5.3.
+                    var b = _parseAbs(String(base));
+                    if (b) {
+                        // Same-document fragment.
+                        if (input.charAt(0) === '#') {
+                            input = (b.protocol + '//' + b.authority + b.path + b.query + input);
+                        } else if (input.charAt(0) === '?') {
+                            input = (b.protocol + '//' + b.authority + b.path + input);
+                        } else if (input.charAt(0) === '/') {
+                            // Absolute path on the base authority.
+                            input = (b.protocol + '//' + b.authority + input);
+                        } else {
+                            // Path-relative against the base directory.
+                            var basePath = b.path || '/';
+                            // Strip the last segment.
+                            var slash = basePath.lastIndexOf('/');
+                            var baseDir = slash >= 0 ? basePath.slice(0, slash + 1) : '/';
+                            input = (b.protocol + '//' + b.authority + _normalizePath(baseDir + input));
+                        }
+                        parsed = _parseAbs(input);
+                    }
+                }
+                var protocol = parsed ? parsed.protocol : '';
+                var host = parsed ? parsed.authority : '';
+                var path = parsed ? (parsed.path || '/') : input;
+                var query = parsed ? parsed.query : '';
+                var fragment = parsed ? parsed.fragment : '';
+                // Username / password split off the authority.
+                var username = '', password = '';
+                var atIdx = host.indexOf('@');
+                if (atIdx >= 0) {
+                    var userinfo = host.slice(0, atIdx);
+                    host = host.slice(atIdx + 1);
+                    var colonIdx = userinfo.indexOf(':');
+                    if (colonIdx >= 0) {
+                        username = userinfo.slice(0, colonIdx);
+                        password = userinfo.slice(colonIdx + 1);
+                    } else {
+                        username = userinfo;
+                    }
+                }
+                var hp = host.split(':');
+                var hostname = hp[0] || '';
+                var port = hp.length > 1 ? hp[1] : '';
+                this.protocol = protocol;
+                this.host = host;
+                this.hostname = hostname;
+                this.port = port;
+                this.pathname = _normalizePath(path);
+                if (this.pathname === '' && host) this.pathname = '/';
+                this.search = query;
+                this.hash = fragment;
+                this.username = username;
+                this.password = password;
+                this.origin = protocol + (host ? '//' + host : '');
+                this.href = protocol + '//' + (username ? username + (password ? ':' + password : '') + '@' : '') + host + this.pathname + this.search + this.hash;
                 this.searchParams = new globalThis.URLSearchParams(this.search.slice(1));
             };
             globalThis.URL.prototype.toString = function() { return this.href; };
+            globalThis.URL.prototype.toJSON  = function() { return this.href; };
+            globalThis.URL.canParse = function(href, base) {
+                try { new globalThis.URL(href, base); return true; }
+                catch (_) { return false; }
+            };
+            globalThis.URL.parse = function(href, base) {
+                try { return new globalThis.URL(href, base); }
+                catch (_) { return null; }
+            };
+            globalThis.URL.createObjectURL = function() { throw new Error('URL.createObjectURL not supported'); };
+            globalThis.URL.revokeObjectURL = function() {};
 
             globalThis.URLSearchParams = function URLSearchParams(init) {
                 this._pairs = [];
