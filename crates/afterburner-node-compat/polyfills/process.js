@@ -75,6 +75,35 @@
         // Node 24+ `process.threadCpuUsage` — return a zeroed object.
         threadCpuUsage:     function() { return { user: 0, system: 0 }; },
         cpuUsage:           function(_prev) { return { user: 0, system: 0 }; },
+        // Node 11+ `process.report` — diagnostic-report API. We don't
+        // generate real V8 heap dumps; the methods/properties exist so
+        // probing libs (clinic.js, node-inspector wrappers) don't
+        // crash at module init.
+        report: {
+            directory: '',
+            filename: '',
+            reportOnFatalError: false,
+            reportOnSignal: false,
+            reportOnUncaughtException: false,
+            signal: 'SIGUSR2',
+            compact: false,
+            excludeNetwork: false,
+            getReport: function(_err) {
+                return {
+                    header: { event: 'JavaScript API', filename: '' },
+                    javascriptStack: { message: '', stack: [] },
+                    nativeStack: [],
+                    sharedObjects: [],
+                    libuv: [],
+                    workers: [],
+                    environmentVariables: {},
+                };
+            },
+            writeReport: function(_filename) {
+                // Returns the produced filename; we no-op and return ''.
+                return '';
+            },
+        },
         resourceUsage:      function() {
             return {
                 userCPUTime: 0, systemCPUTime: 0, maxRSS: 0,
