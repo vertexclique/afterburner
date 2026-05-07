@@ -76,12 +76,12 @@ jobs:
         # gated and skipped here. Default-features pass exists to
         # catch breakage in the library API surface (the path that
         # downstream `cargo install afterburner` users compile).
-        run: cargo test --workspace --no-fail-fast -- --test-threads=4
+        run: cargo test --workspace --no-fail-fast -- --test-threads=1
       - name: cargo test (bin + all-shadows + ts)
         # Full-feature pass: includes the integration tests that spawn
         # the `burn` CLI as a subprocess (b7_*, b10_*, b_wasm_loader,
         # b_node_compat_round2, b_shadow_*, b8/b9 ts+esm pipelines).
-        run: cargo test -p afterburner --features "bin all-shadows ts" --no-fail-fast -- --test-threads=4
+        run: cargo test -p afterburner --features "bin all-shadows ts" --no-fail-fast -- --test-threads=1
 
   doc:
     name: cargo doc

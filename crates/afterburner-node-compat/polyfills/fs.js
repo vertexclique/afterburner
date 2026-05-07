@@ -149,6 +149,46 @@ __register_module('fs', function(module, exports, require) {
         return exports.statSync(path);
     };
 
+    // statfsSync(path[, options]) — file-system-level info (Node 19+).
+    // We don't have a host bridge for `statvfs`; surface conservative
+    // defaults so probing libraries don't crash. `bsize` matches the
+    // common Linux page size; `bfree` / `bavail` are flagged as
+    // available so callers don't think the volume is full.
+    exports.statfsSync = function(path, options) {
+        // We could route to `__host_fs_statfs_sync` if one becomes
+        // available; for now return a synthesised StatFs object that
+        // satisfies the standard property shape.
+        var bigint = options && options.bigint === true;
+        var fields = {
+            type: 0,
+            bsize: 4096,
+            blocks: 0,
+            bfree: 1 << 20,
+            bavail: 1 << 20,
+            files: 0,
+            ffree: 1 << 20,
+        };
+        if (bigint) {
+            for (var k in fields) {
+                if (Object.prototype.hasOwnProperty.call(fields, k)) {
+                    fields[k] = BigInt(fields[k]);
+                }
+            }
+        }
+        return fields;
+    };
+    exports.statfs = function(path, options, cb) {
+        if (typeof options === 'function') { cb = options; options = undefined; }
+        try {
+            var v = exports.statfsSync(path, options);
+            if (cb) queueMicrotask(function() { cb(null, v); });
+            return new Promise(function(resolve) { resolve(v); });
+        } catch (e) {
+            if (cb) queueMicrotask(function() { cb(e); });
+            return new Promise(function(_r, reject) { reject(e); });
+        }
+    };
+
     // readlinkSync — no host bridge, so fail with ENOSYS so callers
     // can fall through (most archive / module-resolution code probes
     // and degrades gracefully when readlink fails).

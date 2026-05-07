@@ -631,6 +631,7 @@ fn shard_main_inner(args: ShardThreadArgs) {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn shard_event_loop(
     shard_idx: usize,
     daemon: &mut DaemonRuntime,

@@ -389,8 +389,7 @@ pub struct AfterburnerBuilder {
 fn auto_worker_count() -> usize {
     if let Ok(s) = std::env::var("BURN_SHARDS")
         && let Ok(n) = s.trim().parse::<usize>()
-        && n >= 1
-        && n <= 128
+        && (1..=128).contains(&n)
     {
         return n;
     }

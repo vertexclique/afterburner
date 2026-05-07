@@ -217,12 +217,34 @@ pub fn wrap_script_source(user: &str, argv_json: &str, env_json: &str, cwd_json:
         if (typeof globalThis.__plenum_refresh_entry_require === 'function') {{
             globalThis.__plenum_refresh_entry_require();
         }}
+        // Derive __filename / __dirname from the entry-script path
+        // baked into argv[1]. The user script frequently relies on
+        // these (Node 21+ `import.meta.dirname` lowers to __dirname),
+        // so make them first-class locals in the entry wrapper just
+        // like require.js does for require()'d modules.
+        const __ab_entry = (globalThis.__ab_argv && globalThis.__ab_argv[1]) || '';
+        const __ab_filename = (function() {{
+            if (!__ab_entry || __ab_entry === '[eval]') return globalThis.__host_cwd || '/';
+            if (__ab_entry[0] === '/' || /^[A-Za-z]:[\\/]/.test(__ab_entry)) return __ab_entry;
+            var cwd = globalThis.__host_cwd || '/';
+            var sep = (cwd[cwd.length - 1] === '/' ? '' : '/');
+            return cwd + sep + __ab_entry;
+        }})();
+        const __ab_dirname = (function() {{
+            var f = __ab_filename;
+            var i = f.lastIndexOf('/');
+            if (i < 0) i = f.lastIndexOf('\\');
+            return i <= 0 ? '/' : f.slice(0, i);
+        }})();
         const __ab_AsyncFunction = (async function () {{}}).constructor;
         const __ab_module = {{ exports: {{}} }};
         const __ab_user = new __ab_AsyncFunction(
-            'module', 'exports', 'require', {user_lit}
+            'module', 'exports', 'require', '__filename', '__dirname', {user_lit}
         );
-        await __ab_user(__ab_module, __ab_module.exports, globalThis.require);
+        await __ab_user(
+            __ab_module, __ab_module.exports, globalThis.require,
+            __ab_filename, __ab_dirname
+        );
         "#
     )
 }

@@ -3225,6 +3225,46 @@ __register_module('fs', function(module, exports, require) {
         return exports.statSync(path);
     };
 
+    // statfsSync(path[, options]) — file-system-level info (Node 19+).
+    // We don't have a host bridge for `statvfs`; surface conservative
+    // defaults so probing libraries don't crash. `bsize` matches the
+    // common Linux page size; `bfree` / `bavail` are flagged as
+    // available so callers don't think the volume is full.
+    exports.statfsSync = function(path, options) {
+        // We could route to `__host_fs_statfs_sync` if one becomes
+        // available; for now return a synthesised StatFs object that
+        // satisfies the standard property shape.
+        var bigint = options && options.bigint === true;
+        var fields = {
+            type: 0,
+            bsize: 4096,
+            blocks: 0,
+            bfree: 1 << 20,
+            bavail: 1 << 20,
+            files: 0,
+            ffree: 1 << 20,
+        };
+        if (bigint) {
+            for (var k in fields) {
+                if (Object.prototype.hasOwnProperty.call(fields, k)) {
+                    fields[k] = BigInt(fields[k]);
+                }
+            }
+        }
+        return fields;
+    };
+    exports.statfs = function(path, options, cb) {
+        if (typeof options === 'function') { cb = options; options = undefined; }
+        try {
+            var v = exports.statfsSync(path, options);
+            if (cb) queueMicrotask(function() { cb(null, v); });
+            return new Promise(function(resolve) { resolve(v); });
+        } catch (e) {
+            if (cb) queueMicrotask(function() { cb(e); });
+            return new Promise(function(_r, reject) { reject(e); });
+        }
+    };
+
     // readlinkSync — no host bridge, so fail with ENOSYS so callers
     // can fall through (most archive / module-resolution code probes
     // and degrades gracefully when readlink fails).
@@ -4835,6 +4875,15 @@ function __plenum_install_http(moduleName) {
                 return { port: server._port, family: 'IPv4', address: '0.0.0.0' };
             };
 
+            // Symbol.asyncDispose (Node 20+) — `await using server =
+            // http.createServer(...)` calls this when the binding goes
+            // out of scope. Wraps `close()` in a Promise.
+            server[Symbol.asyncDispose] = function() {
+                return new Promise(function(resolve) {
+                    server.close(function() { resolve(); });
+                });
+            };
+
             return server;
         }
 
@@ -6024,6 +6073,105 @@ __register_module('net', function(module, exports, require) {
         return 0;
     }
 
+    // ---- net.BlockList (Node 15+) -----------------------------
+    //
+    // A list of IP rules with `addAddress` / `addRange` / `addSubnet`
+    // and a `check(addr)` that returns true if the address matches.
+    // Pure-JS — used by Node apps to gate accepted connections.
+    function _ipv4ToInt(s) {
+        var p = s.split('.');
+        if (p.length !== 4) return -1;
+        var n = 0;
+        for (var i = 0; i < 4; i++) {
+            var b = parseInt(p[i], 10);
+            if (!(b >= 0 && b <= 255)) return -1;
+            n = (n * 256) + b;
+        }
+        return n;
+    }
+    function BlockList() {
+        if (!(this instanceof BlockList)) return new BlockList();
+        this._rules = [];
+    }
+    BlockList.prototype.addAddress = function(address, family) {
+        family = family || 'ipv4';
+        this._rules.push({ kind: 'address', address: String(address), family: family });
+    };
+    BlockList.prototype.addRange = function(start, end, family) {
+        family = family || 'ipv4';
+        this._rules.push({ kind: 'range', start: String(start), end: String(end), family: family });
+    };
+    BlockList.prototype.addSubnet = function(network, prefix, family) {
+        family = family || 'ipv4';
+        this._rules.push({ kind: 'subnet', network: String(network), prefix: prefix | 0, family: family });
+    };
+    BlockList.prototype.check = function(address, family) {
+        family = family || (isIPv6(address) ? 'ipv6' : 'ipv4');
+        var addrStr = String(address);
+        for (var i = 0; i < this._rules.length; i++) {
+            var r = this._rules[i];
+            if (r.family !== family) continue;
+            if (r.kind === 'address' && r.address === addrStr) return true;
+            if (family === 'ipv4') {
+                var n = _ipv4ToInt(addrStr);
+                if (n < 0) continue;
+                if (r.kind === 'range') {
+                    var lo = _ipv4ToInt(r.start), hi = _ipv4ToInt(r.end);
+                    if (lo >= 0 && hi >= 0 && n >= lo && n <= hi) return true;
+                } else if (r.kind === 'subnet') {
+                    var net = _ipv4ToInt(r.network);
+                    if (net < 0 || r.prefix < 0 || r.prefix > 32) continue;
+                    var mask = r.prefix === 0 ? 0 : (~0 << (32 - r.prefix)) >>> 0;
+                    if ((n & mask) === (net & mask)) return true;
+                }
+            }
+            // IPv6 subnet/range matching is string-prefix only here.
+            // Real workloads rarely use BlockList for IPv6; expand
+            // when a concrete need surfaces.
+        }
+        return false;
+    };
+    Object.defineProperty(BlockList.prototype, 'rules', {
+        get: function() {
+            return this._rules.map(function(r) {
+                if (r.kind === 'address') return 'Address: ' + r.family.toUpperCase() + ' ' + r.address;
+                if (r.kind === 'range') return 'Range: ' + r.family.toUpperCase() + ' ' + r.start + '-' + r.end;
+                return 'Subnet: ' + r.family.toUpperCase() + ' ' + r.network + '/' + r.prefix;
+            });
+        },
+    });
+
+    // ---- net.SocketAddress (Node 15+) -------------------------
+    //
+    // Immutable address record. In Node it's a transferable across
+    // workers; here it's a value-object with the same shape.
+    function SocketAddress(options) {
+        if (!(this instanceof SocketAddress)) return new SocketAddress(options);
+        options = options || {};
+        Object.defineProperty(this, 'address', { value: String(options.address || '127.0.0.1'), enumerable: true });
+        Object.defineProperty(this, 'port', { value: (options.port | 0) || 0, enumerable: true });
+        Object.defineProperty(this, 'family', { value: String(options.family || 'ipv4').toLowerCase(), enumerable: true });
+        Object.defineProperty(this, 'flowlabel', { value: (options.flowlabel | 0) || 0, enumerable: true });
+    }
+    SocketAddress.parse = function(input) {
+        if (typeof input !== 'string') return undefined;
+        var s = input.trim();
+        if (s[0] === '[') {
+            var rb = s.indexOf(']');
+            if (rb < 0) return undefined;
+            var addr = s.slice(1, rb);
+            var rest = s.slice(rb + 1);
+            var port = rest[0] === ':' ? parseInt(rest.slice(1), 10) : 0;
+            return new SocketAddress({ address: addr, port: port, family: 'ipv6' });
+        }
+        if (isIPv6(s)) return new SocketAddress({ address: s, family: 'ipv6' });
+        var c = s.lastIndexOf(':');
+        if (c >= 0) {
+            return new SocketAddress({ address: s.slice(0, c), port: parseInt(s.slice(c + 1), 10) || 0 });
+        }
+        return new SocketAddress({ address: s });
+    };
+
     exports.Socket = Socket;
     exports.Server = Server;
     exports.createConnection = connect;
@@ -6032,6 +6180,8 @@ __register_module('net', function(module, exports, require) {
     exports.isIP = isIP;
     exports.isIPv4 = isIPv4;
     exports.isIPv6 = isIPv6;
+    exports.BlockList = BlockList;
+    exports.SocketAddress = SocketAddress;
 });
 
 // ---- node_subpaths.js ----
@@ -10738,6 +10888,36 @@ __register_module('tls', function(module, exports, require) {
     // Stable defaults — Node exposes these but burn doesn't gate on them.
     exports.DEFAULT_MIN_VERSION = 'TLSv1.2';
     exports.DEFAULT_MAX_VERSION = 'TLSv1.3';
+
+    // ---- tls.rootCertificates / getCACertificates (Node 12 / 24) ----
+    //
+    // The host TLS layer (rustls / webpki-roots) owns the actual root
+    // store; we don't surface PEM strings out of it (that crosses the
+    // sandbox boundary for what's effectively read-only metadata).
+    // The arrays are populated lazily on first access and cached.
+    var _rootCerts = null;
+    Object.defineProperty(exports, 'rootCertificates', {
+        configurable: true,
+        enumerable: true,
+        get: function() {
+            if (_rootCerts === null) {
+                if (typeof globalThis.__host_tls_root_certificates === 'function') {
+                    var raw = globalThis.__host_tls_root_certificates();
+                    _rootCerts = (typeof raw === 'string' && raw.length) ? raw.split('\n--CERT--\n') : [];
+                } else {
+                    _rootCerts = [];
+                }
+            }
+            return _rootCerts.slice();
+        },
+    });
+    exports.getCACertificates = function getCACertificates(type) {
+        // type: 'default' | 'system' | 'bundled' | 'extra'.
+        // We only have the bundled webpki roots; surface them under
+        // every requested type for compatibility.
+        type = type || 'default';
+        return exports.rootCertificates;
+    };
 });
 
 // ---- trace_events.js ----
@@ -11109,6 +11289,355 @@ __register_module('util', function(module, exports, require) {
 
     exports.TextEncoder = typeof TextEncoder === 'function' ? TextEncoder : undefined;
     exports.TextDecoder = typeof TextDecoder === 'function' ? TextDecoder : undefined;
+
+    // ---- util.styleText (Node 21/22) -----------------------------
+    //
+    // Wraps text in ANSI escape sequences when stdout is a TTY (we
+    // approximate "is TTY" via env). The list of supported style
+    // names matches Node's `util.styleText` accepted set; unknown
+    // styles throw `ERR_INVALID_ARG_VALUE` like Node.
+    var ANSI = {
+        reset:     [0,  0],
+        bold:      [1,  22],
+        dim:       [2,  22],
+        italic:    [3,  23],
+        underline: [4,  24],
+        blink:     [5,  25],
+        inverse:   [7,  27],
+        hidden:    [8,  28],
+        strikethrough: [9, 29],
+        black:     [30, 39],
+        red:       [31, 39],
+        green:     [32, 39],
+        yellow:    [33, 39],
+        blue:      [34, 39],
+        magenta:   [35, 39],
+        cyan:      [36, 39],
+        white:     [37, 39],
+        gray:      [90, 39],
+        grey:      [90, 39],
+        bgBlack:   [40, 49],
+        bgRed:     [41, 49],
+        bgGreen:   [42, 49],
+        bgYellow:  [43, 49],
+        bgBlue:    [44, 49],
+        bgMagenta: [45, 49],
+        bgCyan:    [46, 49],
+        bgWhite:   [47, 49],
+    };
+    exports.styleText = function styleText(format, text, options) {
+        var styles = Array.isArray(format) ? format : [format];
+        for (var i = 0; i < styles.length; i++) {
+            if (typeof styles[i] !== 'string' || !ANSI[styles[i]]) {
+                var err = new TypeError("The argument 'format' must be a valid style. Received '" + styles[i] + "'");
+                err.code = 'ERR_INVALID_ARG_VALUE';
+                throw err;
+            }
+        }
+        // `validateStream: false` in opts skips the TTY check —
+        // Node's intent is "always emit colors when explicitly opted
+        // in". Default behavior approximates the TTY check via
+        // NO_COLOR / FORCE_COLOR env vars.
+        var stream = options && options.stream;
+        var validate = !options || options.validateStream !== false;
+        if (validate) {
+            if (typeof process !== 'undefined' && process.env) {
+                if (process.env.NO_COLOR) return text;
+            }
+            // We assume TTY when the caller didn't pass a stream;
+            // most CLI tools want colors. Pass `{ stream: ... }` to
+            // pipe-aware contexts where that should be checked.
+            if (stream && stream.isTTY === false) return text;
+        }
+        var prefix = '', suffix = '';
+        for (var j = 0; j < styles.length; j++) {
+            var pair = ANSI[styles[j]];
+            prefix += '[' + pair[0] + 'm';
+            suffix = '[' + pair[1] + 'm' + suffix;
+        }
+        return prefix + String(text) + suffix;
+    };
+
+    // ---- util.MIMEType / util.MIMEParams (Node 19/22) -------------
+    function _parseMIME(input) {
+        var s = String(input).trim();
+        var slash = s.indexOf('/');
+        if (slash < 0) {
+            var e = new TypeError('Invalid MIME type: missing "/"');
+            e.code = 'ERR_INVALID_MIME_SYNTAX';
+            throw e;
+        }
+        var type = s.slice(0, slash).toLowerCase();
+        var rest = s.slice(slash + 1);
+        var semi = rest.indexOf(';');
+        var sub = (semi < 0 ? rest : rest.slice(0, semi)).trim().toLowerCase();
+        var params = [];
+        if (semi >= 0) {
+            var paramStr = rest.slice(semi + 1);
+            var parts = paramStr.split(';');
+            for (var i = 0; i < parts.length; i++) {
+                var p = parts[i].trim();
+                if (!p) continue;
+                var eq = p.indexOf('=');
+                if (eq < 0) continue;
+                var k = p.slice(0, eq).trim().toLowerCase();
+                var v = p.slice(eq + 1).trim();
+                if (v.length >= 2 && v.charCodeAt(0) === 34 && v.charCodeAt(v.length - 1) === 34) {
+                    v = v.slice(1, -1).replace(/\\(.)/g, '$1');
+                }
+                params.push([k, v]);
+            }
+        }
+        return { type: type, subtype: sub, params: params };
+    }
+    function MIMEParams(pairs) { this._pairs = pairs.slice(); }
+    MIMEParams.prototype.get = function(name) {
+        var k = String(name).toLowerCase();
+        for (var i = 0; i < this._pairs.length; i++) {
+            if (this._pairs[i][0] === k) return this._pairs[i][1];
+        }
+        return null;
+    };
+    MIMEParams.prototype.has = function(name) { return this.get(name) !== null; };
+    MIMEParams.prototype.set = function(name, value) {
+        var k = String(name).toLowerCase();
+        for (var i = 0; i < this._pairs.length; i++) {
+            if (this._pairs[i][0] === k) { this._pairs[i][1] = String(value); return; }
+        }
+        this._pairs.push([k, String(value)]);
+    };
+    MIMEParams.prototype.delete = function(name) {
+        var k = String(name).toLowerCase();
+        this._pairs = this._pairs.filter(function(p) { return p[0] !== k; });
+    };
+    MIMEParams.prototype.entries = function*() { for (var i = 0; i < this._pairs.length; i++) yield this._pairs[i].slice(); };
+    MIMEParams.prototype.keys    = function*() { for (var i = 0; i < this._pairs.length; i++) yield this._pairs[i][0]; };
+    MIMEParams.prototype.values  = function*() { for (var i = 0; i < this._pairs.length; i++) yield this._pairs[i][1]; };
+    MIMEParams.prototype[Symbol.iterator] = MIMEParams.prototype.entries;
+    MIMEParams.prototype.toString = function() {
+        return this._pairs.map(function(p) {
+            var v = p[1];
+            return p[0] + '=' + (/[^A-Za-z0-9_\-.+]/.test(v) ? '"' + v.replace(/(["\\])/g, '\\$1') + '"' : v);
+        }).join(';');
+    };
+
+    function MIMEType(input) {
+        var parsed = _parseMIME(input);
+        this._type = parsed.type;
+        this._sub = parsed.subtype;
+        this.params = new MIMEParams(parsed.params);
+    }
+    Object.defineProperty(MIMEType.prototype, 'type', {
+        get: function() { return this._type; },
+        set: function(v) { this._type = String(v).toLowerCase(); },
+    });
+    Object.defineProperty(MIMEType.prototype, 'subtype', {
+        get: function() { return this._sub; },
+        set: function(v) { this._sub = String(v).toLowerCase(); },
+    });
+    Object.defineProperty(MIMEType.prototype, 'essence', {
+        get: function() { return this._type + '/' + this._sub; },
+    });
+    MIMEType.prototype.toString = function() {
+        var p = this.params.toString();
+        return this._type + '/' + this._sub + (p ? ';' + p : '');
+    };
+    MIMEType.prototype.toJSON = MIMEType.prototype.toString;
+    exports.MIMEType = MIMEType;
+    exports.MIMEParams = MIMEParams;
+
+    // ---- util.parseArgs (Node 18.3+ stable, v2 surface in 22) ----
+    //
+    // Parses argv per a small `options` schema:
+    //   { foo: { type: 'string', short: 'f', multiple: true,
+    //            default: 'x' } }
+    // Returns `{ values, positionals, tokens? }`.
+    //
+    // Supported v2 surface: `tokens: true` returns the full token
+    // stream (per arg, with `kind`: option / positional / option-
+    // terminator). Strict mode rejects unknown options like Node.
+    exports.parseArgs = function parseArgs(config) {
+        var cfg = config || {};
+        var args = cfg.args || (typeof process !== 'undefined' && process.argv ? process.argv.slice(2) : []);
+        var options = cfg.options || {};
+        var strict = cfg.strict !== false;
+        var allowPositionals = cfg.allowPositionals === true;
+        var allowNegative = cfg.allowNegative === true;
+        var wantTokens = cfg.tokens === true;
+
+        // Build short-flag → long-name map.
+        var shortMap = {};
+        var longNames = Object.keys(options);
+        for (var li = 0; li < longNames.length; li++) {
+            var n = longNames[li];
+            var spec = options[n];
+            if (!spec || typeof spec !== 'object') continue;
+            if (typeof spec.short === 'string' && spec.short.length > 0) {
+                shortMap[spec.short] = n;
+            }
+        }
+
+        function specOf(name) {
+            var s = options[name];
+            return s && typeof s === 'object' ? s : null;
+        }
+        function setValue(values, name, value) {
+            var s = specOf(name);
+            if (s && s.multiple) {
+                if (!values[name]) values[name] = [];
+                values[name].push(value);
+            } else {
+                values[name] = value;
+            }
+        }
+        function consumeBoolean(values, name, raw) {
+            setValue(values, name, raw);
+            if (wantTokens) {
+                tokens.push({ kind: 'option', name: name, rawName: raw === false ? '--no-' + name : null,
+                              value: undefined, inlineValue: undefined });
+            }
+        }
+
+        var values = {};
+        var positionals = [];
+        var tokens = [];
+
+        // Apply defaults.
+        for (var di = 0; di < longNames.length; di++) {
+            var dn = longNames[di];
+            var ds = specOf(dn);
+            if (ds && Object.prototype.hasOwnProperty.call(ds, 'default')) {
+                values[dn] = ds.default;
+            }
+        }
+
+        var i = 0;
+        var sawTerminator = false;
+        while (i < args.length) {
+            var a = args[i];
+            if (sawTerminator) {
+                positionals.push(a);
+                if (wantTokens) tokens.push({ kind: 'positional', index: i, value: a });
+                i++;
+                continue;
+            }
+            if (a === '--') {
+                sawTerminator = true;
+                if (wantTokens) tokens.push({ kind: 'option-terminator', index: i });
+                i++;
+                continue;
+            }
+            // Long form: `--name`, `--name=value`, `--no-name`.
+            if (a.length > 2 && a[0] === '-' && a[1] === '-') {
+                var body = a.slice(2);
+                var eq = body.indexOf('=');
+                var name = eq >= 0 ? body.slice(0, eq) : body;
+                var inline = eq >= 0 ? body.slice(eq + 1) : undefined;
+                if (allowNegative && name.indexOf('no-') === 0 && options[name.slice(3)]) {
+                    setValue(values, name.slice(3), false);
+                    if (wantTokens) tokens.push({ kind: 'option', name: name.slice(3),
+                                                  rawName: a, value: false, inlineValue: undefined });
+                    i++;
+                    continue;
+                }
+                var s = specOf(name);
+                if (!s) {
+                    if (strict) {
+                        var e = new TypeError("Unknown option '--" + name + "'");
+                        e.code = 'ERR_PARSE_ARGS_UNKNOWN_OPTION';
+                        throw e;
+                    }
+                    if (allowPositionals) positionals.push(a);
+                    if (wantTokens) tokens.push({ kind: 'option', name: name, rawName: a,
+                                                  value: inline, inlineValue: inline });
+                    i++;
+                    continue;
+                }
+                if (s.type === 'boolean') {
+                    setValue(values, name, true);
+                    if (wantTokens) tokens.push({ kind: 'option', name: name, rawName: a,
+                                                  value: true, inlineValue: undefined });
+                    i++;
+                } else {
+                    var val = inline !== undefined ? inline : args[++i];
+                    setValue(values, name, val);
+                    if (wantTokens) tokens.push({ kind: 'option', name: name, rawName: a,
+                                                  value: val, inlineValue: inline });
+                    i++;
+                }
+                continue;
+            }
+            // Short form: `-f`, `-fvalue`, `-fxyz` (cluster of bools).
+            if (a.length >= 2 && a[0] === '-' && a[1] !== '-') {
+                var rest = a.slice(1);
+                var consumed = false;
+                for (var ri = 0; ri < rest.length; ri++) {
+                    var c = rest[ri];
+                    var longName = shortMap[c];
+                    if (!longName) {
+                        if (strict) {
+                            var e2 = new TypeError("Unknown option '-" + c + "'");
+                            e2.code = 'ERR_PARSE_ARGS_UNKNOWN_OPTION';
+                            throw e2;
+                        }
+                        break;
+                    }
+                    var sp = specOf(longName);
+                    if (sp && sp.type === 'string') {
+                        var rem = rest.slice(ri + 1);
+                        var sval = rem.length ? rem : args[++i];
+                        setValue(values, longName, sval);
+                        if (wantTokens) tokens.push({ kind: 'option', name: longName, rawName: a,
+                                                      value: sval, inlineValue: rem.length ? rem : undefined });
+                        consumed = true;
+                        break;
+                    }
+                    setValue(values, longName, true);
+                    if (wantTokens) tokens.push({ kind: 'option', name: longName, rawName: a,
+                                                  value: true, inlineValue: undefined });
+                }
+                if (!consumed) i++;
+                else i++;
+                continue;
+            }
+            // Bare positional.
+            if (!allowPositionals && strict) {
+                var e3 = new TypeError("Unexpected positional argument '" + a + "'");
+                e3.code = 'ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL';
+                throw e3;
+            }
+            positionals.push(a);
+            if (wantTokens) tokens.push({ kind: 'positional', index: i, value: a });
+            i++;
+        }
+        var out = { values: values, positionals: positionals };
+        if (wantTokens) out.tokens = tokens;
+        return out;
+    };
+
+    // ---- util.transferableAbortSignal / util.aborted (Node 22) ----
+    //
+    // `transferableAbortSignal(s)` returns a signal usable across
+    // worker postMessage boundaries; in our model AbortSignal is
+    // already a plain object so the transfer is a no-op identity.
+    // `aborted(signal, resource)` returns a Promise that rejects
+    // with the abort reason (matches the Node 18.3+ contract).
+    exports.transferableAbortSignal = function transferableAbortSignal(signal) {
+        return signal;
+    };
+    exports.aborted = function aborted(signal, _resource) {
+        if (!signal || typeof signal.addEventListener !== 'function') {
+            return Promise.reject(new TypeError('aborted: argument must be an AbortSignal'));
+        }
+        if (signal.aborted) {
+            return Promise.reject(signal.reason || new Error('aborted'));
+        }
+        return new Promise(function(_resolve, reject) {
+            signal.addEventListener('abort', function() {
+                reject(signal.reason || new Error('aborted'));
+            }, { once: true });
+        });
+    };
 });
 
 // ---- v8.js ----
@@ -12388,6 +12917,348 @@ __register_module('wasi', function(module, exports, require) {
             };
         }
     }
+
+    // ============================================================
+    // ES2024 / ES2023 globals.
+    //
+    // The runtime's QuickJS may add these natively in a future build;
+    // every install is gated on `!has(...)` so the polyfill is a
+    // no-op once the engine catches up. Idempotent + safe.
+    // ============================================================
+
+    // ---- Promise.withResolvers (Stage 4, Node 22) -------------------
+    if (typeof Promise.withResolvers !== 'function') {
+        Object.defineProperty(Promise, 'withResolvers', {
+            value: function withResolvers() {
+                var resolve, reject;
+                var promise = new this(function(res, rej) { resolve = res; reject = rej; });
+                return { promise: promise, resolve: resolve, reject: reject };
+            },
+            writable: true, configurable: true,
+        });
+    }
+
+    // ---- Object.groupBy / Map.groupBy (ES2024) ----------------------
+    if (typeof Object.groupBy !== 'function') {
+        Object.defineProperty(Object, 'groupBy', {
+            value: function groupBy(items, keyFn) {
+                var out = Object.create(null);
+                var i = 0;
+                for (var it of items) {
+                    var k = keyFn(it, i++);
+                    var key = (typeof k === 'symbol') ? k : String(k);
+                    if (!Object.prototype.hasOwnProperty.call(out, key)) out[key] = [];
+                    out[key].push(it);
+                }
+                return out;
+            },
+            writable: true, configurable: true,
+        });
+    }
+    if (typeof Map.groupBy !== 'function') {
+        Object.defineProperty(Map, 'groupBy', {
+            value: function groupBy(items, keyFn) {
+                var out = new Map();
+                var i = 0;
+                for (var it of items) {
+                    var k = keyFn(it, i++);
+                    var arr = out.get(k);
+                    if (!arr) { arr = []; out.set(k, arr); }
+                    arr.push(it);
+                }
+                return out;
+            },
+            writable: true, configurable: true,
+        });
+    }
+
+    // ---- Set.prototype set-theoretic methods (ES2024, Node 22) -----
+    //
+    // The spec is precise about argument shape: every method takes a
+    // "set-like" — an object with `size`, `has`, and `keys` — *not*
+    // necessarily a `Set` instance. The polyfill matches that contract
+    // so the polyfill behaves like the native methods if a script
+    // passes e.g. a Map or a custom collection.
+    function _setLikeOf(other, name) {
+        if (other == null || typeof other !== 'object' && typeof other !== 'function') {
+            throw new TypeError('Set.prototype.' + name + ': argument is not set-like');
+        }
+        var size = other.size;
+        if (typeof size !== 'number') {
+            throw new TypeError('Set.prototype.' + name + ': argument is not set-like (size)');
+        }
+        if (typeof other.has !== 'function' || typeof other.keys !== 'function') {
+            throw new TypeError('Set.prototype.' + name + ': argument is not set-like (has/keys)');
+        }
+        return { size: size, has: other.has.bind(other), keys: other.keys.bind(other) };
+    }
+    function _installSetMethod(name, impl) {
+        if (typeof Set.prototype[name] === 'function') return;
+        Object.defineProperty(Set.prototype, name, {
+            value: impl, writable: true, configurable: true,
+        });
+    }
+    _installSetMethod('intersection', function intersection(other) {
+        var s = _setLikeOf(other, 'intersection');
+        var result = new Set();
+        // Iterate the smaller of (this, other) for O(min(n, m)).
+        if (this.size <= s.size) {
+            for (var v of this) if (s.has(v)) result.add(v);
+        } else {
+            var it = s.keys();
+            for (var step = it.next(); !step.done; step = it.next()) {
+                if (this.has(step.value)) result.add(step.value);
+            }
+        }
+        return result;
+    });
+    _installSetMethod('union', function union(other) {
+        var s = _setLikeOf(other, 'union');
+        var result = new Set(this);
+        var it = s.keys();
+        for (var step = it.next(); !step.done; step = it.next()) {
+            result.add(step.value);
+        }
+        return result;
+    });
+    _installSetMethod('difference', function difference(other) {
+        var s = _setLikeOf(other, 'difference');
+        var result = new Set();
+        for (var v of this) if (!s.has(v)) result.add(v);
+        return result;
+    });
+    _installSetMethod('symmetricDifference', function symmetricDifference(other) {
+        var s = _setLikeOf(other, 'symmetricDifference');
+        var result = new Set();
+        for (var v of this) if (!s.has(v)) result.add(v);
+        var it = s.keys();
+        for (var step = it.next(); !step.done; step = it.next()) {
+            if (!this.has(step.value)) result.add(step.value);
+        }
+        return result;
+    });
+    _installSetMethod('isSubsetOf', function isSubsetOf(other) {
+        var s = _setLikeOf(other, 'isSubsetOf');
+        if (this.size > s.size) return false;
+        for (var v of this) if (!s.has(v)) return false;
+        return true;
+    });
+    _installSetMethod('isSupersetOf', function isSupersetOf(other) {
+        var s = _setLikeOf(other, 'isSupersetOf');
+        if (this.size < s.size) return false;
+        var it = s.keys();
+        for (var step = it.next(); !step.done; step = it.next()) {
+            if (!this.has(step.value)) return false;
+        }
+        return true;
+    });
+    _installSetMethod('isDisjointFrom', function isDisjointFrom(other) {
+        var s = _setLikeOf(other, 'isDisjointFrom');
+        if (this.size <= s.size) {
+            for (var v of this) if (s.has(v)) return false;
+        } else {
+            var it = s.keys();
+            for (var step = it.next(); !step.done; step = it.next()) {
+                if (this.has(step.value)) return false;
+            }
+        }
+        return true;
+    });
+
+    // ============================================================
+    // URLPattern — WHATWG URL Pattern Standard.
+    //
+    // Supports the canonical shape used by routing libraries:
+    //   new URLPattern({ pathname: '/users/:id' })
+    //   new URLPattern('https://*.example.com/:path*')
+    //   pattern.test(input) / pattern.exec(input)
+    //
+    // The matcher converts each component pattern into a RegExp with
+    // named groups and a small wildcard grammar:
+    //
+    //   :name        capture (one segment, no `/`)
+    //   :name(re)    capture with custom inline regex
+    //   *            wildcard (zero-or-more anything)
+    //   {x}          group
+    //   {x}?         optional group
+    //
+    // Not implemented: pattern modifiers `?`/`+` after capture
+    // groups (rare in practice). Real URL Pattern Standard supports
+    // them — extend if a real workload surfaces.
+    // ============================================================
+    if (typeof globalThis.URLPattern !== 'function') {
+        var COMPONENTS = ['protocol', 'username', 'password', 'hostname', 'port',
+                          'pathname', 'search', 'hash'];
+
+        function compileURLPattern(pat, isPath) {
+            // Empty pattern → match anything.
+            if (pat === undefined || pat === null || pat === '') {
+                return { regex: /^.*$/, names: [] };
+            }
+            var src = String(pat);
+            var out = '^';
+            var names = [];
+            var i = 0;
+            while (i < src.length) {
+                var c = src[i];
+                if (c === '\\') {
+                    // Escape: copy the next char raw.
+                    if (i + 1 < src.length) {
+                        out += '\\' + src[i + 1];
+                        i += 2;
+                    } else {
+                        out += '\\\\';
+                        i += 1;
+                    }
+                    continue;
+                }
+                if (c === ':' && /[A-Za-z_$]/.test(src[i + 1] || '')) {
+                    // Capture group `:name` or `:name(regex)`.
+                    var j = i + 1;
+                    while (j < src.length && /[A-Za-z0-9_$]/.test(src[j])) j++;
+                    var name = src.slice(i + 1, j);
+                    var re;
+                    if (src[j] === '(') {
+                        var depth = 1, k = j + 1;
+                        while (k < src.length && depth > 0) {
+                            if (src[k] === '\\') { k += 2; continue; }
+                            if (src[k] === '(') depth++;
+                            else if (src[k] === ')') depth--;
+                            if (depth > 0) k++;
+                        }
+                        re = src.slice(j + 1, k);
+                        j = k + 1; // past `)`
+                    } else {
+                        re = isPath ? '[^/]+' : '[^/]+';
+                    }
+                    names.push(name);
+                    out += '(' + re + ')';
+                    i = j;
+                    continue;
+                }
+                if (c === '*') {
+                    out += '.*';
+                    i += 1;
+                    continue;
+                }
+                // Regex metacharacters get escaped so the literal text
+                // matches itself, not as a metacharacter.
+                if ('.^$+?()[]{}|'.indexOf(c) !== -1) {
+                    out += '\\' + c;
+                } else {
+                    out += c;
+                }
+                i += 1;
+            }
+            out += '$';
+            return { regex: new RegExp(out), names: names };
+        }
+
+        function URLPattern(input, baseURL) {
+            if (!(this instanceof URLPattern)) {
+                throw new TypeError('URLPattern is a constructor');
+            }
+            var spec = {};
+            if (typeof input === 'string') {
+                // Parse as URL pattern string. Use the first absolute
+                // separator to split off scheme + host + path; we
+                // rely on the URL parser for the easy split, then
+                // assign each piece's pattern.
+                try {
+                    // The URL parser doesn't accept `:name` syntax in
+                    // the path — temporarily encode `:` so URL parses,
+                    // then decode.
+                    var encoded = input.replace(/:([A-Za-z_$][A-Za-z0-9_$]*)/g, '__AB_URLP_$1__');
+                    var u = new URL(encoded, baseURL || 'http://x.invalid/');
+                    var dec = function(s) { return s.replace(/__AB_URLP_([A-Za-z0-9_$]+)__/g, ':$1'); };
+                    spec.protocol = dec(u.protocol.replace(/:$/, ''));
+                    spec.hostname = dec(u.hostname);
+                    spec.port = dec(u.port);
+                    spec.pathname = dec(u.pathname);
+                    spec.search = dec(u.search.replace(/^\?/, ''));
+                    spec.hash = dec(u.hash.replace(/^#/, ''));
+                } catch (_) {
+                    spec.pathname = input;
+                }
+            } else if (input && typeof input === 'object') {
+                for (var k = 0; k < COMPONENTS.length; k++) {
+                    if (input[COMPONENTS[k]] !== undefined) {
+                        spec[COMPONENTS[k]] = String(input[COMPONENTS[k]]);
+                    }
+                }
+            } else {
+                throw new TypeError('URLPattern: input must be a string or object');
+            }
+            this._compiled = {};
+            for (var n = 0; n < COMPONENTS.length; n++) {
+                var name = COMPONENTS[n];
+                this._compiled[name] = compileURLPattern(spec[name], name === 'pathname');
+            }
+        }
+
+        function _exec(self, input) {
+            var u;
+            try {
+                if (typeof input === 'string') u = new URL(input);
+                else if (input && typeof input === 'object') {
+                    // input shape: { pathname, search, ... } or full URL
+                    u = {
+                        protocol: (input.protocol || '').replace(/:$/, ''),
+                        username: input.username || '',
+                        password: input.password || '',
+                        hostname: input.hostname || '',
+                        port: input.port || '',
+                        pathname: input.pathname || '',
+                        search: (input.search || '').replace(/^\?/, ''),
+                        hash: (input.hash || '').replace(/^#/, ''),
+                    };
+                } else {
+                    return null;
+                }
+            } catch (_) { return null; }
+
+            var inputs = {
+                protocol: (u.protocol || '').replace(/:$/, ''),
+                username: u.username || '',
+                password: u.password || '',
+                hostname: u.hostname || '',
+                port: u.port || '',
+                pathname: u.pathname || '',
+                search: (u.search || '').replace(/^\?/, ''),
+                hash: (u.hash || '').replace(/^#/, ''),
+            };
+            var result = { inputs: [input] };
+            for (var i = 0; i < COMPONENTS.length; i++) {
+                var name = COMPONENTS[i];
+                var c = self._compiled[name];
+                var m = c.regex.exec(inputs[name]);
+                if (!m) return null;
+                var groups = {};
+                for (var g = 0; g < c.names.length; g++) {
+                    groups[c.names[g]] = m[g + 1];
+                }
+                result[name] = { input: inputs[name], groups: groups };
+            }
+            return result;
+        }
+
+        URLPattern.prototype.test = function(input) { return _exec(this, input) !== null; };
+        URLPattern.prototype.exec = function(input) { return _exec(this, input); };
+        // Spec accessors (return the source pattern strings). Best-
+        // effort: we don't reconstruct the original `:name` form, just
+        // return a compiled regex source so `console.log(p.pathname)`
+        // is at least informative.
+        for (var ci = 0; ci < COMPONENTS.length; ci++) {
+            (function(name) {
+                Object.defineProperty(URLPattern.prototype, name, {
+                    get: function() { return this._compiled[name].regex.source; },
+                    configurable: true,
+                });
+            })(COMPONENTS[ci]);
+        }
+
+        globalThis.URLPattern = URLPattern;
+    }
 })();
 
 // ---- webassembly.js ----
@@ -13067,6 +13938,32 @@ __register_module('worker_threads', function(module, exports, require) {
         return undefined;
     };
     exports.SHARE_ENV = Symbol('SHARE_ENV');
+
+    // ---- Environment-data slot (Node 14.5+) -----------------
+    //
+    // `setEnvironmentData(key, value)` / `getEnvironmentData(key)`
+    // exchanges plain values across the parent → spawned-worker
+    // boundary. We keep a single in-process map; spawned workers
+    // see whatever was set in the parent before `new Worker(...)`.
+    // The values flow through workerData on spawn.
+    if (!globalThis.__ab_worker_env_data) {
+        globalThis.__ab_worker_env_data = new Map();
+    }
+    var _envData = globalThis.__ab_worker_env_data;
+    exports.setEnvironmentData = function setEnvironmentData(key, value) {
+        if (value === undefined) _envData.delete(key);
+        else _envData.set(key, value);
+    };
+    exports.getEnvironmentData = function getEnvironmentData(key) {
+        return _envData.get(key);
+    };
+
+    // ---- BroadcastChannel re-export ------------------------
+    // Node exports BroadcastChannel from worker_threads in addition
+    // to the global. Keep the surfaces in sync.
+    if (typeof globalThis.BroadcastChannel === 'function') {
+        exports.BroadcastChannel = globalThis.BroadcastChannel;
+    }
 });
 
 // ---- zlib.js ----

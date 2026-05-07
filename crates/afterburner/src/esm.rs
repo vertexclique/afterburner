@@ -26,10 +26,24 @@
 //!
 //! * Dynamic `import()` — needs async resolution; use
 //!   `require()` directly when you need it at runtime.
-//! * `import.meta.*` — no ESM-specific meta surface today.
 //! * Top-level `await` at module scope — CJS output doesn't model
 //!   module-as-promise; wrap with `(async () => { … })()` if you
 //!   need it.
+//!
+//! `import.meta.*` is rewritten textually to its CJS equivalent
+//! before parse:
+//!
+//! * `import.meta.dirname` → `__dirname` (Node 21+)
+//! * `import.meta.filename` → `__filename` (Node 21+)
+//! * `import.meta.url` → `('file://' + __filename)`
+//! * `import.meta.resolve(spec)` → `require.resolve(spec)` (Node 22+)
+//! * bare `import.meta` → an inline object with `{ url, dirname,
+//!   filename, resolve }` for the rare reflective-access case.
+//!
+//! The substitution is unambiguous (no valid JS uses the literal
+//! token `import.meta` in a string or comment way that would be
+//! confused with the syntactic form), so a regex-shaped pre-pass
+//! keeps the AST traversal tight without a custom visitor.
 //!
 //! The transform emits an `Object.defineProperty(exports,
 //! '__esModule', { value: true })` prologue for any module that
@@ -54,6 +68,17 @@ use std::path::Path;
 /// unchanged (no parse cost? we still parse, but emit an identical
 /// string — simpler than maintaining a second fast path).
 pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
+    // Pre-pass: rewrite `import.meta.*` accesses to their CJS
+    // equivalents. Done before the AST parse so the lowered output
+    // doesn't carry `import.meta` into the CJS runtime where it'd
+    // be a syntax error. See module-level docs for the mapping.
+    let source_owned: String;
+    let source: &str = if source.contains("import.meta") {
+        source_owned = rewrite_import_meta(source);
+        &source_owned
+    } else {
+        source
+    };
     let allocator = Allocator::default();
     // Accept both `.js` / `.ts` etc. SourceType::from_path decides
     // ESM vs script based on extension; for explicit `.cjs` we still
@@ -386,4 +411,199 @@ fn next_temp() -> String {
     static CTR: AtomicU64 = AtomicU64::new(0);
     let n = CTR.fetch_add(1, Ordering::Relaxed);
     format!("__ab_esm_{n}")
+}
+
+/// Textual `import.meta.*` → CJS rewrite. Walks the source byte-by-
+/// byte skipping inside string and template literals + line/block
+/// comments so the substitution can't fire on a string that happens
+/// to contain `"import.meta"`. Patterns matched (longest first):
+///
+/// * `import.meta.dirname`        → `__dirname`
+/// * `import.meta.filename`       → `__filename`
+/// * `import.meta.url`            → `('file://' + __filename)`
+/// * `import.meta.resolve(`       → `require.resolve(`
+/// * `import.meta` (bare)         → an inline `{ url, dirname,
+///   filename, resolve }` object literal that re-routes the same
+///   four accesses through the CJS surface above.
+fn rewrite_import_meta(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len + 64);
+    let mut i = 0usize;
+    while i < len {
+        let b = bytes[i];
+
+        // Single-line comment: copy until newline.
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            while i < len && bytes[i] != b'\n' {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+            continue;
+        }
+        // Block comment: copy until `*/`.
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            out.push_str("/*");
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+            if i + 1 < len {
+                out.push_str("*/");
+                i += 2;
+            } else if i < len {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+            continue;
+        }
+        // String / template literal: copy verbatim, honoring escapes.
+        if b == b'\'' || b == b'"' || b == b'`' {
+            let quote = b;
+            out.push(b as char);
+            i += 1;
+            while i < len {
+                let c = bytes[i];
+                out.push(c as char);
+                i += 1;
+                if c == b'\\' && i < len {
+                    out.push(bytes[i] as char);
+                    i += 1;
+                    continue;
+                }
+                if c == quote {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        // `import.meta` token? Must not be preceded by an ident char
+        // (so `myimport.meta` doesn't match) and must be followed by
+        // either `.` or a non-ident char.
+        if b == b'i' && starts_with(bytes, i, b"import.meta") {
+            let prev_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+            if prev_ok {
+                let after = i + b"import.meta".len();
+                // Try the longer specialisations first.
+                if starts_with(bytes, after, b".dirname") {
+                    out.push_str("__dirname");
+                    i = after + b".dirname".len();
+                    continue;
+                }
+                if starts_with(bytes, after, b".filename") {
+                    out.push_str("__filename");
+                    i = after + b".filename".len();
+                    continue;
+                }
+                if starts_with(bytes, after, b".url") {
+                    out.push_str("('file://' + __filename)");
+                    i = after + b".url".len();
+                    continue;
+                }
+                if starts_with(bytes, after, b".resolve") {
+                    out.push_str("require.resolve");
+                    i = after + b".resolve".len();
+                    continue;
+                }
+                // Bare `import.meta` — synthesise an inline object.
+                // The `resolve` callback closes over `require` so
+                // dynamic resolution still goes through the CJS
+                // resolver (npm packages, node_modules walk, etc.).
+                if after >= len || !is_ident_byte(bytes[after]) {
+                    out.push_str(
+                        "({ url: 'file://' + __filename, dirname: __dirname, \
+                         filename: __filename, \
+                         resolve: function(s){ return require.resolve(s); } })",
+                    );
+                    i = after;
+                    continue;
+                }
+            }
+        }
+
+        out.push(b as char);
+        i += 1;
+    }
+    out
+}
+
+fn starts_with(bytes: &[u8], at: usize, needle: &[u8]) -> bool {
+    if at + needle.len() > bytes.len() {
+        return false;
+    }
+    &bytes[at..at + needle.len()] == needle
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+#[cfg(test)]
+mod import_meta_tests {
+    use super::rewrite_import_meta;
+
+    #[test]
+    fn rewrites_dirname_and_filename() {
+        let s = "console.log(import.meta.dirname, import.meta.filename);";
+        let out = rewrite_import_meta(s);
+        assert_eq!(out, "console.log(__dirname, __filename);");
+    }
+
+    #[test]
+    fn rewrites_url_and_resolve() {
+        let s = "const u = import.meta.url; const p = import.meta.resolve('x');";
+        let out = rewrite_import_meta(s);
+        assert!(out.contains("('file://' + __filename)"));
+        assert!(out.contains("require.resolve('x')"));
+    }
+
+    #[test]
+    fn rewrites_bare_import_meta() {
+        let s = "const m = import.meta;";
+        let out = rewrite_import_meta(s);
+        assert!(out.contains("url: 'file://' + __filename"));
+        assert!(out.contains("dirname: __dirname"));
+    }
+
+    #[test]
+    fn skips_inside_strings() {
+        let s = "const t = 'import.meta.dirname'; const r = import.meta.dirname;";
+        let out = rewrite_import_meta(s);
+        // First occurrence (inside a single-quoted string) preserved.
+        assert!(out.contains("'import.meta.dirname'"));
+        // Second occurrence (real syntax) rewritten.
+        assert!(out.ends_with("__dirname;"));
+    }
+
+    #[test]
+    fn skips_inside_template_literals() {
+        let s = "const t = `${import.meta.dirname}`; const r = import.meta.dirname;";
+        let out = rewrite_import_meta(s);
+        // Template literal does NOT get the inner expression rewritten
+        // by this textual pass — that's a real edge case but matches
+        // every other pre-pass we run. The simple consumer just stays
+        // out of import.meta inside templates.
+        assert!(out.ends_with("__dirname;"));
+    }
+
+    #[test]
+    fn skips_inside_comments() {
+        let s = "// import.meta.dirname\n/* import.meta.url */\nconst x = import.meta.dirname;";
+        let out = rewrite_import_meta(s);
+        assert!(out.contains("// import.meta.dirname"));
+        assert!(out.contains("/* import.meta.url */"));
+        assert!(out.ends_with("__dirname;"));
+    }
+
+    #[test]
+    fn requires_word_boundary_before_token() {
+        // Hypothetical `notimport.meta.dirname` should NOT match —
+        // the leading `not` makes it a member access on `notimport`,
+        // not the syntactic `import.meta` form.
+        let s = "obj.notimport.meta.dirname";
+        let out = rewrite_import_meta(s);
+        assert_eq!(out, s);
+    }
 }

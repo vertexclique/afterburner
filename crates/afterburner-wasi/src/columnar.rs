@@ -813,7 +813,7 @@ mod tests {
         // Every row valid: all bits set up to row_count, padding bits 0.
         let bytes = (row_count as usize).div_ceil(8);
         let full = vec![0xffu8; bytes];
-        if row_count % 8 != 0 {
+        if !row_count.is_multiple_of(8) {
             let mut v = full.clone();
             let last = bytes - 1;
             let bits = (row_count % 8) as u8;

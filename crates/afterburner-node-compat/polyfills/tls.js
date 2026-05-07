@@ -655,4 +655,34 @@ __register_module('tls', function(module, exports, require) {
     // Stable defaults — Node exposes these but burn doesn't gate on them.
     exports.DEFAULT_MIN_VERSION = 'TLSv1.2';
     exports.DEFAULT_MAX_VERSION = 'TLSv1.3';
+
+    // ---- tls.rootCertificates / getCACertificates (Node 12 / 24) ----
+    //
+    // The host TLS layer (rustls / webpki-roots) owns the actual root
+    // store; we don't surface PEM strings out of it (that crosses the
+    // sandbox boundary for what's effectively read-only metadata).
+    // The arrays are populated lazily on first access and cached.
+    var _rootCerts = null;
+    Object.defineProperty(exports, 'rootCertificates', {
+        configurable: true,
+        enumerable: true,
+        get: function() {
+            if (_rootCerts === null) {
+                if (typeof globalThis.__host_tls_root_certificates === 'function') {
+                    var raw = globalThis.__host_tls_root_certificates();
+                    _rootCerts = (typeof raw === 'string' && raw.length) ? raw.split('\n--CERT--\n') : [];
+                } else {
+                    _rootCerts = [];
+                }
+            }
+            return _rootCerts.slice();
+        },
+    });
+    exports.getCACertificates = function getCACertificates(type) {
+        // type: 'default' | 'system' | 'bundled' | 'extra'.
+        // We only have the bundled webpki roots; surface them under
+        // every requested type for compatibility.
+        type = type || 'default';
+        return exports.rootCertificates;
+    };
 });

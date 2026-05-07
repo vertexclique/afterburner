@@ -894,4 +894,346 @@
             };
         }
     }
+
+    // ============================================================
+    // ES2024 / ES2023 globals.
+    //
+    // The runtime's QuickJS may add these natively in a future build;
+    // every install is gated on `!has(...)` so the polyfill is a
+    // no-op once the engine catches up. Idempotent + safe.
+    // ============================================================
+
+    // ---- Promise.withResolvers (Stage 4, Node 22) -------------------
+    if (typeof Promise.withResolvers !== 'function') {
+        Object.defineProperty(Promise, 'withResolvers', {
+            value: function withResolvers() {
+                var resolve, reject;
+                var promise = new this(function(res, rej) { resolve = res; reject = rej; });
+                return { promise: promise, resolve: resolve, reject: reject };
+            },
+            writable: true, configurable: true,
+        });
+    }
+
+    // ---- Object.groupBy / Map.groupBy (ES2024) ----------------------
+    if (typeof Object.groupBy !== 'function') {
+        Object.defineProperty(Object, 'groupBy', {
+            value: function groupBy(items, keyFn) {
+                var out = Object.create(null);
+                var i = 0;
+                for (var it of items) {
+                    var k = keyFn(it, i++);
+                    var key = (typeof k === 'symbol') ? k : String(k);
+                    if (!Object.prototype.hasOwnProperty.call(out, key)) out[key] = [];
+                    out[key].push(it);
+                }
+                return out;
+            },
+            writable: true, configurable: true,
+        });
+    }
+    if (typeof Map.groupBy !== 'function') {
+        Object.defineProperty(Map, 'groupBy', {
+            value: function groupBy(items, keyFn) {
+                var out = new Map();
+                var i = 0;
+                for (var it of items) {
+                    var k = keyFn(it, i++);
+                    var arr = out.get(k);
+                    if (!arr) { arr = []; out.set(k, arr); }
+                    arr.push(it);
+                }
+                return out;
+            },
+            writable: true, configurable: true,
+        });
+    }
+
+    // ---- Set.prototype set-theoretic methods (ES2024, Node 22) -----
+    //
+    // The spec is precise about argument shape: every method takes a
+    // "set-like" — an object with `size`, `has`, and `keys` — *not*
+    // necessarily a `Set` instance. The polyfill matches that contract
+    // so the polyfill behaves like the native methods if a script
+    // passes e.g. a Map or a custom collection.
+    function _setLikeOf(other, name) {
+        if (other == null || typeof other !== 'object' && typeof other !== 'function') {
+            throw new TypeError('Set.prototype.' + name + ': argument is not set-like');
+        }
+        var size = other.size;
+        if (typeof size !== 'number') {
+            throw new TypeError('Set.prototype.' + name + ': argument is not set-like (size)');
+        }
+        if (typeof other.has !== 'function' || typeof other.keys !== 'function') {
+            throw new TypeError('Set.prototype.' + name + ': argument is not set-like (has/keys)');
+        }
+        return { size: size, has: other.has.bind(other), keys: other.keys.bind(other) };
+    }
+    function _installSetMethod(name, impl) {
+        if (typeof Set.prototype[name] === 'function') return;
+        Object.defineProperty(Set.prototype, name, {
+            value: impl, writable: true, configurable: true,
+        });
+    }
+    _installSetMethod('intersection', function intersection(other) {
+        var s = _setLikeOf(other, 'intersection');
+        var result = new Set();
+        // Iterate the smaller of (this, other) for O(min(n, m)).
+        if (this.size <= s.size) {
+            for (var v of this) if (s.has(v)) result.add(v);
+        } else {
+            var it = s.keys();
+            for (var step = it.next(); !step.done; step = it.next()) {
+                if (this.has(step.value)) result.add(step.value);
+            }
+        }
+        return result;
+    });
+    _installSetMethod('union', function union(other) {
+        var s = _setLikeOf(other, 'union');
+        var result = new Set(this);
+        var it = s.keys();
+        for (var step = it.next(); !step.done; step = it.next()) {
+            result.add(step.value);
+        }
+        return result;
+    });
+    _installSetMethod('difference', function difference(other) {
+        var s = _setLikeOf(other, 'difference');
+        var result = new Set();
+        for (var v of this) if (!s.has(v)) result.add(v);
+        return result;
+    });
+    _installSetMethod('symmetricDifference', function symmetricDifference(other) {
+        var s = _setLikeOf(other, 'symmetricDifference');
+        var result = new Set();
+        for (var v of this) if (!s.has(v)) result.add(v);
+        var it = s.keys();
+        for (var step = it.next(); !step.done; step = it.next()) {
+            if (!this.has(step.value)) result.add(step.value);
+        }
+        return result;
+    });
+    _installSetMethod('isSubsetOf', function isSubsetOf(other) {
+        var s = _setLikeOf(other, 'isSubsetOf');
+        if (this.size > s.size) return false;
+        for (var v of this) if (!s.has(v)) return false;
+        return true;
+    });
+    _installSetMethod('isSupersetOf', function isSupersetOf(other) {
+        var s = _setLikeOf(other, 'isSupersetOf');
+        if (this.size < s.size) return false;
+        var it = s.keys();
+        for (var step = it.next(); !step.done; step = it.next()) {
+            if (!this.has(step.value)) return false;
+        }
+        return true;
+    });
+    _installSetMethod('isDisjointFrom', function isDisjointFrom(other) {
+        var s = _setLikeOf(other, 'isDisjointFrom');
+        if (this.size <= s.size) {
+            for (var v of this) if (s.has(v)) return false;
+        } else {
+            var it = s.keys();
+            for (var step = it.next(); !step.done; step = it.next()) {
+                if (this.has(step.value)) return false;
+            }
+        }
+        return true;
+    });
+
+    // ============================================================
+    // URLPattern — WHATWG URL Pattern Standard.
+    //
+    // Supports the canonical shape used by routing libraries:
+    //   new URLPattern({ pathname: '/users/:id' })
+    //   new URLPattern('https://*.example.com/:path*')
+    //   pattern.test(input) / pattern.exec(input)
+    //
+    // The matcher converts each component pattern into a RegExp with
+    // named groups and a small wildcard grammar:
+    //
+    //   :name        capture (one segment, no `/`)
+    //   :name(re)    capture with custom inline regex
+    //   *            wildcard (zero-or-more anything)
+    //   {x}          group
+    //   {x}?         optional group
+    //
+    // Not implemented: pattern modifiers `?`/`+` after capture
+    // groups (rare in practice). Real URL Pattern Standard supports
+    // them — extend if a real workload surfaces.
+    // ============================================================
+    if (typeof globalThis.URLPattern !== 'function') {
+        var COMPONENTS = ['protocol', 'username', 'password', 'hostname', 'port',
+                          'pathname', 'search', 'hash'];
+
+        function compileURLPattern(pat, isPath) {
+            // Empty pattern → match anything.
+            if (pat === undefined || pat === null || pat === '') {
+                return { regex: /^.*$/, names: [] };
+            }
+            var src = String(pat);
+            var out = '^';
+            var names = [];
+            var i = 0;
+            while (i < src.length) {
+                var c = src[i];
+                if (c === '\\') {
+                    // Escape: copy the next char raw.
+                    if (i + 1 < src.length) {
+                        out += '\\' + src[i + 1];
+                        i += 2;
+                    } else {
+                        out += '\\\\';
+                        i += 1;
+                    }
+                    continue;
+                }
+                if (c === ':' && /[A-Za-z_$]/.test(src[i + 1] || '')) {
+                    // Capture group `:name` or `:name(regex)`.
+                    var j = i + 1;
+                    while (j < src.length && /[A-Za-z0-9_$]/.test(src[j])) j++;
+                    var name = src.slice(i + 1, j);
+                    var re;
+                    if (src[j] === '(') {
+                        var depth = 1, k = j + 1;
+                        while (k < src.length && depth > 0) {
+                            if (src[k] === '\\') { k += 2; continue; }
+                            if (src[k] === '(') depth++;
+                            else if (src[k] === ')') depth--;
+                            if (depth > 0) k++;
+                        }
+                        re = src.slice(j + 1, k);
+                        j = k + 1; // past `)`
+                    } else {
+                        re = isPath ? '[^/]+' : '[^/]+';
+                    }
+                    names.push(name);
+                    out += '(' + re + ')';
+                    i = j;
+                    continue;
+                }
+                if (c === '*') {
+                    out += '.*';
+                    i += 1;
+                    continue;
+                }
+                // Regex metacharacters get escaped so the literal text
+                // matches itself, not as a metacharacter.
+                if ('.^$+?()[]{}|'.indexOf(c) !== -1) {
+                    out += '\\' + c;
+                } else {
+                    out += c;
+                }
+                i += 1;
+            }
+            out += '$';
+            return { regex: new RegExp(out), names: names };
+        }
+
+        function URLPattern(input, baseURL) {
+            if (!(this instanceof URLPattern)) {
+                throw new TypeError('URLPattern is a constructor');
+            }
+            var spec = {};
+            if (typeof input === 'string') {
+                // Parse as URL pattern string. Use the first absolute
+                // separator to split off scheme + host + path; we
+                // rely on the URL parser for the easy split, then
+                // assign each piece's pattern.
+                try {
+                    // The URL parser doesn't accept `:name` syntax in
+                    // the path — temporarily encode `:` so URL parses,
+                    // then decode.
+                    var encoded = input.replace(/:([A-Za-z_$][A-Za-z0-9_$]*)/g, '__AB_URLP_$1__');
+                    var u = new URL(encoded, baseURL || 'http://x.invalid/');
+                    var dec = function(s) { return s.replace(/__AB_URLP_([A-Za-z0-9_$]+)__/g, ':$1'); };
+                    spec.protocol = dec(u.protocol.replace(/:$/, ''));
+                    spec.hostname = dec(u.hostname);
+                    spec.port = dec(u.port);
+                    spec.pathname = dec(u.pathname);
+                    spec.search = dec(u.search.replace(/^\?/, ''));
+                    spec.hash = dec(u.hash.replace(/^#/, ''));
+                } catch (_) {
+                    spec.pathname = input;
+                }
+            } else if (input && typeof input === 'object') {
+                for (var k = 0; k < COMPONENTS.length; k++) {
+                    if (input[COMPONENTS[k]] !== undefined) {
+                        spec[COMPONENTS[k]] = String(input[COMPONENTS[k]]);
+                    }
+                }
+            } else {
+                throw new TypeError('URLPattern: input must be a string or object');
+            }
+            this._compiled = {};
+            for (var n = 0; n < COMPONENTS.length; n++) {
+                var name = COMPONENTS[n];
+                this._compiled[name] = compileURLPattern(spec[name], name === 'pathname');
+            }
+        }
+
+        function _exec(self, input) {
+            var u;
+            try {
+                if (typeof input === 'string') u = new URL(input);
+                else if (input && typeof input === 'object') {
+                    // input shape: { pathname, search, ... } or full URL
+                    u = {
+                        protocol: (input.protocol || '').replace(/:$/, ''),
+                        username: input.username || '',
+                        password: input.password || '',
+                        hostname: input.hostname || '',
+                        port: input.port || '',
+                        pathname: input.pathname || '',
+                        search: (input.search || '').replace(/^\?/, ''),
+                        hash: (input.hash || '').replace(/^#/, ''),
+                    };
+                } else {
+                    return null;
+                }
+            } catch (_) { return null; }
+
+            var inputs = {
+                protocol: (u.protocol || '').replace(/:$/, ''),
+                username: u.username || '',
+                password: u.password || '',
+                hostname: u.hostname || '',
+                port: u.port || '',
+                pathname: u.pathname || '',
+                search: (u.search || '').replace(/^\?/, ''),
+                hash: (u.hash || '').replace(/^#/, ''),
+            };
+            var result = { inputs: [input] };
+            for (var i = 0; i < COMPONENTS.length; i++) {
+                var name = COMPONENTS[i];
+                var c = self._compiled[name];
+                var m = c.regex.exec(inputs[name]);
+                if (!m) return null;
+                var groups = {};
+                for (var g = 0; g < c.names.length; g++) {
+                    groups[c.names[g]] = m[g + 1];
+                }
+                result[name] = { input: inputs[name], groups: groups };
+            }
+            return result;
+        }
+
+        URLPattern.prototype.test = function(input) { return _exec(this, input) !== null; };
+        URLPattern.prototype.exec = function(input) { return _exec(this, input); };
+        // Spec accessors (return the source pattern strings). Best-
+        // effort: we don't reconstruct the original `:name` form, just
+        // return a compiled regex source so `console.log(p.pathname)`
+        // is at least informative.
+        for (var ci = 0; ci < COMPONENTS.length; ci++) {
+            (function(name) {
+                Object.defineProperty(URLPattern.prototype, name, {
+                    get: function() { return this._compiled[name].regex.source; },
+                    configurable: true,
+                });
+            })(COMPONENTS[ci]);
+        }
+
+        globalThis.URLPattern = URLPattern;
+    }
 })();

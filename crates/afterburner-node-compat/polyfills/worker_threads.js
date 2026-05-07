@@ -298,4 +298,30 @@ __register_module('worker_threads', function(module, exports, require) {
         return undefined;
     };
     exports.SHARE_ENV = Symbol('SHARE_ENV');
+
+    // ---- Environment-data slot (Node 14.5+) -----------------
+    //
+    // `setEnvironmentData(key, value)` / `getEnvironmentData(key)`
+    // exchanges plain values across the parent → spawned-worker
+    // boundary. We keep a single in-process map; spawned workers
+    // see whatever was set in the parent before `new Worker(...)`.
+    // The values flow through workerData on spawn.
+    if (!globalThis.__ab_worker_env_data) {
+        globalThis.__ab_worker_env_data = new Map();
+    }
+    var _envData = globalThis.__ab_worker_env_data;
+    exports.setEnvironmentData = function setEnvironmentData(key, value) {
+        if (value === undefined) _envData.delete(key);
+        else _envData.set(key, value);
+    };
+    exports.getEnvironmentData = function getEnvironmentData(key) {
+        return _envData.get(key);
+    };
+
+    // ---- BroadcastChannel re-export ------------------------
+    // Node exports BroadcastChannel from worker_threads in addition
+    // to the global. Keep the surfaces in sync.
+    if (typeof globalThis.BroadcastChannel === 'function') {
+        exports.BroadcastChannel = globalThis.BroadcastChannel;
+    }
 });

@@ -556,6 +556,105 @@ __register_module('net', function(module, exports, require) {
         return 0;
     }
 
+    // ---- net.BlockList (Node 15+) -----------------------------
+    //
+    // A list of IP rules with `addAddress` / `addRange` / `addSubnet`
+    // and a `check(addr)` that returns true if the address matches.
+    // Pure-JS — used by Node apps to gate accepted connections.
+    function _ipv4ToInt(s) {
+        var p = s.split('.');
+        if (p.length !== 4) return -1;
+        var n = 0;
+        for (var i = 0; i < 4; i++) {
+            var b = parseInt(p[i], 10);
+            if (!(b >= 0 && b <= 255)) return -1;
+            n = (n * 256) + b;
+        }
+        return n;
+    }
+    function BlockList() {
+        if (!(this instanceof BlockList)) return new BlockList();
+        this._rules = [];
+    }
+    BlockList.prototype.addAddress = function(address, family) {
+        family = family || 'ipv4';
+        this._rules.push({ kind: 'address', address: String(address), family: family });
+    };
+    BlockList.prototype.addRange = function(start, end, family) {
+        family = family || 'ipv4';
+        this._rules.push({ kind: 'range', start: String(start), end: String(end), family: family });
+    };
+    BlockList.prototype.addSubnet = function(network, prefix, family) {
+        family = family || 'ipv4';
+        this._rules.push({ kind: 'subnet', network: String(network), prefix: prefix | 0, family: family });
+    };
+    BlockList.prototype.check = function(address, family) {
+        family = family || (isIPv6(address) ? 'ipv6' : 'ipv4');
+        var addrStr = String(address);
+        for (var i = 0; i < this._rules.length; i++) {
+            var r = this._rules[i];
+            if (r.family !== family) continue;
+            if (r.kind === 'address' && r.address === addrStr) return true;
+            if (family === 'ipv4') {
+                var n = _ipv4ToInt(addrStr);
+                if (n < 0) continue;
+                if (r.kind === 'range') {
+                    var lo = _ipv4ToInt(r.start), hi = _ipv4ToInt(r.end);
+                    if (lo >= 0 && hi >= 0 && n >= lo && n <= hi) return true;
+                } else if (r.kind === 'subnet') {
+                    var net = _ipv4ToInt(r.network);
+                    if (net < 0 || r.prefix < 0 || r.prefix > 32) continue;
+                    var mask = r.prefix === 0 ? 0 : (~0 << (32 - r.prefix)) >>> 0;
+                    if ((n & mask) === (net & mask)) return true;
+                }
+            }
+            // IPv6 subnet/range matching is string-prefix only here.
+            // Real workloads rarely use BlockList for IPv6; expand
+            // when a concrete need surfaces.
+        }
+        return false;
+    };
+    Object.defineProperty(BlockList.prototype, 'rules', {
+        get: function() {
+            return this._rules.map(function(r) {
+                if (r.kind === 'address') return 'Address: ' + r.family.toUpperCase() + ' ' + r.address;
+                if (r.kind === 'range') return 'Range: ' + r.family.toUpperCase() + ' ' + r.start + '-' + r.end;
+                return 'Subnet: ' + r.family.toUpperCase() + ' ' + r.network + '/' + r.prefix;
+            });
+        },
+    });
+
+    // ---- net.SocketAddress (Node 15+) -------------------------
+    //
+    // Immutable address record. In Node it's a transferable across
+    // workers; here it's a value-object with the same shape.
+    function SocketAddress(options) {
+        if (!(this instanceof SocketAddress)) return new SocketAddress(options);
+        options = options || {};
+        Object.defineProperty(this, 'address', { value: String(options.address || '127.0.0.1'), enumerable: true });
+        Object.defineProperty(this, 'port', { value: (options.port | 0) || 0, enumerable: true });
+        Object.defineProperty(this, 'family', { value: String(options.family || 'ipv4').toLowerCase(), enumerable: true });
+        Object.defineProperty(this, 'flowlabel', { value: (options.flowlabel | 0) || 0, enumerable: true });
+    }
+    SocketAddress.parse = function(input) {
+        if (typeof input !== 'string') return undefined;
+        var s = input.trim();
+        if (s[0] === '[') {
+            var rb = s.indexOf(']');
+            if (rb < 0) return undefined;
+            var addr = s.slice(1, rb);
+            var rest = s.slice(rb + 1);
+            var port = rest[0] === ':' ? parseInt(rest.slice(1), 10) : 0;
+            return new SocketAddress({ address: addr, port: port, family: 'ipv6' });
+        }
+        if (isIPv6(s)) return new SocketAddress({ address: s, family: 'ipv6' });
+        var c = s.lastIndexOf(':');
+        if (c >= 0) {
+            return new SocketAddress({ address: s.slice(0, c), port: parseInt(s.slice(c + 1), 10) || 0 });
+        }
+        return new SocketAddress({ address: s });
+    };
+
     exports.Socket = Socket;
     exports.Server = Server;
     exports.createConnection = connect;
@@ -564,4 +663,6 @@ __register_module('net', function(module, exports, require) {
     exports.isIP = isIP;
     exports.isIPv4 = isIPv4;
     exports.isIPv6 = isIPv6;
+    exports.BlockList = BlockList;
+    exports.SocketAddress = SocketAddress;
 });

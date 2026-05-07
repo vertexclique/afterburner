@@ -396,6 +396,15 @@ function __plenum_install_http(moduleName) {
                 return { port: server._port, family: 'IPv4', address: '0.0.0.0' };
             };
 
+            // Symbol.asyncDispose (Node 20+) — `await using server =
+            // http.createServer(...)` calls this when the binding goes
+            // out of scope. Wraps `close()` in a Promise.
+            server[Symbol.asyncDispose] = function() {
+                return new Promise(function(resolve) {
+                    server.close(function() { resolve(); });
+                });
+            };
+
             return server;
         }
 
