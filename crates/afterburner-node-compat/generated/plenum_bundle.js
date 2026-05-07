@@ -5443,15 +5443,77 @@ __register_module('module', function(module, exports, require) {
         return BUILTINS.indexOf(bare) !== -1;
     }
 
-    /// Resolve hook registry. `register()` and `getSourceMapsSupport()`
-    /// are accepted but no-ops since burn's resolver is its own
-    /// pipeline (no Node-style loader hooks).
-    function register() { return undefined; }
-    function getSourceMapsSupport() {
-        return { enabled: false, generatedFromBuiltin: false };
+    /// `module.register(specifier, parent, opts)` — Node 20+
+    /// customization hooks. Loads the specifier in the current realm,
+    /// reads its `resolve` / `load` named exports, and appends them
+    /// to a global hook chain (`globalThis.__ab_module_hooks`) that
+    /// the require resolver consults in registration order before
+    /// falling back to its built-in resolution. Burn doesn't isolate
+    /// hooks in a worker thread (Node uses a worker for isolation);
+    /// the hook runs in the same realm. Pass `data` via `opts.data`
+    /// — it's threaded through to the hook on first init.
+    function register(specifier, parentURL, opts) {
+        if (typeof specifier !== 'string') {
+            throw Object.assign(
+                new TypeError('module.register: specifier must be a string'),
+                { code: 'ERR_INVALID_ARG_TYPE' }
+            );
+        }
+        // Resolve relative to the current require's module context
+        // when parentURL is provided as a string URL or path.
+        var loaded;
+        try {
+            loaded = require(specifier);
+        } catch (e) {
+            throw Object.assign(
+                new Error("module.register: failed to load '" + specifier + "': " + (e && e.message)),
+                { code: 'ERR_MODULE_REGISTER_FAILED' }
+            );
+        }
+        if (!globalThis.__ab_module_hooks) {
+            globalThis.__ab_module_hooks = { hooks: [], data: [] };
+        }
+        var data = (opts && opts.data) ? opts.data : undefined;
+        globalThis.__ab_module_hooks.hooks.push({
+            specifier: specifier,
+            parentURL: parentURL,
+            resolve: typeof loaded.resolve === 'function' ? loaded.resolve : null,
+            load: typeof loaded.load === 'function' ? loaded.load : null,
+            initialize: typeof loaded.initialize === 'function' ? loaded.initialize : null,
+            data: data,
+        });
+        // Run the hook's `initialize(data)` once at register time, per
+        // Node's contract.
+        if (typeof loaded.initialize === 'function') {
+            try { loaded.initialize(data); } catch (_) {}
+        }
+        return undefined;
     }
-    function setSourceMapsSupport() {}
-    function findSourceMap() { return undefined; }
+    function getSourceMapsSupport() {
+        return {
+            enabled: !!globalThis.__ab_source_maps_enabled,
+            nodeModules: false,
+            generatedCode: !!globalThis.__ab_source_maps_enabled,
+        };
+    }
+    function setSourceMapsSupport(enabled, _opts) {
+        globalThis.__ab_source_maps_enabled = !!enabled;
+    }
+    function findSourceMap(filepath) {
+        // Best-effort lookup of an inline source map embedded in the
+        // file as `//# sourceMappingURL=data:application/json;base64,...`.
+        try {
+            var fs = require('fs');
+            var src = fs.readFileSync(filepath, 'utf8');
+            var idx = src.lastIndexOf('//# sourceMappingURL=data:application/json');
+            if (idx < 0) return undefined;
+            var line = src.slice(idx);
+            var b64 = line.match(/base64,([A-Za-z0-9+/=]+)/);
+            if (!b64) return undefined;
+            var json = Buffer.from(b64[1], 'base64').toString('utf8');
+            return { payload: JSON.parse(json), file: filepath };
+        } catch (_) { return undefined; }
+    }
 
     function syncBuiltinESMExports() { /* no-op */ }
     function enableCompileCache() { return { status: 'disabled' }; }
