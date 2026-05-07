@@ -143,7 +143,7 @@ fn child_process_class_is_constructable() {
 }
 
 #[test]
-fn spawn_stdout_setEncoding_emits_strings() {
+fn spawn_stdout_set_encoding_emits_strings() {
     let out = run_inline(
         r#"
         const cp = require('child_process');
