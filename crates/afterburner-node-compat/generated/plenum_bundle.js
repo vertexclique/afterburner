@@ -1323,6 +1323,37 @@ __register_module('buffer', function(module, exports, require) {
     };
 
     Buffer.allocUnsafe = Buffer.alloc;
+    Buffer.allocUnsafeSlow = Buffer.alloc;
+
+    // Default pool size matches Node's 8 KiB. We don't pool slabs
+    // under the hood — each `Buffer.alloc` is a fresh `Uint8Array` —
+    // but expose the field so libraries that probe / write to it
+    // don't trip.
+    Buffer.poolSize = 8 * 1024;
+
+    /// Buffer.copyBytesFrom(view, offset?, length?) — Node 19+.
+    /// Copies bytes from a TypedArray view (Uint8Array, DataView,
+    /// etc.) into a fresh Buffer. Honors offset + length in
+    /// elements (NOT bytes) for non-1-byte typed arrays, matching
+    /// Node's contract.
+    Buffer.copyBytesFrom = function(view, offset, length) {
+        if (view == null || typeof view.byteLength !== 'number') {
+            throw new TypeError('Buffer.copyBytesFrom: view must be a TypedArray');
+        }
+        var byteOffset = view.byteOffset || 0;
+        var bpe = view.BYTES_PER_ELEMENT || 1;
+        offset = offset === undefined ? 0 : (offset | 0);
+        length = length === undefined ? (view.length - offset) : (length | 0);
+        if (offset < 0 || length < 0 || offset + length > view.length) {
+            throw new RangeError('Buffer.copyBytesFrom: offset/length out of range');
+        }
+        var srcOffset = byteOffset + offset * bpe;
+        var srcLen = length * bpe;
+        var src = new Uint8Array(view.buffer, srcOffset, srcLen);
+        var out = new Uint8Array(srcLen);
+        out.set(src);
+        return makeBuffer(out);
+    };
 
     Buffer.concat = function(list, totalLength) {
         if (!Array.isArray(list)) throw new TypeError('list argument must be an Array');
