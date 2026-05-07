@@ -1462,11 +1462,10 @@
     }
 
     // ---- Symbol.dispose / Symbol.asyncDispose (Node 20+) ------------
-    // Required for `using x = …;` / `await using x = …;` (TC39
-    // explicit-resource-management). The well-known Symbols sit on
-    // Symbol itself; consumers reference `Symbol.dispose` to register
-    // their cleanup callback. Idempotent if QuickJS already added
-    // them.
+    // Installed FIRST because DisposableStack and AsyncDisposableStack
+    // below register prototype methods keyed on these symbols. Spec
+    // says they're well-known shared Symbols; idempotent if QuickJS
+    // already added them.
     if (typeof Symbol.dispose === 'undefined') {
         Object.defineProperty(Symbol, 'dispose', {
             value: Symbol.for('Symbol.dispose'),
@@ -1478,6 +1477,169 @@
             value: Symbol.for('Symbol.asyncDispose'),
             writable: false, configurable: false, enumerable: false,
         });
+    }
+
+    // ---- reportError (Node 18+) -----------------------------------
+    //
+    // Browser/Node spec: dispatch the error as if it bubbled to the
+    // global error handler. We surface it on stderr so it's visible
+    // and dispatch an `error` event for any registered listeners.
+    if (typeof globalThis.reportError !== 'function') {
+        globalThis.reportError = function(err) {
+            try {
+                if (typeof globalThis.dispatchEvent === 'function'
+                    && typeof globalThis.ErrorEvent === 'function') {
+                    var ev = new globalThis.ErrorEvent('error', {
+                        message: err && err.message ? err.message : String(err),
+                        error: err,
+                    });
+                    globalThis.dispatchEvent(ev);
+                }
+            } catch (_) {}
+            try {
+                if (globalThis.console && typeof globalThis.console.error === 'function') {
+                    globalThis.console.error(err);
+                }
+            } catch (_) {}
+        };
+    }
+
+    // ---- scheduler API (Node 22+, Web stable since 2024) -----------
+    //
+    // `scheduler.wait(delay, opts)` → Promise that resolves after
+    // `delay` ms (rejects if `opts.signal` aborts).
+    // `scheduler.postTask(fn, opts)` → schedules a microtask-ish
+    // callback and returns a Promise of its return value.
+    if (typeof globalThis.scheduler !== 'object' || !globalThis.scheduler) {
+        globalThis.scheduler = {
+            wait: function(delay, opts) {
+                var ms = delay | 0;
+                var signal = opts && opts.signal;
+                return new Promise(function(resolve, reject) {
+                    if (signal && signal.aborted) {
+                        return reject(signal.reason || new Error('Aborted'));
+                    }
+                    var t = setTimeout(function() { resolve(); }, ms);
+                    if (signal) {
+                        signal.addEventListener('abort', function() {
+                            clearTimeout(t);
+                            reject(signal.reason || new Error('Aborted'));
+                        }, { once: true });
+                    }
+                });
+            },
+            postTask: function(fn, opts) {
+                var signal = opts && opts.signal;
+                if (signal && signal.aborted) {
+                    return Promise.reject(signal.reason || new Error('Aborted'));
+                }
+                return new Promise(function(resolve, reject) {
+                    queueMicrotask(function() {
+                        if (signal && signal.aborted) {
+                            return reject(signal.reason || new Error('Aborted'));
+                        }
+                        try { resolve(fn()); } catch (e) { reject(e); }
+                    });
+                });
+            },
+            yield: function() { return new Promise(function(r) { queueMicrotask(r); }); },
+        };
+    }
+
+    // ---- DisposableStack / AsyncDisposableStack (Node 22+) --------
+    //
+    // TC39 explicit-resource-management aggregator: `using stack =
+    // new DisposableStack();` then `stack.use(disposable)` registers
+    // cleanups, `stack.dispose()` runs them in LIFO order.
+    if (typeof globalThis.DisposableStack !== 'function') {
+        function DisposableStack() {
+            this._stack = [];
+            this._disposed = false;
+        }
+        DisposableStack.prototype.use = function(value) {
+            if (this._disposed) throw new ReferenceError('DisposableStack is disposed');
+            if (value != null && typeof value[Symbol.dispose] === 'function') {
+                this._stack.push(function() { value[Symbol.dispose](); });
+            }
+            return value;
+        };
+        DisposableStack.prototype.adopt = function(value, onDispose) {
+            if (this._disposed) throw new ReferenceError('DisposableStack is disposed');
+            this._stack.push(function() { onDispose(value); });
+            return value;
+        };
+        DisposableStack.prototype.defer = function(onDispose) {
+            if (this._disposed) throw new ReferenceError('DisposableStack is disposed');
+            this._stack.push(onDispose);
+        };
+        DisposableStack.prototype.move = function() {
+            if (this._disposed) throw new ReferenceError('DisposableStack is disposed');
+            var fresh = new DisposableStack();
+            fresh._stack = this._stack;
+            this._stack = [];
+            this._disposed = true;
+            return fresh;
+        };
+        DisposableStack.prototype.dispose = function() {
+            if (this._disposed) return;
+            this._disposed = true;
+            while (this._stack.length) {
+                var fn = this._stack.pop();
+                try { fn(); } catch (_) {}
+            }
+        };
+        DisposableStack.prototype[Symbol.dispose] = DisposableStack.prototype.dispose;
+        Object.defineProperty(DisposableStack.prototype, 'disposed', {
+            get: function() { return this._disposed; },
+        });
+        globalThis.DisposableStack = DisposableStack;
+    }
+    if (typeof globalThis.AsyncDisposableStack !== 'function') {
+        function AsyncDisposableStack() {
+            this._stack = [];
+            this._disposed = false;
+        }
+        AsyncDisposableStack.prototype.use = function(value) {
+            if (this._disposed) throw new ReferenceError('AsyncDisposableStack is disposed');
+            if (value != null) {
+                if (typeof value[Symbol.asyncDispose] === 'function') {
+                    this._stack.push(function() { return value[Symbol.asyncDispose](); });
+                } else if (typeof value[Symbol.dispose] === 'function') {
+                    this._stack.push(function() { return value[Symbol.dispose](); });
+                }
+            }
+            return value;
+        };
+        AsyncDisposableStack.prototype.adopt = function(value, onDispose) {
+            if (this._disposed) throw new ReferenceError('AsyncDisposableStack is disposed');
+            this._stack.push(function() { return onDispose(value); });
+            return value;
+        };
+        AsyncDisposableStack.prototype.defer = function(onDispose) {
+            if (this._disposed) throw new ReferenceError('AsyncDisposableStack is disposed');
+            this._stack.push(onDispose);
+        };
+        AsyncDisposableStack.prototype.move = function() {
+            if (this._disposed) throw new ReferenceError('AsyncDisposableStack is disposed');
+            var fresh = new AsyncDisposableStack();
+            fresh._stack = this._stack;
+            this._stack = [];
+            this._disposed = true;
+            return fresh;
+        };
+        AsyncDisposableStack.prototype.disposeAsync = async function() {
+            if (this._disposed) return;
+            this._disposed = true;
+            while (this._stack.length) {
+                var fn = this._stack.pop();
+                try { await fn(); } catch (_) {}
+            }
+        };
+        AsyncDisposableStack.prototype[Symbol.asyncDispose] = AsyncDisposableStack.prototype.disposeAsync;
+        Object.defineProperty(AsyncDisposableStack.prototype, 'disposed', {
+            get: function() { return this._disposed; },
+        });
+        globalThis.AsyncDisposableStack = AsyncDisposableStack;
     }
 
     // ---- Promise.withResolvers (Stage 4, Node 22) -------------------
