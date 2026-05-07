@@ -656,6 +656,56 @@ __register_module('tls', function(module, exports, require) {
     exports.DEFAULT_MIN_VERSION = 'TLSv1.2';
     exports.DEFAULT_MAX_VERSION = 'TLSv1.3';
 
+    /// tls.checkServerIdentity(hostname, cert) — verify a peer
+    /// certificate matches the requested hostname. Real impl walks
+    /// `cert.subjectaltname` for `DNS:` entries and compares against
+    /// the hostname (with leading-`*` wildcards collapsed). Returns
+    /// `undefined` on match, an `Error` instance on mismatch.
+    exports.checkServerIdentity = function(hostname, cert) {
+        if (!cert) {
+            var err = new Error('tls.checkServerIdentity: cert is required');
+            err.code = 'ERR_TLS_CERT_ALTNAME_INVALID';
+            return err;
+        }
+        var host = String(hostname || '').toLowerCase();
+        var altNames = [];
+        if (typeof cert.subjectaltname === 'string') {
+            // Parse "DNS:foo, DNS:bar, IP Address:1.2.3.4" pairs.
+            var parts = cert.subjectaltname.split(/,\s*/);
+            for (var i = 0; i < parts.length; i++) {
+                var p = parts[i].split(':');
+                if (p.length === 2 && p[0].trim().toLowerCase() === 'dns') {
+                    altNames.push(p[1].trim().toLowerCase());
+                }
+            }
+        }
+        if (cert.subject && typeof cert.subject.CN === 'string' && altNames.length === 0) {
+            altNames.push(String(cert.subject.CN).toLowerCase());
+        }
+        for (var j = 0; j < altNames.length; j++) {
+            var name = altNames[j];
+            if (name === host) return undefined;
+            // Wildcard match: `*.example.com` matches `foo.example.com`
+            // but NOT `foo.bar.example.com` (single label).
+            if (name.indexOf('*.') === 0) {
+                var suffix = name.slice(1); // ".example.com"
+                if (host.length > suffix.length && host.endsWith(suffix)) {
+                    var labelEnd = host.length - suffix.length;
+                    if (host.indexOf('.', 0) >= labelEnd || host.indexOf('.', 0) === labelEnd) {
+                        return undefined;
+                    }
+                    if (host.indexOf('.') === labelEnd) return undefined;
+                }
+            }
+        }
+        var error = new Error("Hostname/IP does not match certificate's altnames: Host: "
+            + host + ". is not in the cert's altnames: " + altNames.join(', '));
+        error.code = 'ERR_TLS_CERT_ALTNAME_INVALID';
+        error.host = host;
+        error.cert = cert;
+        return error;
+    };
+
     // ---- tls.rootCertificates / getCACertificates (Node 12 / 24) ----
     //
     // The host TLS layer (rustls / webpki-roots) owns the actual root
