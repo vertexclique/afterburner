@@ -51,14 +51,44 @@ pub fn cli_cwd() -> String {
 ///   process's environment.
 fn collect_env(cli: &Cli) -> BTreeMap<String, String> {
     let manifold = build_manifold(cli);
-    match &manifold.env {
+    let mut env: BTreeMap<String, String> = match &manifold.env {
         EnvAccess::None => BTreeMap::new(),
         EnvAccess::AllowList(keys) => keys
             .iter()
             .filter_map(|k| std::env::var(k).ok().map(|v| (k.clone(), v)))
             .collect(),
         EnvAccess::Full => std::env::vars().collect(),
+    };
+    // `--env-file=path` (Node 20.6+): merge `.env`-style files in the
+    // order they appear on the CLI so later ones override earlier
+    // keys, matching Node's behaviour. Lines without `=` are skipped;
+    // surrounding single/double quotes on values are stripped.
+    for path in &cli.env_file {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let Some(eq) = line.find('=') else {
+                    continue;
+                };
+                let key = line[..eq].trim();
+                if key.is_empty() {
+                    continue;
+                }
+                let mut val = line[eq + 1..].trim();
+                if val.len() >= 2
+                    && ((val.starts_with('"') && val.ends_with('"'))
+                        || (val.starts_with('\'') && val.ends_with('\'')))
+                {
+                    val = &val[1..val.len() - 1];
+                }
+                env.insert(key.to_string(), val.to_string());
+            }
+        }
     }
+    env
 }
 
 /// Run `source` in script mode and forward the captured stdout,

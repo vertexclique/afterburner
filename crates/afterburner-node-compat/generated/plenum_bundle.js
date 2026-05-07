@@ -7487,11 +7487,82 @@ __register_module('perf_hooks', function(module, exports, require) {
                 signalsCount: 0, voluntaryContextSwitches: 0, involuntaryContextSwitches: 0,
             };
         },
-        loadEnvFile: function(_path) { /* no-op: we read env at startup */ },
-        // process.permission — Node 20.x experimental. Always-allow
-        // posture matches the sandbox's "manifold gates everything"
-        // model; permission checks happen at the manifold layer.
-        permission: { has: function(_scope, _ref) { return true; } },
+        // process.loadEnvFile (Node 20.6+). The CLI's `--env-file`
+        // already loads at startup; this in-process call parses
+        // additional files at runtime and merges into `process.env`.
+        loadEnvFile: function(path) {
+            var p = path || '.env';
+            try {
+                var fs = require('fs');
+                var text = fs.readFileSync(p, 'utf8');
+                var lines = text.split(/\r?\n/);
+                for (var i = 0; i < lines.length; i++) {
+                    var line = lines[i].trim();
+                    if (!line || line.charAt(0) === '#') continue;
+                    var eq = line.indexOf('=');
+                    if (eq < 0) continue;
+                    var k = line.slice(0, eq).trim();
+                    if (!k) continue;
+                    var v = line.slice(eq + 1).trim();
+                    if (v.length >= 2 && ((v[0] === '"' && v[v.length - 1] === '"') ||
+                                          (v[0] === "'" && v[v.length - 1] === "'"))) {
+                        v = v.slice(1, -1);
+                    }
+                    if (globalThis.process && globalThis.process.env) {
+                        globalThis.process.env[k] = v;
+                    }
+                }
+            } catch (e) {
+                var err = new Error('Cannot read environment file: ' + p);
+                err.code = 'ENOENT';
+                throw err;
+            }
+        },
+        // process.permission — Node 20.x experimental. When the CLI
+        // launched without `--permission` we keep the always-allow
+        // posture (manifold layer is the real gate). With
+        // `--permission` set, the host populates
+        // `globalThis.__ab_permission_grants` with a map of granted
+        // scopes; `has()` consults that, defaulting to false for
+        // unmentioned scopes — matching Node's deny-by-default model.
+        permission: {
+            has: function(scope, ref) {
+                var g = globalThis.__ab_permission_grants;
+                if (!g) return true; // permission model not active → allow
+                if (!Object.prototype.hasOwnProperty.call(g, scope)) return false;
+                var v = g[scope];
+                if (v === true) return true;
+                if (typeof v === 'string') {
+                    if (!ref) return true;
+                    var allow = v.split(',').map(function(s) { return s.trim(); });
+                    for (var i = 0; i < allow.length; i++) {
+                        if (allow[i] === '*' || allow[i] === ref) return true;
+                        // Glob-prefix support for fs paths and net
+                        // host:port.
+                        if (allow[i].indexOf('*') === 0 &&
+                            ref.endsWith(allow[i].slice(1))) return true;
+                        if (ref.indexOf(allow[i]) === 0) return true;
+                    }
+                    return false;
+                }
+                return false;
+            },
+            get: function() {
+                var g = globalThis.__ab_permission_grants;
+                if (!g) return { fs: { read: true, write: true }, net: true, env: true,
+                                 child_process: true, worker: true };
+                return {
+                    fs: {
+                        read: g['fs.read'] !== undefined,
+                        write: g['fs.write'] !== undefined,
+                    },
+                    net: !!g['net'],
+                    env: !!g['env'],
+                    child_process: !!g['child_process'],
+                    worker: !!g['worker'],
+                };
+            },
+        },
 
         // Real Node drains the nextTick queue synchronously between
         // each macrotask but BEFORE the microtask queue. Express's

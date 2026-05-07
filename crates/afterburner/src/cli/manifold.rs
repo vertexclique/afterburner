@@ -27,7 +27,19 @@ pub fn build_manifold(cli: &Cli) -> Manifold {
     if cli.allow_all {
         return Manifold::open();
     }
-    let any_allow = cli.allow_net.is_some() || cli.allow_fs.is_some() || cli.allow_env.is_some();
+    // The Permission Model flags (`--allow-fs-read` / `--allow-fs-write`
+    // / `--allow-child-process` / `--allow-worker`) are first-class
+    // sandbox triggers too — they imply `--sandbox` even when the
+    // legacy `--allow-net` / `--allow-fs` / `--allow-env` flags are
+    // absent.
+    let any_allow = cli.allow_net.is_some()
+        || cli.allow_fs.is_some()
+        || cli.allow_env.is_some()
+        || cli.allow_fs_read.is_some()
+        || cli.allow_fs_write.is_some()
+        || cli.allow_child_process
+        || cli.allow_worker
+        || cli.permission;
     let explicit_sandbox = cli.sandbox || any_allow;
     if !explicit_sandbox {
         // The CLI-flip: implicit open. Banner triggers separately in
@@ -48,11 +60,32 @@ pub fn build_manifold(cli: &Cli) -> Manifold {
         };
     }
 
-    if let Some(s) = cli.allow_fs.as_deref() {
-        let paths = parse_allow_list(s);
-        // `*` or empty = full FS access. We model that as a ReadWrite
-        // rooted at `/`; host fs code canonicalizes and checks path
-        // containment, which trivially passes against root.
+    // Permission-Model flags collapse onto the existing FS gate:
+    // burn doesn't model read-vs-write separately at the manifold
+    // layer, so granting either implies ReadWrite on the named roots.
+    // The granularity is preserved on the JS-side
+    // `process.permission.has` map for libraries that introspect.
+    let fs_paths: Option<Vec<String>> =
+        if cli.allow_fs.is_some() || cli.allow_fs_read.is_some() || cli.allow_fs_write.is_some() {
+            let mut combined: Vec<String> = Vec::new();
+            for src in [
+                cli.allow_fs.as_deref(),
+                cli.allow_fs_read.as_deref(),
+                cli.allow_fs_write.as_deref(),
+            ]
+            .iter()
+            .flatten()
+            {
+                combined.extend(parse_allow_list(src));
+            }
+            // Deduplicate while preserving order.
+            let mut seen = std::collections::BTreeSet::new();
+            combined.retain(|p| seen.insert(p.clone()));
+            Some(combined)
+        } else {
+            None
+        };
+    if let Some(paths) = fs_paths {
         let roots: Vec<PathBuf> = if paths.is_empty() || has_wildcard(&paths) {
             vec![PathBuf::from("/")]
         } else {
@@ -95,6 +128,13 @@ pub fn is_implicit_open(cli: &Cli) -> bool {
     if cli.allow_all {
         return false;
     }
-    let any_allow = cli.allow_net.is_some() || cli.allow_fs.is_some() || cli.allow_env.is_some();
+    let any_allow = cli.allow_net.is_some()
+        || cli.allow_fs.is_some()
+        || cli.allow_env.is_some()
+        || cli.allow_fs_read.is_some()
+        || cli.allow_fs_write.is_some()
+        || cli.allow_child_process
+        || cli.allow_worker
+        || cli.permission;
     !(cli.sandbox || any_allow)
 }

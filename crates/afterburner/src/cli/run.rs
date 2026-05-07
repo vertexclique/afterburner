@@ -24,9 +24,12 @@ use super::args::Cli;
 use super::daemon::{execute, script_label};
 
 pub fn run_file(cli: &Cli, path: &PathBuf, user_args: &[String]) -> Result<()> {
+    if cli.watch {
+        return watch::run_with_watch(cli, path, user_args);
+    }
     let source = fs::read_to_string(path).with_context(|| format!("reading {path:?}"))?;
     let label = script_label(path);
-    let js_source = maybe_transpile_ts(&source, path)?;
+    let js_source = with_preload(cli, &maybe_transpile_ts(&source, path)?);
     if cli.internal_worker {
         // worker child mode. Bootstraps a `DaemonWorkers::new_child`
         // (which blocks on stdin for the init frame) and runs the
@@ -37,10 +40,148 @@ pub fn run_file(cli: &Cli, path: &PathBuf, user_args: &[String]) -> Result<()> {
 }
 
 pub fn run_source(cli: &Cli, source: &str, user_args: &[String]) -> Result<()> {
+    let prepared = with_preload(cli, source);
     if cli.internal_worker {
-        return super::worker::execute(cli, source, "[eval]", &[]);
+        return super::worker::execute(cli, &prepared, "[eval]", &[]);
     }
-    execute(cli, source, "[eval]", user_args)
+    execute(cli, &prepared, "[eval]", user_args)
+}
+
+/// Prepend `--require=mod` / `--import=mod` preload modules to the
+/// user source, plus the `--permission` grant map. Both flags collapse
+/// onto `require(spec)` here — burn has a single CJS-shaped resolver,
+/// so the ESM `--import` form is a `require()` of a module that was
+/// lowered through TS-strip + ESM rewrite at load time. Order matches
+/// Node: `--require` first, then `--import`.
+fn with_preload(cli: &Cli, source: &str) -> String {
+    let permission_prelude = build_permission_prelude(cli);
+    if cli.require.is_empty() && cli.import.is_empty() && permission_prelude.is_empty() {
+        return source.to_string();
+    }
+    let mut out = String::with_capacity(source.len() + 256);
+    out.push_str(&permission_prelude);
+    for spec in cli.require.iter().chain(cli.import.iter()) {
+        // Each spec gets its own try-wrapped require so a missing
+        // preload doesn't kill the user script silently. Failures
+        // surface on stderr and the script still runs.
+        let escaped = spec.replace('\\', "\\\\").replace('\'', "\\'");
+        out.push_str(&format!(
+            "try {{ require('{escaped}'); }} catch (e) {{ \
+             console.error('burn: preload failed for', '{escaped}', ':', e && e.message); \
+            }}\n"
+        ));
+    }
+    out.push_str(source);
+    out
+}
+
+/// Build the JS prelude that installs `globalThis.__ab_permission_grants`
+/// when `--permission` is set on the CLI. Empty when the flag is off —
+/// `process.permission.has` then defaults to allow-all (manifold is the
+/// real gate). Each `--allow-*` flag becomes one entry on the grants
+/// map; the JS-side `has()` implementation does the prefix / wildcard
+/// matching.
+fn build_permission_prelude(cli: &Cli) -> String {
+    if !cli.permission {
+        return String::new();
+    }
+    let mut entries: Vec<String> = Vec::new();
+    if let Some(v) = cli.allow_fs_read.as_deref() {
+        entries.push(format!("'fs.read': {}", json_string(v)));
+    }
+    if let Some(v) = cli.allow_fs_write.as_deref() {
+        entries.push(format!("'fs.write': {}", json_string(v)));
+    }
+    if let Some(v) = cli.allow_fs.as_deref() {
+        // Plain --allow-fs grants both read and write on the same set.
+        entries.push(format!("'fs.read': {}", json_string(v)));
+        entries.push(format!("'fs.write': {}", json_string(v)));
+    }
+    if let Some(v) = cli.allow_net.as_deref() {
+        entries.push(format!("'net': {}", json_string(v)));
+    }
+    if let Some(v) = cli.allow_env.as_deref() {
+        entries.push(format!("'env': {}", json_string(v)));
+    }
+    if cli.allow_child_process {
+        entries.push("'child_process': true".to_string());
+    }
+    if cli.allow_worker {
+        entries.push("'worker': true".to_string());
+    }
+    format!(
+        "globalThis.__ab_permission_grants = {{ {} }};\n",
+        entries.join(", ")
+    )
+}
+
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if (ch as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+mod watch {
+    use super::{maybe_transpile_ts, script_label, with_preload};
+    use crate::cli::args::Cli;
+    use crate::cli::daemon::execute;
+    use anyhow::{Context, Result};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, SystemTime};
+
+    /// `--watch` loop: poll the entry script's mtime; when it changes,
+    /// run a fresh execution. Polling at 250 ms feels close to inotify
+    /// for an interactive workflow without taking a host-watcher
+    /// dependency. Running the script is synchronous here — daemon
+    /// mode exits naturally when listeners close, and we re-loop.
+    /// Tracking transitive `require()` dependencies is a follow-up;
+    /// today we re-run on entry-script change only, which matches
+    /// Node's pre-22 default.
+    pub(super) fn run_with_watch(cli: &Cli, path: &Path, user_args: &[String]) -> Result<()> {
+        let mut last_mtime = mtime_of(path);
+        // Fire the script once immediately.
+        run_once(cli, path, user_args)?;
+        eprintln!("burn --watch: watching {} (Ctrl-C to exit)", path.display());
+        loop {
+            std::thread::sleep(Duration::from_millis(250));
+            let cur = mtime_of(path);
+            if cur > last_mtime {
+                last_mtime = cur;
+                eprintln!("burn --watch: change detected, re-running…");
+                if let Err(e) = run_once(cli, path, user_args) {
+                    eprintln!("burn --watch: error: {e}");
+                }
+            }
+        }
+    }
+
+    fn run_once(cli: &Cli, path: &Path, user_args: &[String]) -> Result<()> {
+        let buf = path.to_path_buf();
+        let _: PathBuf = buf;
+        let source = fs::read_to_string(path).with_context(|| format!("reading {path:?}"))?;
+        let label = script_label(path);
+        let js_source = with_preload(cli, &maybe_transpile_ts(&source, path)?);
+        execute(cli, &js_source, &label, user_args)
+    }
+
+    fn mtime_of(path: &Path) -> SystemTime {
+        std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH)
+    }
 }
 
 /// With the `ts` feature: TS files are transpiled (strip-types +

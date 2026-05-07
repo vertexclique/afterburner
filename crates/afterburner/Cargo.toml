@@ -90,7 +90,9 @@ host-http = ["afterburner-wasi?/host-http"]
 # `bin` pulls in the CLI deps + selects the default modes that `burn`
 # assumes (adaptive for auto-tier, thrust for --workers, wasi/daemon
 # for http.createServer() support, tokio for the daemon event loop
-# and SIGINT handler).
+# and SIGINT handler). `ts` is bundled in: real-world Node code
+# requires ESM lowering so `npm.js`'s `import('chalk')` etc. parse
+# under our CJS resolver — matches Node 24's default-on TS-strip.
 bin = [
     "dep:clap",
     "dep:rustyline",
@@ -98,10 +100,13 @@ bin = [
     "dep:tokio",
     "adaptive",
     "thrust",
+    "ts",
     "afterburner-wasi/daemon",
 ]
 # B8 — TypeScript strip-types. `burn foo.ts` transpiles via oxc and
-# runs the resulting JS through the normal pipeline. Opt-in only.
+# runs the resulting JS through the normal pipeline. Now part of the
+# `bin` feature; standalone for library callers who want it without
+# the rest of the CLI surface.
 ts = ["dep:oxc", "dep:thiserror"]
 # L3 shadow: bcrypt. `require('bcrypt')` resolves to a pure-Rust
 # shadow that works inside the WASM sandbox (where native .node

@@ -76,6 +76,55 @@ pub struct Cli {
     #[arg(long = "quiet", short = 'q', global = true)]
     pub quiet: bool,
 
+    /// Re-run the script when its file (or any local `require()` it
+    /// pulls in) changes on disk. Mirrors `node --watch`. Off by
+    /// default; pair with file-watching dev workflows.
+    #[arg(long = "watch", global = true)]
+    pub watch: bool,
+
+    /// Load `KEY=VALUE` lines from a `.env`-style file into
+    /// `process.env` before the script runs. Repeatable; later files
+    /// override earlier keys. Mirrors `node --env-file=path`.
+    #[arg(long = "env-file", value_name = "PATH", global = true)]
+    pub env_file: Vec<PathBuf>,
+
+    /// Preload a CommonJS module (or several, repeated) before the
+    /// entry script. Mirrors `node --require=path`. Useful for
+    /// instrumentation, sourcemap support, env shims.
+    #[arg(long = "require", short = 'r', value_name = "MODULE", global = true)]
+    pub require: Vec<String>,
+
+    /// Preload an ES module (or several, repeated) before the entry
+    /// script. Mirrors `node --import=path`. The module is lowered
+    /// through the same TS-strip + ESM rewrite as user source.
+    #[arg(long = "import", value_name = "MODULE", global = true)]
+    pub import: Vec<String>,
+
+    /// Enable the Permission Model (`process.permission.has(...)` /
+    /// `get(...)`). Without `--permission`, `process.permission` is
+    /// absent. Mirrors `node --permission`.
+    #[arg(long = "permission", global = true)]
+    pub permission: bool,
+
+    /// Permission Model: read-only filesystem grant (host:path
+    /// granularity). Same shape as `--allow-fs` but read-only.
+    #[arg(long = "allow-fs-read", value_name = "PATHS", global = true)]
+    pub allow_fs_read: Option<String>,
+
+    /// Permission Model: write-only filesystem grant.
+    #[arg(long = "allow-fs-write", value_name = "PATHS", global = true)]
+    pub allow_fs_write: Option<String>,
+
+    /// Permission Model: child-process grant. Required for
+    /// `child_process.spawn`/`exec` under `--permission`.
+    #[arg(long = "allow-child-process", global = true)]
+    pub allow_child_process: bool,
+
+    /// Permission Model: worker_threads grant. Required for `new
+    /// Worker(...)` under `--permission`.
+    #[arg(long = "allow-worker", global = true)]
+    pub allow_worker: bool,
+
     /// **Internal — set only by `worker_threads`.** Marks this `burn`
     /// invocation as a worker child: read the init frame off stdin,
     /// expose `parentPort`, and pump frames over stdin/stdout per the
