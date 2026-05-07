@@ -557,6 +557,54 @@ __register_module('stream', function(module, exports, require) {
     Stream.prototype.constructor = Stream;
     Stream.prototype.pipe = Readable.prototype.pipe;
 
+    // ---- Node ↔ Web Streams bridge (Node 17+) ---------------------
+    // `Readable.toWeb(node)` / `Readable.fromWeb(web)` etc. real
+    // libs (undici, node-fetch shims, web-streams-polyfill consumers)
+    // depend on these even when only one side is in active use.
+    Readable.toWeb = function(nodeReadable, _opts) {
+        if (typeof globalThis.ReadableStream !== 'function') {
+            throw new Error('Readable.toWeb: ReadableStream unavailable');
+        }
+        return new globalThis.ReadableStream({
+            start: function(controller) {
+                nodeReadable.on('data', function(chunk) {
+                    controller.enqueue(chunk);
+                });
+                nodeReadable.on('end', function() {
+                    try { controller.close(); } catch (_) {}
+                });
+                nodeReadable.on('error', function(err) {
+                    try { controller.error(err); } catch (_) {}
+                });
+            },
+            cancel: function() {
+                if (typeof nodeReadable.destroy === 'function') {
+                    try { nodeReadable.destroy(); } catch (_) {}
+                }
+            },
+        });
+    };
+    Readable.fromWeb = function(webReadable, _opts) {
+        // Wrap a Web ReadableStream as a Node Readable. We pull
+        // chunks via `.getReader()` and emit them as `data` events;
+        // EOF closes the reader and fires `end`.
+        var reader = webReadable.getReader();
+        var node = Readable.from((async function* () {
+            while (true) {
+                var step = await reader.read();
+                if (step.done) return;
+                yield step.value;
+            }
+        })());
+        return node;
+    };
+    Writable.toWeb = function(_nodeWritable) {
+        throw new Error('Writable.toWeb: not implemented');
+    };
+    Writable.fromWeb = function(_webWritable) {
+        throw new Error('Writable.fromWeb: not implemented');
+    };
+
     exports.Readable       = Readable;
     exports.Writable       = Writable;
     exports.Duplex         = Duplex;

@@ -2123,6 +2123,51 @@ __register_module('crypto', function(module, exports, require) {
         var raw = fn(pwd, saltBuf.toString('base64'), N >>> 0, r >>> 0, p >>> 0, keylen >>> 0);
         return fromB64(raw, 'scryptSync');
     };
+
+    // ---- crypto.constants -----------------------------------------
+    //
+    // Subset that real-world packages probe: OpenSSL flag bits + the
+    // signing/padding scheme constants used by `crypto.sign` /
+    // `subtle.sign` callers. Burn doesn't use these for gating
+    // (the host-side rust-crypto crates encode the algorithm in the
+    // call shape), but exposing them keeps `require('crypto').constants.RSA_PKCS1_PADDING`
+    // probes from being `undefined` and crashing.
+    exports.constants = {
+        // SSL options
+        SSL_OP_ALL: 0x80000bff,
+        SSL_OP_NO_SSLv2: 0x01000000,
+        SSL_OP_NO_SSLv3: 0x02000000,
+        SSL_OP_NO_TLSv1: 0x04000000,
+        SSL_OP_NO_TLSv1_1: 0x10000000,
+        SSL_OP_NO_TLSv1_2: 0x08000000,
+        SSL_OP_NO_TLSv1_3: 0x20000000,
+        // RSA padding
+        RSA_PKCS1_PADDING: 1,
+        RSA_SSLV23_PADDING: 2,
+        RSA_NO_PADDING: 3,
+        RSA_PKCS1_OAEP_PADDING: 4,
+        RSA_X931_PADDING: 5,
+        RSA_PKCS1_PSS_PADDING: 6,
+        // PSS salt
+        RSA_PSS_SALTLEN_DIGEST: -1,
+        RSA_PSS_SALTLEN_MAX_SIGN: -2,
+        RSA_PSS_SALTLEN_AUTO: -2,
+        // DH point formats
+        POINT_CONVERSION_COMPRESSED: 2,
+        POINT_CONVERSION_UNCOMPRESSED: 4,
+        POINT_CONVERSION_HYBRID: 6,
+        // Hash algorithms (for crypto.diffieHellman)
+        ENGINE_METHOD_NONE: 0x00,
+        ENGINE_METHOD_ALL: 0xffff,
+        DH_CHECK_P_NOT_SAFE_PRIME: 2,
+        DH_CHECK_P_NOT_PRIME: 1,
+        DH_NOT_SUITABLE_GENERATOR: 8,
+        DH_UNABLE_TO_CHECK_GENERATOR: 4,
+        defaultCoreCipherList:
+            'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:'
+            + 'ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:'
+            + 'ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384',
+    };
 });
 
 // ---- dgram.js ----
@@ -10577,6 +10622,54 @@ __register_module('stream', function(module, exports, require) {
     Stream.prototype = Object.create(EventEmitter.prototype);
     Stream.prototype.constructor = Stream;
     Stream.prototype.pipe = Readable.prototype.pipe;
+
+    // ---- Node ↔ Web Streams bridge (Node 17+) ---------------------
+    // `Readable.toWeb(node)` / `Readable.fromWeb(web)` etc. real
+    // libs (undici, node-fetch shims, web-streams-polyfill consumers)
+    // depend on these even when only one side is in active use.
+    Readable.toWeb = function(nodeReadable, _opts) {
+        if (typeof globalThis.ReadableStream !== 'function') {
+            throw new Error('Readable.toWeb: ReadableStream unavailable');
+        }
+        return new globalThis.ReadableStream({
+            start: function(controller) {
+                nodeReadable.on('data', function(chunk) {
+                    controller.enqueue(chunk);
+                });
+                nodeReadable.on('end', function() {
+                    try { controller.close(); } catch (_) {}
+                });
+                nodeReadable.on('error', function(err) {
+                    try { controller.error(err); } catch (_) {}
+                });
+            },
+            cancel: function() {
+                if (typeof nodeReadable.destroy === 'function') {
+                    try { nodeReadable.destroy(); } catch (_) {}
+                }
+            },
+        });
+    };
+    Readable.fromWeb = function(webReadable, _opts) {
+        // Wrap a Web ReadableStream as a Node Readable. We pull
+        // chunks via `.getReader()` and emit them as `data` events;
+        // EOF closes the reader and fires `end`.
+        var reader = webReadable.getReader();
+        var node = Readable.from((async function* () {
+            while (true) {
+                var step = await reader.read();
+                if (step.done) return;
+                yield step.value;
+            }
+        })());
+        return node;
+    };
+    Writable.toWeb = function(_nodeWritable) {
+        throw new Error('Writable.toWeb: not implemented');
+    };
+    Writable.fromWeb = function(_webWritable) {
+        throw new Error('Writable.fromWeb: not implemented');
+    };
 
     exports.Readable       = Readable;
     exports.Writable       = Writable;
