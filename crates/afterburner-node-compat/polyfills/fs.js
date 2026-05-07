@@ -831,6 +831,83 @@ __register_module('fs', function(module, exports, require) {
     exports.Dir = Dir;
     exports.Dirent = Dirent;
 
+    /// fs.Stats — class probed by real apps. Real Node returns these
+    /// from statSync etc.; our statSync returns plain objects with the
+    /// same shape, but the class itself is also exposed. Subclassable
+    /// for libraries that pattern-match `instanceof`.
+    function Stats() {
+        this.dev = 0;
+        this.ino = 0;
+        this.mode = 0;
+        this.nlink = 1;
+        this.uid = 0;
+        this.gid = 0;
+        this.rdev = 0;
+        this.size = 0;
+        this.blksize = 4096;
+        this.blocks = 0;
+        this.atimeMs = 0;
+        this.mtimeMs = 0;
+        this.ctimeMs = 0;
+        this.birthtimeMs = 0;
+    }
+    Stats.prototype.isFile          = function() { return false; };
+    Stats.prototype.isDirectory     = function() { return false; };
+    Stats.prototype.isBlockDevice   = function() { return false; };
+    Stats.prototype.isCharacterDevice = function() { return false; };
+    Stats.prototype.isFIFO          = function() { return false; };
+    Stats.prototype.isSocket        = function() { return false; };
+    Stats.prototype.isSymbolicLink  = function() { return false; };
+    exports.Stats = Stats;
+    exports.StatFs = function StatFs() {
+        this.type = 0;
+        this.bsize = 4096;
+        this.blocks = 0;
+        this.bfree = 0;
+        this.bavail = 0;
+        this.files = 0;
+        this.ffree = 0;
+    };
+
+    /// fs.ReadStream / fs.WriteStream — Real instances come back from
+    /// `createReadStream` / `createWriteStream`; constructors are
+    /// surface-only stand-ins. Some libs pattern-match
+    /// `instanceof fs.ReadStream`.
+    var _streamMod;
+    function _streamModule() {
+        if (!_streamMod) _streamMod = require('stream');
+        return _streamMod;
+    }
+    function ReadStream(_path, _options) {
+        _streamModule().Readable.call(this);
+    }
+    Object.defineProperty(exports, 'ReadStream', {
+        configurable: true,
+        get: function() {
+            ReadStream.prototype = Object.create(_streamModule().Readable.prototype);
+            ReadStream.prototype.constructor = ReadStream;
+            return ReadStream;
+        },
+    });
+    function WriteStream(_path, _options) {
+        _streamModule().Writable.call(this);
+    }
+    Object.defineProperty(exports, 'WriteStream', {
+        configurable: true,
+        get: function() {
+            WriteStream.prototype = Object.create(_streamModule().Writable.prototype);
+            WriteStream.prototype.constructor = WriteStream;
+            return WriteStream;
+        },
+    });
+    /// fs.FileReadStream / FileWriteStream — Node aliases.
+    Object.defineProperty(exports, 'FileReadStream', {
+        configurable: true, get: function() { return exports.ReadStream; },
+    });
+    Object.defineProperty(exports, 'FileWriteStream', {
+        configurable: true, get: function() { return exports.WriteStream; },
+    });
+
     // Augment readdirSync with `withFileTypes` and `recursive` support
     // (Node 22+). The existing overload returns a plain string array;
     // opendir_sync gives us typed entries. `recursive: true` walks
