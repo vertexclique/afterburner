@@ -62,21 +62,42 @@ __register_module('buffer', function(module, exports, require) {
     })();
 
     function b64Encode(bytes) {
-        var out = '';
+        // Bulk-encode by chunk into an array, join once at the end.
+        // QuickJS's `+=` string concat creates a fresh string per
+        // step which goes quadratic on multi-KB inputs (50 KB took
+        // ~800ms; 315 KB hung). Joining a small array of pre-
+        // encoded segments collapses that to ~one alloc per chunk.
+        // Chunk size 768 bytes = 1024 base64 chars per segment;
+        // picked to keep the temporary char arrays cache-friendly
+        // while bounding the array overhead.
+        var n = bytes.length;
+        if (n === 0) return '';
+        var chunks = [];
         var i = 0;
-        for (; i + 3 <= bytes.length; i += 3) {
-            var n = (bytes[i] << 16) | (bytes[i+1] << 8) | bytes[i+2];
-            out += B64[(n >> 18) & 63] + B64[(n >> 12) & 63] + B64[(n >> 6) & 63] + B64[n & 63];
+        var CHUNK = 768;
+        for (; i + CHUNK <= n; i += CHUNK) {
+            var seg = '';
+            for (var j = i; j < i + CHUNK; j += 3) {
+                var v = (bytes[j] << 16) | (bytes[j+1] << 8) | bytes[j+2];
+                seg += B64[(v >> 18) & 63] + B64[(v >> 12) & 63] + B64[(v >> 6) & 63] + B64[v & 63];
+            }
+            chunks.push(seg);
         }
-        var rem = bytes.length - i;
+        var tail = '';
+        for (; i + 3 <= n; i += 3) {
+            var v2 = (bytes[i] << 16) | (bytes[i+1] << 8) | bytes[i+2];
+            tail += B64[(v2 >> 18) & 63] + B64[(v2 >> 12) & 63] + B64[(v2 >> 6) & 63] + B64[v2 & 63];
+        }
+        var rem = n - i;
         if (rem === 1) {
             var n1 = bytes[i] << 16;
-            out += B64[(n1 >> 18) & 63] + B64[(n1 >> 12) & 63] + '==';
+            tail += B64[(n1 >> 18) & 63] + B64[(n1 >> 12) & 63] + '==';
         } else if (rem === 2) {
             var n2 = (bytes[i] << 16) | (bytes[i+1] << 8);
-            out += B64[(n2 >> 18) & 63] + B64[(n2 >> 12) & 63] + B64[(n2 >> 6) & 63] + '=';
+            tail += B64[(n2 >> 18) & 63] + B64[(n2 >> 12) & 63] + B64[(n2 >> 6) & 63] + '=';
         }
-        return out;
+        if (tail) chunks.push(tail);
+        return chunks.join('');
     }
 
     function b64Decode(str) {

@@ -469,6 +469,196 @@ __register_module('fs', function(module, exports, require) {
     exports.createReadStream  = createReadStream;
     exports.createWriteStream = createWriteStream;
 
+    // ----- fd-based sync API ----------------------------------------
+    //
+    // tar's Unpack writes file contents via the classic Node
+    // `openSync` / `writeSync` / `closeSync` triple. We don't have
+    // real OS-level fds inside the wasm sandbox; instead, we keep a
+    // per-process JS-side fd table that maps a small integer to
+    // `{ path, offset }`. Writes go through `__host_fs_write_chunk`
+    // (the same entry `createWriteStream` uses) — which means npm's
+    // tarball extraction works end-to-end without us needing a real
+    // libc-shaped fd surface.
+    if (!globalThis.__ab_fd_table) globalThis.__ab_fd_table = { next: 3, slots: {} };
+    var FDS = globalThis.__ab_fd_table;
+
+    function _allocFd(slot) {
+        var n = FDS.next++;
+        FDS.slots[n] = slot;
+        return n;
+    }
+    function _fdSlot(fd) {
+        var s = FDS.slots[fd];
+        if (!s) {
+            var e = new Error('EBADF: bad file descriptor');
+            e.code = 'EBADF';
+            e.errno = -9;
+            throw e;
+        }
+        return s;
+    }
+
+    exports.openSync = function(path, flags, _mode) {
+        flags = flags || 'r';
+        var pathStr = String(path);
+        // Truncate when opening with `w` or `wx`. We don't model
+        // every flag; `r`/`r+`/`a`/`w`/`wx` are the realistic set.
+        var truncate = false;
+        if (typeof flags === 'string') {
+            if (flags === 'w' || flags === 'wx' || flags === 'w+' || flags === 'wx+') truncate = true;
+        } else if (typeof flags === 'number') {
+            // O_TRUNC = 0x200
+            if (flags & 0x200) truncate = true;
+        }
+        if (truncate && typeof globalThis.__host_fs_unlink_sync === 'function') {
+            try { globalThis.__host_fs_unlink_sync(pathStr); } catch (_) {}
+        }
+        return _allocFd({ path: pathStr, offset: 0, flags: flags });
+    };
+
+    exports.openAsBlob && (exports.openAsBlob = exports.openAsBlob); // keep ref
+    exports.closeSync = function(fd) {
+        var slot = FDS.slots[fd];
+        if (!slot) {
+            var e = new Error('EBADF: bad file descriptor');
+            e.code = 'EBADF';
+            throw e;
+        }
+        delete FDS.slots[fd];
+    };
+
+    // writeSync(fd, buffer[, offset[, length[, position]]])
+    // Accepts both Buffer/Uint8Array and string forms.
+    exports.writeSync = function(fd, buffer, offset, length, position) {
+        var slot = _fdSlot(fd);
+        var data;
+        if (typeof buffer === 'string') {
+            // writeSync(fd, string, position, encoding)
+            // — string variant: offset arg becomes the position.
+            var enc = (length && typeof length === 'string') ? length : 'utf8';
+            data = Buffer.from(buffer, enc);
+            if (typeof offset === 'number') position = offset;
+            offset = 0;
+            length = data.length;
+        } else {
+            offset = offset || 0;
+            length = (typeof length === 'number') ? length : (buffer.length - offset);
+            data = (Buffer.isBuffer(buffer) && offset === 0 && length === buffer.length)
+                ? buffer
+                : Buffer.from(buffer.buffer || buffer, (buffer.byteOffset || 0) + offset, length);
+        }
+        var pos = (typeof position === 'number') ? position : slot.offset;
+        var writeFn = globalThis.__host_fs_write_chunk;
+        if (typeof writeFn !== 'function') {
+            var e = new Error('writeSync: __host_fs_write_chunk not available');
+            e.code = 'ENOSYS';
+            throw e;
+        }
+        var raw = writeFn(slot.path, pos, data.toString('base64'));
+        if (typeof raw === 'string' && raw.indexOf('__HOST_ERR__:') === 0) {
+            var e2 = new Error('fs.writeSync: ' + raw.slice('__HOST_ERR__:'.length));
+            throw e2;
+        }
+        if (typeof position !== 'number') slot.offset = pos + length;
+        return length;
+    };
+
+    // readSync(fd, buffer, offset, length, position)
+    exports.readSync = function(fd, buffer, offset, length, position) {
+        var slot = _fdSlot(fd);
+        var pos = (typeof position === 'number' && position !== null) ? position : slot.offset;
+        var readFn = globalThis.__host_fs_read_chunk;
+        if (typeof readFn !== 'function') {
+            var e = new Error('readSync: __host_fs_read_chunk not available');
+            e.code = 'ENOSYS';
+            throw e;
+        }
+        var raw = readFn(slot.path, pos, length);
+        if (typeof raw === 'string' && raw.indexOf('__HOST_ERR__:') === 0) {
+            var e2 = new Error('fs.readSync: ' + raw.slice('__HOST_ERR__:'.length));
+            throw e2;
+        }
+        var got = Buffer.from(raw, 'base64');
+        var n = Math.min(got.length, length);
+        got.copy(buffer, offset, 0, n);
+        if (typeof position !== 'number' || position === null) slot.offset = pos + n;
+        return n;
+    };
+
+    // fstatSync(fd) — same shape as statSync, keyed by fd.
+    exports.fstatSync = function(fd) {
+        var slot = _fdSlot(fd);
+        return exports.statSync(slot.path);
+    };
+
+    // fsyncSync / fdatasyncSync / ftruncateSync — best-effort no-ops.
+    // Sandbox writes go through the host bridge synchronously already;
+    // there's no buffer to flush.
+    exports.fsyncSync     = function(_fd) {};
+    exports.fdatasyncSync = function(_fd) {};
+    exports.ftruncateSync = function(fd, len) {
+        var slot = _fdSlot(fd);
+        len = len || 0;
+        var existing;
+        try { existing = exports.readFileSync(slot.path); }
+        catch (_) { existing = Buffer.alloc(0); }
+        var buf = Buffer.isBuffer(existing) ? existing : Buffer.from(String(existing));
+        var truncated = buf.slice(0, len);
+        exports.writeFileSync(slot.path, truncated);
+    };
+
+    // Callback-style equivalents — auto-wrap the sync versions on a
+    // microtask. The CALLBACK_NAMES forEach below already does this
+    // for the existing entries; we add fd-shaped names here so they
+    // get the same treatment without polluting that list.
+    function _asyncWrap(syncName) {
+        return function() {
+            var args = [].slice.call(arguments);
+            var cb = (typeof args[args.length - 1] === 'function') ? args.pop() : null;
+            Promise.resolve().then(function() {
+                try {
+                    var r = exports[syncName].apply(null, args);
+                    if (cb) cb(null, r);
+                } catch (e) {
+                    if (cb) cb(e);
+                }
+            });
+        };
+    }
+    exports.open       = _asyncWrap('openSync');
+    exports.close      = _asyncWrap('closeSync');
+    // write(fd, buffer, ...rest, cb) — Node calls back with
+    // `(err, bytesWritten, buffer)`. Keep that shape.
+    exports.write = function(fd, buffer, offset, length, position, cb) {
+        // Tolerate the (fd, buffer, cb) shorthand and
+        // (fd, string, position, encoding, cb) string variant.
+        if (typeof offset === 'function') { cb = offset; offset = undefined; }
+        if (typeof length === 'function') { cb = length; length = undefined; }
+        if (typeof position === 'function') { cb = position; position = undefined; }
+        Promise.resolve().then(function() {
+            try {
+                var n = exports.writeSync(fd, buffer, offset, length, position);
+                if (cb) cb(null, n, buffer);
+            } catch (e) {
+                if (cb) cb(e);
+            }
+        });
+    };
+    exports.read = function(fd, buffer, offset, length, position, cb) {
+        Promise.resolve().then(function() {
+            try {
+                var n = exports.readSync(fd, buffer, offset, length, position);
+                if (cb) cb(null, n, buffer);
+            } catch (e) {
+                if (cb) cb(e);
+            }
+        });
+    };
+    exports.fstat       = _asyncWrap('fstatSync');
+    exports.fsync       = _asyncWrap('fsyncSync');
+    exports.fdatasync   = _asyncWrap('fdatasyncSync');
+    exports.ftruncate   = _asyncWrap('ftruncateSync');
+
     // ----- realpath ---------------------------------------------------
 
     exports.realpathSync = function(path) {

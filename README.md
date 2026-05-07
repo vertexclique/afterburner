@@ -105,16 +105,15 @@ burn -A runall.js                          # grant everything
 
 ### Package managers
 
-`burn bun add lodash` works end-to-end — bun is a self-contained
-native binary, so the passthrough hands it the args verbatim.
-`burn npm install` / `burn pnpm install` / `burn yarn add` are
-best-effort: the JS-script package managers reach our Node-compat
-surface (a `#!/usr/bin/env node` script picks up our PATH shim and
-re-enters the sandbox) and a lot of their internals work, but the
-deeper async dispatch chain — corepack's clipanion state machine,
-npm's logfile cleanup glob, etc. — needs more node-runtime fidelity
-than we currently provide. Use `burn bun` if you want the
-package-manager experience to just work today.
+`burn npm install` and `burn bun add lodash` both complete end-to-
+end. npm runs as the original JS script: its `#!/usr/bin/env node`
+shebang resolves through our PATH shim and the npm CLI, pacote,
+arborist, minizlib, tar — the whole canonical install pipeline —
+runs inside the burn sandbox over real async outbound HTTP. bun
+runs as a native ELF binary and the passthrough hands it args
+verbatim. `burn pnpm install` / `burn yarn add` inherit the npm
+fix; the corepack `__webpack_require__.e(chunkId)` chunked-import
+path is the remaining gap.
 
 See [`examples/`](./examples/) for standalone projects covering single
 UDF, batched UDF, multi-worker scheduling, streaming crypto,
