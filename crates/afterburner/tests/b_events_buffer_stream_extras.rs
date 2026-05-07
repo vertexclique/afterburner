@@ -192,7 +192,6 @@ fn stream_duplex_pair_returns_two_connected_streams() {
 }
 
 #[test]
-#[ignore = "stream.Writable({ write }) constructor needs upstream support; pipeline shape exists"]
 fn stream_promises_pipeline_resolves_promise() {
     let out = run_inline(
         r#"

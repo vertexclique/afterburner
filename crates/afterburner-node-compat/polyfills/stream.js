@@ -263,7 +263,15 @@ __register_module('stream', function(module, exports, require) {
             self.emit('close');
             if (cb) cb();
         };
-        if (this._finalFn) this._finalFn(finish); else finish();
+        // Defer to a microtask so listeners attached AFTER end() (the
+        // canonical Node pattern: `ws.end(chunk); ws.on('finish', …);`)
+        // still observe the event. `_finalFn` and the synchronous-
+        // write fast path otherwise fire 'finish' before the listener
+        // is attached.
+        Promise.resolve().then(function() {
+            if (self._finalFn) self._finalFn(finish);
+            else finish();
+        });
         return this;
     };
     Writable.prototype.destroy = function(err) {
@@ -431,7 +439,9 @@ __register_module('stream', function(module, exports, require) {
             return null;
         }
         var stages = args.map(function(s, i) {
-            if (s && typeof s.pipe === 'function') return s;
+            if (s && typeof s.pipe === 'function') return s;          // Readable / Duplex
+            // Writables don't have `.pipe` but accept piped data.
+            if (s && typeof s.write === 'function' && typeof s.end === 'function') return s;
             // Iterable / async iterable / generator fn.
             if (typeof s === 'function') {
                 // Generator function — call with previous stream.
