@@ -572,6 +572,15 @@ fn shard_main_inner(args: ShardThreadArgs) {
     let dgram = DaemonDgram::new_with_claims(tokio_handle.clone(), manifold, shared_claims);
     daemon.install_dgram(Arc::clone(&dgram));
 
+    // Outbound HTTP coordinator — async per-shard. JS calls to
+    // `http.request` / `https.request` / `fetch` go through this
+    // coord, which spawns the actual round-trip on the same Tokio
+    // runtime that drives axum / net / tls. Responses come back
+    // through a per-shard channel that the dispatch loop polls each
+    // tick (added below alongside the other event sources).
+    let http_outbound = crate::daemon_http_outbound::DaemonHttpOutbound::new(tokio_handle.clone());
+    daemon.install_http_outbound(Arc::clone(&http_outbound));
+
     // Step 3: run init from precompiled bytecode. The shared
     // `daemon_http` is in shared-listeners mode so this shard's
     // `app.listen(port)` either binds the real socket (first shard)
@@ -711,6 +720,29 @@ fn shard_event_loop(
             if let Some(id) = reap_id {
                 daemon.mark_net_closed(id);
             }
+        }
+
+        // ---- Outbound HTTP responses ----
+        // Each shard owns its outbound coordinator; responses for
+        // requests this shard issued land here. Drain a generous
+        // batch per tick — npm install fans out 50+ concurrent
+        // requests during dependency resolution, and stalling on
+        // queue drain stretches install wall time.
+        for _ in 0..256 {
+            let Some(evt) = daemon.try_recv_http_outbound_response() else {
+                break;
+            };
+            did_work = true;
+            let envelope = crate::daemon_envelopes::http_outbound_response_to_envelope(&evt);
+            dispatch_with_panic_isolation(
+                shard_idx,
+                daemon,
+                envelope,
+                "http-response",
+                stdout_hw,
+                stderr_hw,
+            );
+            let _ = flush_streams(daemon, stdout_hw, stderr_hw);
         }
 
         // ---- TLS events ----

@@ -289,6 +289,16 @@ impl DaemonRuntime {
         {
             return true;
         }
+        // Outbound HTTP keeps the daemon alive while a request is in
+        // flight — without this the script-mode wrapper would exit
+        // the moment the synchronous user fn returns, even though
+        // the response Promise hasn't resolved yet.
+        #[cfg(feature = "daemon")]
+        if let Some(o) = &self.store.data().daemon_http_outbound
+            && o.has_refs()
+        {
+            return true;
+        }
         false
     }
 
@@ -379,6 +389,30 @@ impl DaemonRuntime {
     #[cfg(feature = "daemon")]
     pub fn try_recv_dgram_event(&self) -> Option<crate::daemon_dgram::DgramEvent> {
         self.store.data().daemon_dgram.as_ref()?.try_recv_event()
+    }
+
+    /// Install the outbound HTTP coordinator on this daemon's Store.
+    /// Same lifecycle as the other `install_*` methods — parent +
+    /// worker call this before `run_init` so user code that calls
+    /// `http.request` / `https.request` / `fetch` during top-level
+    /// evaluation already sees the async host import.
+    #[cfg(feature = "daemon")]
+    pub fn install_http_outbound(
+        &mut self,
+        coord: Arc<crate::daemon_http_outbound::DaemonHttpOutbound>,
+    ) {
+        self.store.data_mut().daemon_http_outbound = Some(coord);
+    }
+
+    #[cfg(feature = "daemon")]
+    pub fn try_recv_http_outbound_response(
+        &self,
+    ) -> Option<crate::daemon_http_outbound::HttpOutboundResponseEvent> {
+        self.store
+            .data()
+            .daemon_http_outbound
+            .as_ref()?
+            .try_recv_response()
     }
 
     /// Drain timers whose `fire_at` has passed. Returns the ids that

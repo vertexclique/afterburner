@@ -998,6 +998,29 @@ fn install_http_dns<'js>(globals: &Object<'js>) {
         ),
     );
 
+    // Async variant: returns req_id immediately as a number
+    // (`-1` when no daemon is attached so the JS shim falls back
+    // to the sync path). Response delivery is event-driven via
+    // the daemon dispatch loop's `http-response` kind.
+    let _ = globals.set(
+        "__host_http_request_async",
+        Func::from(|method: String, url: String, body: Option<String>| -> i64 {
+            let mb = method.as_bytes();
+            let ub = url.as_bytes();
+            let body_vec: Vec<u8> = body.map(|b| b.into_bytes()).unwrap_or_default();
+            unsafe {
+                host_http_request_async(
+                    mb.as_ptr(),
+                    mb.len() as u32,
+                    ub.as_ptr(),
+                    ub.len() as u32,
+                    body_vec.as_ptr(),
+                    body_vec.len() as u32,
+                )
+            }
+        }),
+    );
+
     let _ = globals.set(
         "__host_dns_lookup",
         Func::from(|name: String| -> String {

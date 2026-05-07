@@ -4244,7 +4244,8 @@ function __plenum_install_http(moduleName) {
         // -------- outbound request / get --------------------------------
 
         function requestImpl(opts, cb) {
-            if (typeof globalThis.__host_http_request !== 'function') {
+            if (typeof globalThis.__host_http_request !== 'function'
+                && typeof globalThis.__host_http_request_async !== 'function') {
                 throw new Error("Permission denied: http.request is not available");
             }
             var url;
@@ -4259,14 +4260,96 @@ function __plenum_install_http(moduleName) {
             var method = (opts && opts.method) || 'GET';
             var body = opts && opts.body;
 
-            var resultRaw = globalThis.__host_http_request(method, url, body || null);
-            var result = JSON.parse(resultRaw);
-            if (typeof result.body === 'string' && result.body.indexOf('__HOST_ERR__:') === 0) {
-                var err = new Error("http: " + result.body.slice('__HOST_ERR__:'.length));
-                if (err.message.toLowerCase().indexOf('permission denied') !== -1) err.code = 'EACCES';
-                throw err;
+            // Prefer the async path when a daemon is attached. The
+            // sync function still runs the request inline on the wasm
+            // thread; the async one dispatches onto Tokio and the
+            // shard event loop fans the response back through a
+            // `daemon-event`. Real Node-style: caller awaits a Promise
+            // that resolves when the host signals completion, instead
+            // of blocking the wasm thread for the full round-trip.
+            var asyncFn = globalThis.__host_http_request_async;
+            var asyncReqId = -1;
+            var resultPromise = null;
+            if (typeof asyncFn === 'function') {
+                try {
+                    var rid = asyncFn(method, url, body || null);
+                    if (typeof rid === 'bigint') rid = Number(rid);
+                    if (typeof rid === 'number' && rid > 0) {
+                        asyncReqId = rid;
+                        resultPromise = new Promise(function(resolve) {
+                            if (!globalThis.__ab_http_pending) globalThis.__ab_http_pending = {};
+                            globalThis.__ab_http_pending[asyncReqId] = { resolve: resolve };
+                        });
+                    }
+                } catch (_) {
+                    // fall through to sync path
+                }
             }
 
+            // The whole `result → resp → emit` pipeline is wrapped in
+            // `buildAndDispatch` so the same code path covers both
+            // the sync and async flavours. Sync calls it immediately
+            // with the just-fetched result; async chains it onto the
+            // Promise the daemon resolves when the response arrives.
+            var Buffer = require('buffer').Buffer;
+            var EventEmitter = require('events');
+            var req = Object.create(EventEmitter.prototype);
+            EventEmitter.call(req);
+            req.end          = function() { return req; };
+            req.write        = function() { return true; };
+            req.setHeader    = function() { return req; };
+            req.getHeader    = function() {};
+            req.removeHeader = function() {};
+            req.setTimeout   = function() { return req; };
+            req.destroy      = function() { return req; };
+            req.abort        = function() { return req; };
+            req.flushHeaders = function() { return req; };
+            req.socket = { setKeepAlive: function() {}, setTimeout: function() {}, unref: function() {}, ref: function() {} };
+            req.connection = req.socket;
+
+            function buildAndDispatch(result) {
+                if (typeof result.body === 'string' && result.body.indexOf('__HOST_ERR__:') === 0) {
+                    var hostErr = new Error("http: " + result.body.slice('__HOST_ERR__:'.length));
+                    if (hostErr.message.toLowerCase().indexOf('permission denied') !== -1) hostErr.code = 'EACCES';
+                    Promise.resolve().then(function() {
+                        try { req.emit('socket', req.socket); } catch (_) {}
+                        req.emit('error', hostErr);
+                    });
+                    return req;
+                }
+                if (typeof result.error === 'string' && result.error.length > 0) {
+                    var hostErr2 = new Error("http: " + result.error);
+                    Promise.resolve().then(function() {
+                        try { req.emit('socket', req.socket); } catch (_) {}
+                        req.emit('error', hostErr2);
+                    });
+                    return req;
+                }
+                var resp = makeResp(result, method, url);
+                Promise.resolve().then(function() {
+                    try { req.emit('socket', req.socket); } catch (_) {}
+                    if (cb) {
+                        try { cb(resp); } catch (e) { req.emit('error', e); return; }
+                    }
+                    req.emit('response', resp);
+                });
+                return req;
+            }
+
+            if (asyncReqId > 0) {
+                resultPromise.then(buildAndDispatch);
+                return req;
+            }
+            return buildAndDispatch(result);
+        }
+
+        // makeResp / IncomingMessage factory — extracted so both the
+        // sync and async dispatch paths share one shape. `result` is
+        // the host envelope: `{status, headers, body, body_b64,
+        // error?}`. Returns a Node-shaped IncomingMessage with the
+        // full readable-stream surface our consumers (npm, undici,
+        // node-fetch / minipass-fetch) require.
+        function makeResp(result, method, url) {
             // Shape the response like a Node IncomingMessage with a
             // working EventEmitter contract plus the readable-stream
             // pieces user code commonly touches: `.resume()`,
@@ -4274,7 +4357,20 @@ function __plenum_install_http(moduleName) {
             // The body is materialised eagerly by the host bridge — we
             // just have to stage it through the listener queue so user
             // code that registers handlers AFTER the cb fires (the
-            // normal Node pattern) still sees `data` + `end`.
+            // normal Node pattern) still sees `data` + `end`. We
+            // prefer the host's base64 body when it is sent (binary-
+            // safe, what npm tar / pacote requires) and fall back to
+            // the lossy UTF-8 body for legacy callers that read text.
+            var bodyBytes = null;
+            if (typeof result.body_b64 === 'string') {
+                try { bodyBytes = Buffer.from(result.body_b64, 'base64'); }
+                catch (_) { bodyBytes = null; }
+            }
+            if (!bodyBytes && typeof result.body === 'string') {
+                bodyBytes = Buffer.from(result.body, 'utf8');
+            }
+            if (!bodyBytes) bodyBytes = Buffer.alloc(0);
+
             var resp = Object.create(EventEmitter.prototype);
             EventEmitter.call(resp);
             resp.statusCode    = result.status;
@@ -4292,15 +4388,22 @@ function __plenum_install_http(moduleName) {
             resp.readable      = true;
             resp.readableEnded = false;
             resp.body          = result.body;
+            resp._bodyBytes    = bodyBytes;
             var _paused = true; // start paused — drain on first listener / resume()
             var _flushed = false;
+            // Encoding switch — `setEncoding('utf8')` etc. tells Node
+            // to deliver string chunks instead of Buffers. We honor
+            // this so libraries that probe via `setEncoding` then
+            // collect string output keep their post-conditions.
+            var _encoding = null;
             function flushBody() {
                 if (_flushed) return;
                 _flushed = true;
                 resp.complete      = true;
                 resp.readableEnded = true;
-                if (typeof result.body === 'string' && result.body.length > 0) {
-                    resp.emit('data', result.body);
+                if (bodyBytes && bodyBytes.length > 0) {
+                    var chunk = _encoding ? bodyBytes.toString(_encoding) : bodyBytes;
+                    resp.emit('data', chunk);
                 }
                 resp.emit('end');
                 resp.emit('close');
@@ -4317,13 +4420,16 @@ function __plenum_install_http(moduleName) {
             }
             resp.resume      = function() { _paused = false; maybeFlush(); return resp; };
             resp.pause       = function() { _paused = true; return resp; };
-            resp.setEncoding = function() { return resp; };
+            resp.setEncoding = function(enc) {
+                if (typeof enc === 'string') _encoding = enc.toLowerCase() === 'utf8' ? 'utf8' : enc;
+                return resp;
+            };
             resp.read        = function() {
                 if (_flushed) return null;
                 _flushed = true;
                 resp.complete = true;
                 resp.readableEnded = true;
-                return result.body || '';
+                return _encoding ? bodyBytes.toString(_encoding) : bodyBytes;
             };
             resp.destroy     = function(err) {
                 if (err) resp.emit('error', err);
@@ -4333,9 +4439,11 @@ function __plenum_install_http(moduleName) {
             resp.unpipe      = function() { return resp; };
             // Convenience body-shaping helpers (Undici `.text()`/`.json()`
             // shape) — handy for fetch-flavoured callers.
-            resp.text        = function() { return Promise.resolve(result.body); };
+            resp.text        = function() {
+                return Promise.resolve(bodyBytes.toString('utf8'));
+            };
             resp.json        = function() {
-                try { return Promise.resolve(JSON.parse(result.body)); }
+                try { return Promise.resolve(JSON.parse(bodyBytes.toString('utf8'))); }
                 catch (e) { return Promise.reject(e); }
             };
             // Auto-resume when a `data` listener attaches (Node's
@@ -4358,7 +4466,9 @@ function __plenum_install_http(moduleName) {
                 return dest;
             };
             // Async-iterator support so `for await (const chunk of res)`
-            // works. Single-chunk: yield the body once and end.
+            // works. Single-chunk: yield the body once and end. Yield
+            // a Buffer (or encoded string when setEncoding was set)
+            // so binary callers (npm tar, image decoders) get bytes.
             if (typeof Symbol !== 'undefined' && Symbol.asyncIterator) {
                 resp[Symbol.asyncIterator] = function() {
                     var done = false;
@@ -4369,29 +4479,14 @@ function __plenum_install_http(moduleName) {
                             _flushed = true;
                             resp.complete = true;
                             resp.readableEnded = true;
-                            return Promise.resolve({ value: result.body || '', done: false });
+                            var v = _encoding ? bodyBytes.toString(_encoding) : bodyBytes;
+                            return Promise.resolve({ value: v, done: false });
                         },
                         return: function() { done = true; return Promise.resolve({ value: undefined, done: true }); },
                     };
                 };
             }
-            if (cb) cb(resp);
-            // Outbound request stub. Node returns a ClientRequest;
-            // ours is a minimal EventEmitter stand-in that swallows
-            // body writes (we already sent them) and resolves
-            // `response` synchronously via `cb`.
-            var req = Object.create(EventEmitter.prototype);
-            EventEmitter.call(req);
-            req.end          = function() { return req; };
-            req.write        = function() { return true; };
-            req.setHeader    = function() { return req; };
-            req.getHeader    = function() {};
-            req.removeHeader = function() {};
-            req.setTimeout   = function() { return req; };
-            req.destroy      = function() { return req; };
-            req.abort        = function() { return req; };
-            req.flushHeaders = function() { return req; };
-            return req;
+            return resp;
         }
 
         // Node accepts both `(url[, options][, cb])` and

@@ -814,6 +814,58 @@ fn wrap_http(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         )
         .map_err(link_err)?;
 
+    // ---- async outbound HTTP -----------------------------------------
+    //
+    // `host_http_request_async` returns the new `req_id` as i64
+    // immediately and dispatches the actual round-trip onto the
+    // daemon's Tokio runtime. The shard's event loop polls the
+    // outbound coordinator each tick; when a response arrives it
+    // ships an envelope of kind `http-response` back into JS, where
+    // the matching `globalThis.__ab_http_pending[req_id]` Promise
+    // resolves. Returns -1 when no daemon is attached (one-shot
+    // script mode) so the JS shim falls back to the synchronous
+    // `host_http_request` path.
+    #[cfg(feature = "daemon")]
+    linker
+        .func_wrap(
+            NS,
+            "host_http_request_async",
+            |mut caller: Caller<'_, HostState>,
+             method_ptr: i32,
+             method_len: i32,
+             url_ptr: i32,
+             url_len: i32,
+             body_ptr: i32,
+             body_len: i32|
+             -> i64 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return -1;
+                };
+                let method = match read_str(&memory, &caller, method_ptr, method_len) {
+                    Some(s) => s,
+                    None => return -1,
+                };
+                let url = match read_str(&memory, &caller, url_ptr, url_len) {
+                    Some(s) => s,
+                    None => return -1,
+                };
+                let body = if body_len > 0 {
+                    match read_bytes(&memory, &caller, body_ptr, body_len) {
+                        Some(b) => Some(b),
+                        None => return -1,
+                    }
+                } else {
+                    None
+                };
+                let manifold = caller.data().manifold.clone();
+                let Some(coord) = caller.data().daemon_http_outbound.clone() else {
+                    return -1;
+                };
+                coord.request(&method, &url, Vec::new(), body, None, manifold)
+            },
+        )
+        .map_err(link_err)?;
+
     Ok(())
 }
 

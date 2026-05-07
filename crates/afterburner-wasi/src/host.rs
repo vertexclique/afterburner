@@ -100,6 +100,15 @@ pub struct HostState {
     /// mode. Gated behind `daemon` because it's tokio-backed.
     #[cfg(feature = "daemon")]
     pub daemon_dgram: Option<Arc<crate::daemon_dgram::DaemonDgram>>,
+    /// Outbound HTTP coordinator — async per-shard. JS calls
+    /// `http.request` end up here (via `__host_http_request_async`),
+    /// the request runs on the daemon's Tokio runtime, and the
+    /// response comes back through the shard's event loop. Library
+    /// callers without a daemon Store (one-shot script mode) fall
+    /// back to the synchronous `__host_http_request` path so simple
+    /// fire-and-forget scripts still work.
+    #[cfg(feature = "daemon")]
+    pub daemon_http_outbound: Option<Arc<crate::daemon_http_outbound::DaemonHttpOutbound>>,
     /// Per-thrust SQLite shadow registry. Each opened
     /// `new sqlite3.Database(...)` runs in its own worker thread
     /// owned by this store; the field is just the lookup table that
@@ -187,6 +196,8 @@ impl HostState {
             daemon_tls: None,
             #[cfg(feature = "daemon")]
             daemon_dgram: None,
+            #[cfg(feature = "daemon")]
+            daemon_http_outbound: None,
             #[cfg(feature = "shadow-sqlite3")]
             sqlite3_shadow: Arc::new(
                 afterburner_node_compat::shadows::sqlite3::SqliteShadow::new(),

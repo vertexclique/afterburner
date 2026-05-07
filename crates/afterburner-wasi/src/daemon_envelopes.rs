@@ -16,9 +16,34 @@ use std::collections::BTreeMap;
 #[cfg(feature = "daemon")]
 use crate::daemon_dgram::DgramEvent;
 #[cfg(feature = "daemon")]
+use crate::daemon_http_outbound::HttpOutboundResponseEvent;
+#[cfg(feature = "daemon")]
 use crate::daemon_net::NetEvent;
 #[cfg(feature = "daemon")]
 use crate::daemon_tls::TlsEvent;
+
+/// Outbound HTTP response → daemon-event envelope. Carries the
+/// originating `req_id` so the JS dispatcher can resolve the
+/// matching `globalThis.__ab_http_pending[req_id]` Promise. Body
+/// rides as base64 for binary safety (npm tarballs / image data
+/// would corrupt through JSON's UTF-8 string slot otherwise) plus
+/// a lossy text mirror for legacy JSON-only callers.
+#[cfg(feature = "daemon")]
+pub fn http_outbound_response_to_envelope(event: &HttpOutboundResponseEvent) -> serde_json::Value {
+    let mut headers = serde_json::Map::new();
+    for (k, v) in &event.headers {
+        headers.insert(k.clone(), serde_json::Value::String(v.clone()));
+    }
+    serde_json::json!({
+        "kind": "http-response",
+        "req_id": event.req_id,
+        "status": event.status,
+        "headers": serde_json::Value::Object(headers),
+        "body": event.body_text,
+        "body_b64": event.body_b64,
+        "error": event.error.as_deref().unwrap_or(""),
+    })
+}
 
 /// HTTP request → daemon-event envelope. The body is utf8-decoded
 /// (lossy) on the way in; binary bodies should base64-encode.

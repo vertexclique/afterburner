@@ -11,6 +11,8 @@ pub mod daemon_dgram;
 pub mod daemon_envelopes;
 pub mod daemon_http;
 #[cfg(feature = "daemon")]
+pub mod daemon_http_outbound;
+#[cfg(feature = "daemon")]
 pub mod daemon_net;
 #[cfg(feature = "daemon")]
 pub mod daemon_port_claims;
@@ -36,6 +38,8 @@ pub use columnar::{
 #[cfg(feature = "daemon")]
 pub use daemon_dgram::{DaemonDgram, DgramEvent};
 pub use daemon_http::{DaemonHttp, ReplyEnvelope};
+#[cfg(feature = "daemon")]
+pub use daemon_http_outbound::{DaemonHttpOutbound, HttpOutboundResponseEvent};
 #[cfg(feature = "daemon")]
 pub use daemon_net::{DaemonNet, NetEvent};
 #[cfg(feature = "daemon")]

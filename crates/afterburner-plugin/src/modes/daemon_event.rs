@@ -316,6 +316,31 @@ const DISPATCH_SOURCE: &str = r#"
         }
     } else if (kind === 'dgram-close') {
         // Polyfill-side close already emitted the JS event; no-op here.
+    } else if (kind === 'http-response') {
+        // Outbound HTTP request completed. Look up the matching
+        // pending Promise resolver in `globalThis.__ab_http_pending`
+        // and feed it the response. The resolver is set up by
+        // `polyfills/http.js::requestImpl` when it dispatched the
+        // request via `__host_http_request_async`.
+        const table = globalThis.__ab_http_pending || {};
+        const slot = table[ev.req_id];
+        if (slot && typeof slot.resolve === 'function') {
+            try {
+                slot.resolve({
+                    status: ev.status | 0,
+                    headers: ev.headers || {},
+                    body: ev.body || '',
+                    body_b64: ev.body_b64 || '',
+                    error: ev.error || '',
+                });
+            } catch (e) {
+                try { console.error('http-response dispatch:', (e && e.stack) || e); } catch (_) {}
+            }
+            delete table[ev.req_id];
+        }
+        // Unknown req_id (resolver missing) is silently dropped — the
+        // Rust side may have hit a race between the response queue
+        // and a JS-side abort that already cleared the slot.
     } else {
         // Unknown event kind — surface on stderr for diagnosis.
         try { console.error('daemon-event: unknown kind=' + kind); } catch (_) {}

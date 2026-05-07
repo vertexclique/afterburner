@@ -105,6 +105,21 @@ unsafe extern "C" {
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
+    /// Spawn an outbound HTTP request on the daemon's Tokio runtime
+    /// and return the new `req_id` immediately. The completed
+    /// response lands in JS as a `daemon-event` of kind
+    /// `http-response`. Returns `-1` when no daemon coordinator is
+    /// attached so the JS shim can fall back to the synchronous
+    /// `host_http_request` path. `req_id` is a positive `i64`
+    /// monotonically increasing per host process.
+    pub fn host_http_request_async(
+        method_ptr: *const u8,
+        method_len: u32,
+        url_ptr: *const u8,
+        url_len: u32,
+        body_ptr: *const u8,
+        body_len: u32,
+    ) -> i64;
     pub fn host_dns_lookup(
         name_ptr: *const u8,
         name_len: u32,
