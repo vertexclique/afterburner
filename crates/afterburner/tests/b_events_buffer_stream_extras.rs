@@ -120,7 +120,7 @@ fn events_capture_rejection_symbol_is_a_well_known_symbol() {
 // ---- buffer ---------------------------------------------------------
 
 #[test]
-fn buffer_module_constants_match_kMaxLength() {
+fn buffer_module_constants_match_k_max_length() {
     let out = run_inline(
         r#"
         const buf = require('buffer');
