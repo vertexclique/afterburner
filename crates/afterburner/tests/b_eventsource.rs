@@ -132,7 +132,7 @@ fn event_source_message_event_fires_on_data_line() {
 }
 
 #[test]
-fn event_source_named_event_fires_via_addEventListener() {
+fn event_source_named_event_fires_via_add_event_listener() {
     let port = pick_port();
     let body = "event: ping\ndata: 1\n\nevent: ping\ndata: 2\n\n".to_string();
     let server = thread::Builder::new()
@@ -192,7 +192,7 @@ fn event_source_multiline_data_field_concatenates() {
 }
 
 #[test]
-fn event_source_id_field_updates_lastEventId() {
+fn event_source_id_field_updates_last_event_id() {
     let port = pick_port();
     let body = "id: 42\nevent: tick\ndata: ok\n\n".to_string();
     let server = thread::Builder::new()
