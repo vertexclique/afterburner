@@ -1388,6 +1388,79 @@
     // no-op once the engine catches up. Idempotent + safe.
     // ============================================================
 
+    // ---- `self` / `addEventListener` on globalThis (Web shim) -------
+    //
+    // Browser / Worker code routinely references `self` as the global
+    // and `addEventListener` as a top-level binding. Node 22+ ships
+    // both; without them, polyfills like `whatwg-url`, `web-streams-
+    // polyfill`, and undici crash at module init with
+    // "self is not defined".
+    if (typeof globalThis.self === 'undefined') {
+        globalThis.self = globalThis;
+    }
+    if (typeof globalThis.addEventListener !== 'function'
+        && typeof globalThis.EventTarget === 'function') {
+        try {
+            var _gtTarget = new globalThis.EventTarget();
+            globalThis.addEventListener =
+                _gtTarget.addEventListener.bind(_gtTarget);
+            globalThis.removeEventListener =
+                _gtTarget.removeEventListener.bind(_gtTarget);
+            globalThis.dispatchEvent =
+                _gtTarget.dispatchEvent.bind(_gtTarget);
+        } catch (_) {
+            globalThis.addEventListener = function() {};
+            globalThis.removeEventListener = function() {};
+            globalThis.dispatchEvent = function() { return true; };
+        }
+    }
+
+    // ---- Event subclasses (Node 22+) -------------------------------
+    //
+    // `ProgressEvent` / `CloseEvent` / `ErrorEvent` are common
+    // Web-API constructors that real apps reach for in fetch-style
+    // upload progress code, WebSocket close handling, and error
+    // bubbling from worker threads. Lightweight subclasses of Event
+    // with the canonical extra fields.
+    if (typeof globalThis.ProgressEvent !== 'function' && typeof globalThis.Event === 'function') {
+        globalThis.ProgressEvent = function ProgressEvent(type, init) {
+            init = init || {};
+            globalThis.Event.call(this, type, init);
+            this.lengthComputable = !!init.lengthComputable;
+            this.loaded = init.loaded || 0;
+            this.total = init.total || 0;
+        };
+        globalThis.ProgressEvent.prototype =
+            Object.create(globalThis.Event.prototype);
+        globalThis.ProgressEvent.prototype.constructor = globalThis.ProgressEvent;
+    }
+    if (typeof globalThis.CloseEvent !== 'function' && typeof globalThis.Event === 'function') {
+        globalThis.CloseEvent = function CloseEvent(type, init) {
+            init = init || {};
+            globalThis.Event.call(this, type, init);
+            this.code = init.code || 0;
+            this.reason = init.reason || '';
+            this.wasClean = !!init.wasClean;
+        };
+        globalThis.CloseEvent.prototype =
+            Object.create(globalThis.Event.prototype);
+        globalThis.CloseEvent.prototype.constructor = globalThis.CloseEvent;
+    }
+    if (typeof globalThis.ErrorEvent !== 'function' && typeof globalThis.Event === 'function') {
+        globalThis.ErrorEvent = function ErrorEvent(type, init) {
+            init = init || {};
+            globalThis.Event.call(this, type, init);
+            this.message = init.message || '';
+            this.filename = init.filename || '';
+            this.lineno = init.lineno || 0;
+            this.colno = init.colno || 0;
+            this.error = init.error || null;
+        };
+        globalThis.ErrorEvent.prototype =
+            Object.create(globalThis.Event.prototype);
+        globalThis.ErrorEvent.prototype.constructor = globalThis.ErrorEvent;
+    }
+
     // ---- Symbol.dispose / Symbol.asyncDispose (Node 20+) ------------
     // Required for `using x = …;` / `await using x = …;` (TC39
     // explicit-resource-management). The well-known Symbols sit on
