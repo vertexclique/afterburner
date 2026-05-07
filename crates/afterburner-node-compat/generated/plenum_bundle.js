@@ -766,6 +766,41 @@
         return AbortSignal.abort(new Error('AbortSignal.timeout: no event loop'));
     };
 
+    // AbortSignal.any (Node 20+) — return a fresh signal that aborts
+    // as soon as ANY of the input signals aborts. If any input signal
+    // is already aborted at construction time the returned signal
+    // is born aborted with that reason.
+    AbortSignal.any = function(signals) {
+        var arr = Array.from(signals || []);
+        var s = new AbortSignal();
+        for (var i = 0; i < arr.length; i++) {
+            var sig = arr[i];
+            if (sig && sig.aborted) {
+                s.aborted = true;
+                s.reason = sig.reason !== undefined ? sig.reason : new Error('Aborted');
+                return s;
+            }
+        }
+        var fired = false;
+        function fire(reason) {
+            if (fired || s.aborted) return;
+            fired = true;
+            s.aborted = true;
+            s.reason = reason !== undefined ? reason : new Error('Aborted');
+            var listeners = s._listeners.slice();
+            for (var j = 0; j < listeners.length; j++) {
+                try { listeners[j]({ type: 'abort' }); } catch (_) {}
+            }
+        }
+        for (var k = 0; k < arr.length; k++) {
+            (function(child) {
+                if (!child || typeof child.addEventListener !== 'function') return;
+                child.addEventListener('abort', function() { fire(child.reason); }, { once: true });
+            })(arr[k]);
+        }
+        return s;
+    };
+
     function AbortController() {
         this.signal = new AbortSignal();
     }
