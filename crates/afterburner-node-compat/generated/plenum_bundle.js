@@ -15158,6 +15158,59 @@ __register_module('wasi', function(module, exports, require) {
         _relinkPrototype(globalThis.TextDecoderStream);
     }
 
+    // ---- Atomics (single-threaded fallback) -----------------------
+    //
+    // QuickJS doesn't ship Atomics (it requires SharedArrayBuffer +
+    // a thread runtime). Burn is single-threaded inside one shard,
+    // so SharedArrayBuffer is effectively a normal ArrayBuffer.
+    // Atomics ops simplify to their non-atomic equivalents because
+    // there's no other thread to race with; the wait/notify
+    // primitives raise — single-threaded code that calls `wait()`
+    // would deadlock anyway, so a typed error beats a hang.
+    if (typeof globalThis.Atomics === 'undefined') {
+        function _ta(view) {
+            if (!ArrayBuffer.isView(view)) {
+                throw new TypeError('Atomics: argument is not a TypedArray');
+            }
+            return view;
+        }
+        globalThis.Atomics = {
+            load: function(view, idx) { return _ta(view)[idx]; },
+            store: function(view, idx, value) { _ta(view)[idx] = value; return value; },
+            add: function(view, idx, value) {
+                var v = _ta(view)[idx]; view[idx] = v + value; return v;
+            },
+            sub: function(view, idx, value) {
+                var v = _ta(view)[idx]; view[idx] = v - value; return v;
+            },
+            and: function(view, idx, value) {
+                var v = _ta(view)[idx]; view[idx] = v & value; return v;
+            },
+            or: function(view, idx, value) {
+                var v = _ta(view)[idx]; view[idx] = v | value; return v;
+            },
+            xor: function(view, idx, value) {
+                var v = _ta(view)[idx]; view[idx] = v ^ value; return v;
+            },
+            exchange: function(view, idx, value) {
+                var v = _ta(view)[idx]; view[idx] = value; return v;
+            },
+            compareExchange: function(view, idx, expected, replacement) {
+                var v = _ta(view)[idx];
+                if (v === expected) view[idx] = replacement;
+                return v;
+            },
+            isLockFree: function(_size) { return true; },
+            wait: function(_view, _idx, _value, _timeout) {
+                throw new TypeError('Atomics.wait: only supported on shared memory (burn is single-threaded)');
+            },
+            notify: function(_view, _idx, _count) { return 0; },
+            waitAsync: function(_view, _idx, _value, _timeout) {
+                return { async: true, value: Promise.resolve('not-equal') };
+            },
+        };
+    }
+
     // ---- Uint8Array base64 / hex (Stage 3 / Node 22+) -------------
     //
     // `arr.toBase64({alphabet?, omitPadding?})` /
