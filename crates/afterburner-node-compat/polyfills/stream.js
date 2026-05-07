@@ -107,6 +107,7 @@ __register_module('stream', function(module, exports, require) {
         if (this._destroyed) return this;
         this._destroyed = true;
         this._readable = false;
+        if (err) this.errored = err;
         var self = this;
         Promise.resolve().then(function() {
             if (err) self.emit('error', err);
@@ -278,6 +279,7 @@ __register_module('stream', function(module, exports, require) {
         if (this._destroyed) return this;
         this._destroyed = true;
         this._writable = false;
+        if (err) this.errored = err;
         var self = this;
         Promise.resolve().then(function() {
             if (err) self.emit('error', err);
@@ -626,6 +628,51 @@ __register_module('stream', function(module, exports, require) {
         return [a, b];
     }
 
+    /// `stream.isDisturbed` / `isErrored` / `isReadable` — Node 16+
+    /// static probes used by undici and friends to decide whether a
+    /// stream has been touched. We expose them as best-effort
+    /// duck-typed checks against our internal flags so consumers don't
+    /// crash on probe.
+    function isDisturbed(s) {
+        if (s == null) return false;
+        return !!(s._readableState && (s._readableState.dataEmitted ||
+            s._readableState.endEmitted || s._readableState.errored ||
+            s._readableState.destroyed)) ||
+            !!(s._writableState && (s._writableState.errored ||
+                s._writableState.destroyed)) ||
+            !!s._disturbed;
+    }
+    function isErrored(s) {
+        if (s == null) return false;
+        return !!(s.errored || (s._readableState && s._readableState.errored) ||
+            (s._writableState && s._writableState.errored));
+    }
+    function isReadable(s) {
+        if (s == null || typeof s.read !== 'function') return false;
+        var rs = s._readableState;
+        if (!rs) return true;
+        return !rs.endEmitted && !rs.errored && !rs.destroyed;
+    }
+    /// `stream.getDefaultHighWaterMark(objectMode)` / `set` — Node 19.9+
+    /// runtime knobs for default buffering. We track them in module
+    /// state; the streams we already have are constructed before this
+    /// is mutated, so the value is consultative for code that probes
+    /// the runtime configuration.
+    var _hwm = { byte: 16384, object: 16 };
+    function getDefaultHighWaterMark(objectMode) {
+        return objectMode ? _hwm.object : _hwm.byte;
+    }
+    function setDefaultHighWaterMark(objectMode, value) {
+        var v = (value | 0);
+        if (v <= 0) {
+            var err = new RangeError(
+                'highWaterMark must be a positive integer');
+            err.code = 'ERR_OUT_OF_RANGE';
+            throw err;
+        }
+        if (objectMode) _hwm.object = v; else _hwm.byte = v;
+    }
+
     exports.Readable       = Readable;
     exports.Writable       = Writable;
     exports.Duplex         = Duplex;
@@ -636,6 +683,11 @@ __register_module('stream', function(module, exports, require) {
     exports.compose        = compose;
     exports.addAbortSignal = addAbortSignal;
     exports.duplexPair     = duplexPair;
+    exports.isDisturbed    = isDisturbed;
+    exports.isErrored      = isErrored;
+    exports.isReadable     = isReadable;
+    exports.getDefaultHighWaterMark = getDefaultHighWaterMark;
+    exports.setDefaultHighWaterMark = setDefaultHighWaterMark;
     exports.Stream         = Stream;
     /// stream.promises — Node 15+ Promise-shaped wrappers for
     /// pipeline / finished. Same names as `require('stream/promises')`.
@@ -666,6 +718,11 @@ __register_module('stream', function(module, exports, require) {
     Stream.compose         = compose;
     Stream.addAbortSignal  = addAbortSignal;
     Stream.duplexPair      = duplexPair;
+    Stream.isDisturbed     = isDisturbed;
+    Stream.isErrored       = isErrored;
+    Stream.isReadable      = isReadable;
+    Stream.getDefaultHighWaterMark = getDefaultHighWaterMark;
+    Stream.setDefaultHighWaterMark = setDefaultHighWaterMark;
     Stream.promises        = exports.promises;
     Stream.Stream          = Stream;
 
