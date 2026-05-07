@@ -19,6 +19,102 @@
         globalThis.performance = globalThis.performance || {};
         globalThis.performance.now = function() { return Date.now(); };
     }
+    // Fill the rest of the User Timing Level 3 surface (Node 16+).
+    // `performance.mark/measure` keep an in-process buffer so libraries
+    // that probe `getEntries*` work even though our `performance.now`
+    // resolution is millisecond-grade. Real-time performance work
+    // benefits from `perf_hooks` directly; these globals satisfy
+    // structural probes.
+    if (typeof globalThis.performance.timeOrigin !== 'number') {
+        Object.defineProperty(globalThis.performance, 'timeOrigin', {
+            value: Date.now(), enumerable: true, writable: false, configurable: false,
+        });
+    }
+    if (!globalThis.performance._entries) globalThis.performance._entries = [];
+    if (typeof globalThis.performance.mark !== 'function') {
+        globalThis.performance.mark = function(name, options) {
+            var entry = {
+                name: String(name),
+                entryType: 'mark',
+                startTime: (options && typeof options.startTime === 'number')
+                    ? options.startTime : globalThis.performance.now(),
+                duration: 0,
+                detail: options && options.detail,
+            };
+            globalThis.performance._entries.push(entry);
+            return entry;
+        };
+    }
+    if (typeof globalThis.performance.measure !== 'function') {
+        globalThis.performance.measure = function(name, startMarkOrOpts, endMark) {
+            var startTime = 0;
+            var endTime = globalThis.performance.now();
+            var detail;
+            if (typeof startMarkOrOpts === 'string') {
+                var startE = globalThis.performance._entries.find(function(e) {
+                    return e.name === startMarkOrOpts && e.entryType === 'mark';
+                });
+                if (startE) startTime = startE.startTime;
+            } else if (startMarkOrOpts && typeof startMarkOrOpts === 'object') {
+                if (typeof startMarkOrOpts.start === 'number') startTime = startMarkOrOpts.start;
+                if (typeof startMarkOrOpts.end === 'number') endTime = startMarkOrOpts.end;
+                if (typeof startMarkOrOpts.duration === 'number') {
+                    endTime = startTime + startMarkOrOpts.duration;
+                }
+                detail = startMarkOrOpts.detail;
+            }
+            if (typeof endMark === 'string') {
+                var endE = globalThis.performance._entries.find(function(e) {
+                    return e.name === endMark && e.entryType === 'mark';
+                });
+                if (endE) endTime = endE.startTime;
+            }
+            var entry = {
+                name: String(name),
+                entryType: 'measure',
+                startTime: startTime,
+                duration: endTime - startTime,
+                detail: detail,
+            };
+            globalThis.performance._entries.push(entry);
+            return entry;
+        };
+    }
+    if (typeof globalThis.performance.clearMarks !== 'function') {
+        globalThis.performance.clearMarks = function(name) {
+            globalThis.performance._entries = globalThis.performance._entries.filter(function(e) {
+                if (e.entryType !== 'mark') return true;
+                return name !== undefined && e.name !== name;
+            });
+        };
+    }
+    if (typeof globalThis.performance.clearMeasures !== 'function') {
+        globalThis.performance.clearMeasures = function(name) {
+            globalThis.performance._entries = globalThis.performance._entries.filter(function(e) {
+                if (e.entryType !== 'measure') return true;
+                return name !== undefined && e.name !== name;
+            });
+        };
+    }
+    if (typeof globalThis.performance.getEntries !== 'function') {
+        globalThis.performance.getEntries = function() {
+            return globalThis.performance._entries.slice();
+        };
+    }
+    if (typeof globalThis.performance.getEntriesByName !== 'function') {
+        globalThis.performance.getEntriesByName = function(name, type) {
+            return globalThis.performance._entries.filter(function(e) {
+                if (e.name !== name) return false;
+                if (type !== undefined && e.entryType !== type) return false;
+                return true;
+            });
+        };
+    }
+    if (typeof globalThis.performance.getEntriesByType !== 'function') {
+        globalThis.performance.getEntriesByType = function(type) {
+            return globalThis.performance._entries.filter(function(e) { return e.entryType === type; });
+        };
+    }
 
     // `queueMicrotask` — schedule a microtask. QuickJS supports
     // Promise.then which gives us the microtask queue for free.
