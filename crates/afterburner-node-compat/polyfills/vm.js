@@ -135,6 +135,22 @@ __register_module('vm', function(module, exports, require) {
     exports.runInContext = runInContext;
     exports.compileFunction = compileFunction;
     exports.Script = Script;
+    /// `vm.measureMemory` (Node 13.9+) returns a Promise resolving to
+    /// V8's heap-stats snapshot. We don't have a real V8 measurement
+    /// API, but we expose the canonical shape so probe-shaped libs
+    /// (clinic, 0x) don't crash on init. The numbers come from
+    /// `process.memoryUsage()` so they reflect real WASM heap pressure.
+    exports.measureMemory = function(options) {
+        var mode = (options && options.mode) || 'summary';
+        var u = process.memoryUsage();
+        return Promise.resolve({
+            total: { jsMemoryEstimate: u.heapUsed, jsMemoryRange: [u.heapUsed, u.heapTotal] },
+            current: mode === 'detailed'
+                ? { jsMemoryEstimate: u.heapUsed, jsMemoryRange: [u.heapUsed, u.heapTotal] }
+                : undefined,
+            other: mode === 'detailed' ? [] : undefined,
+        });
+    };
     exports.SourceTextModule = unsupportedModule('SourceTextModule');
     exports.SyntheticModule = unsupportedModule('SyntheticModule');
     exports.Module = unsupportedModule('Module');

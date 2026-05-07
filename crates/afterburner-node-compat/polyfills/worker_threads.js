@@ -288,7 +288,13 @@ __register_module('worker_threads', function(module, exports, require) {
             'worker_threads: standalone MessagePort is not implemented in burn yet'
         );
     };
-    exports.markAsUntransferable = function() {};
+    var _untransferable = new WeakSet();
+    exports.markAsUntransferable = function(value) {
+        try { _untransferable.add(value); } catch (_) {}
+    };
+    exports.isMarkedAsUntransferable = function(value) {
+        try { return _untransferable.has(value); } catch (_) { return false; }
+    };
     exports.moveMessagePortToContext = function() {
         throw new Error(
             'worker_threads: moveMessagePortToContext is not implemented in burn'
