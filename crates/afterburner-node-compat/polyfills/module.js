@@ -149,13 +149,70 @@ __register_module('module', function(module, exports, require) {
         this.parent = parent || null;
     }
     Module.prototype.require = function(id) { return require(id); };
-    Module.prototype.load = function() { this.loaded = true; };
+    Module.prototype.load = function(filename) {
+        // Run the file as a module — corepack's `loadMainModule` does
+        // `module.load(modulePath)` to run the entry script. We
+        // delegate to the require resolver and copy the resulting
+        // exports onto this Module instance so callers that read
+        // `module.exports` after `load()` see the right shape.
+        if (filename) {
+            this.filename = filename;
+            this.id = filename;
+        }
+        try {
+            var loaded = require(this.filename || this.id);
+            if (loaded !== undefined) this.exports = loaded;
+        } finally {
+            this.loaded = true;
+        }
+    };
     Module._cache = (globalThis.require && globalThis.require.cache) || {};
     Module._pathCache = {};
     Module._extensions = {
         '.js': function() {},
         '.json': function() {},
     };
+    // `module._resolveFilename(spec, parent, isMain, options)` — burn's
+    // resolver doesn't expose a separate resolve step; we approximate
+    // by best-effort: absolute paths return as-is, relative paths
+    // resolve against the parent's filename, bare names go through
+    // `require.resolve` (which exists when the entry-script wrapper
+    // is in scope).
+    Module._resolveFilename = function(spec, parent, _isMain, _options) {
+        if (typeof spec !== 'string') return String(spec);
+        if (spec.charAt(0) === '/' || /^[A-Za-z]:[\\/]/.test(spec)) return spec;
+        if (typeof require !== 'undefined' && typeof require.resolve === 'function') {
+            try { return require.resolve(spec); } catch (_) {}
+        }
+        if (parent && parent.filename) {
+            var base = parent.filename.replace(/\/[^/]*$/, '');
+            return base + '/' + spec;
+        }
+        return spec;
+    };
+    // `module._nodeModulePaths(dir)` — list of `node_modules` candidate
+    // directories from `dir` up to the filesystem root. Matches
+    // Node's behavior; npm / pnpm / corepack use this to walk up.
+    Module._nodeModulePaths = function(from) {
+        var paths = [];
+        var d = String(from || '/');
+        while (true) {
+            paths.push(d.replace(/\/$/, '') + '/node_modules');
+            if (d === '/' || d === '' || /^[A-Za-z]:[\\/]?$/.test(d)) break;
+            var parent = d.replace(/\/[^/]*$/, '');
+            if (parent === d) break;
+            d = parent || '/';
+        }
+        return paths;
+    };
+    Module.wrap = function(script) {
+        return '(function (exports, require, module, __filename, __dirname) { ' +
+               script + '\n});';
+    };
+    Module.wrapper = [
+        '(function (exports, require, module, __filename, __dirname) { ',
+        '\n});',
+    ];
     Module.builtinModules = BUILTINS.slice();
     Module.createRequire = createRequire;
     Module.isBuiltin = isBuiltin;
