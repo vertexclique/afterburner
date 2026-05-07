@@ -170,6 +170,7 @@ dependencies = [
  "tempfile",
  "ureq",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

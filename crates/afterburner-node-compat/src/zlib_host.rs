@@ -40,3 +40,17 @@ pub fn gunzip_sync(data: &[u8]) -> Result<Vec<u8>> {
         .map_err(|e| AfterburnerError::Host(format!("zlib.gunzipSync: {e}")))?;
     Ok(out)
 }
+
+/// `zlib.zstdCompressSync` (Node 24+ stable). Default compression
+/// level (3) matches Node's default. The host-side `zstd` crate
+/// links a statically-bundled libzstd, so no system dependency.
+pub fn zstd_compress_sync(data: &[u8]) -> Result<Vec<u8>> {
+    zstd::stream::encode_all(data, 3)
+        .map_err(|e| AfterburnerError::Host(format!("zlib.zstdCompressSync: {e}")))
+}
+
+/// `zlib.zstdDecompressSync` (Node 24+ stable).
+pub fn zstd_decompress_sync(data: &[u8]) -> Result<Vec<u8>> {
+    zstd::stream::decode_all(data)
+        .map_err(|e| AfterburnerError::Host(format!("zlib.zstdDecompressSync: {e}")))
+}

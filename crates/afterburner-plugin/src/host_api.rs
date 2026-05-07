@@ -221,6 +221,18 @@ unsafe extern "C" {
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
+    pub fn host_zlib_zstd_compress_sync(
+        in_ptr: *const u8,
+        in_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_zlib_zstd_decompress_sync(
+        in_ptr: *const u8,
+        in_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
 
     // ---- sign / verify (RSA + ECDSA) --------------------------------
     //

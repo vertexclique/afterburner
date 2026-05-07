@@ -1094,6 +1094,14 @@ fn install_zlib<'js>(globals: &Object<'js>) {
     bind_zlib!("__host_zlib_inflate_sync", host_zlib_inflate_sync);
     bind_zlib!("__host_zlib_gzip_sync", host_zlib_gzip_sync);
     bind_zlib!("__host_zlib_gunzip_sync", host_zlib_gunzip_sync);
+    bind_zlib!(
+        "__host_zlib_zstd_compress_sync",
+        host_zlib_zstd_compress_sync
+    );
+    bind_zlib!(
+        "__host_zlib_zstd_decompress_sync",
+        host_zlib_zstd_decompress_sync
+    );
 }
 
 fn install_hostctx<'js>(globals: &Object<'js>) {

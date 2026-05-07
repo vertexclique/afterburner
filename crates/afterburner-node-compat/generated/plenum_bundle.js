@@ -12789,46 +12789,74 @@ __register_module('wasi', function(module, exports, require) {
     }
 
     // ----- CompressionStream / DecompressionStream ------------------
-    // Node 17+. Wrap zlib for the underlying codec; defer the
-    // require to first call so Wizer pre-init doesn't reach the
-    // host bridge.
-    if (typeof globalThis.CompressionStream !== 'function' && typeof globalThis.TransformStream === 'function') {
-        var CS = function CompressionStream(format) {
-            globalThis.TransformStream.call(this, {
-                transform: function(chunk, controller) {
-                    try {
-                        var nz = require('zlib');
-                        var Buf = globalThis.Buffer;
-                        var buf = Buf && Buf.from ? Buf.from(chunk) : chunk;
-                        var syncFn = (format === 'gzip') ? nz.gzipSync :
-                                     (format === 'deflate') ? nz.deflateSync :
-                                     (format === 'deflate-raw') ? nz.deflateRawSync : null;
-                        if (syncFn) controller.enqueue(syncFn(buf));
-                        else controller.enqueue(chunk);
-                    } catch (e) { controller.error(e); }
-                },
-            });
+    //
+    // Node 17+ / WHATWG Compression Streams. Each instance is a
+    // TransformStream that pipes chunks through a sync zlib codec.
+    // Supported formats: `gzip` / `deflate` / `deflate-raw`.
+    // `Reflect.construct` is the only path that produces a real
+    // TransformStream subclass under QuickJS — `.call(this, …)` on
+    // class constructors throws a TypeError.
+    function _makeCompressFn(format) {
+        return function(chunk, controller) {
+            try {
+                var nz = require('zlib');
+                var Buf = globalThis.Buffer;
+                var buf = Buf && Buf.from ? Buf.from(chunk) : chunk;
+                var syncFn = (format === 'gzip') ? nz.gzipSync
+                           : (format === 'deflate') ? nz.deflateSync
+                           : (format === 'deflate-raw') ? nz.deflateRawSync
+                           : (format === 'zstd') ? nz.zstdCompressSync
+                           : null;
+                if (!syncFn) {
+                    controller.error(new TypeError(
+                        "CompressionStream: unknown format '" + format + "'"));
+                    return;
+                }
+                controller.enqueue(syncFn(buf));
+            } catch (e) { controller.error(e); }
         };
-        globalThis.CompressionStream = CS;
     }
-    if (typeof globalThis.DecompressionStream !== 'function' && typeof globalThis.TransformStream === 'function') {
-        var DS = function DecompressionStream(format) {
-            globalThis.TransformStream.call(this, {
-                transform: function(chunk, controller) {
-                    try {
-                        var nz = require('zlib');
-                        var Buf = globalThis.Buffer;
-                        var buf = Buf && Buf.from ? Buf.from(chunk) : chunk;
-                        var syncFn = (format === 'gzip') ? nz.gunzipSync :
-                                     (format === 'deflate') ? nz.inflateSync :
-                                     (format === 'deflate-raw') ? nz.inflateRawSync : null;
-                        if (syncFn) controller.enqueue(syncFn(buf));
-                        else controller.enqueue(chunk);
-                    } catch (e) { controller.error(e); }
-                },
-            });
+    function _makeDecompressFn(format) {
+        return function(chunk, controller) {
+            try {
+                var nz = require('zlib');
+                var Buf = globalThis.Buffer;
+                var buf = Buf && Buf.from ? Buf.from(chunk) : chunk;
+                var syncFn = (format === 'gzip') ? nz.gunzipSync
+                           : (format === 'deflate') ? nz.inflateSync
+                           : (format === 'deflate-raw') ? nz.inflateRawSync
+                           : (format === 'zstd') ? nz.zstdDecompressSync
+                           : null;
+                if (!syncFn) {
+                    controller.error(new TypeError(
+                        "DecompressionStream: unknown format '" + format + "'"));
+                    return;
+                }
+                controller.enqueue(syncFn(buf));
+            } catch (e) { controller.error(e); }
         };
-        globalThis.DecompressionStream = DS;
+    }
+    if (typeof globalThis.CompressionStream !== 'function'
+        && typeof globalThis.TransformStream === 'function') {
+        globalThis.CompressionStream = function CompressionStream(format) {
+            return Reflect.construct(globalThis.TransformStream,
+                [{ transform: _makeCompressFn(format) }],
+                CompressionStream);
+        };
+        globalThis.CompressionStream.prototype =
+            Object.create(globalThis.TransformStream.prototype);
+        globalThis.CompressionStream.prototype.constructor = globalThis.CompressionStream;
+    }
+    if (typeof globalThis.DecompressionStream !== 'function'
+        && typeof globalThis.TransformStream === 'function') {
+        globalThis.DecompressionStream = function DecompressionStream(format) {
+            return Reflect.construct(globalThis.TransformStream,
+                [{ transform: _makeDecompressFn(format) }],
+                DecompressionStream);
+        };
+        globalThis.DecompressionStream.prototype =
+            Object.create(globalThis.TransformStream.prototype);
+        globalThis.DecompressionStream.prototype.constructor = globalThis.DecompressionStream;
     }
     if (typeof globalThis.URL !== 'function') {
         var urlMod = require('url');
@@ -14073,10 +14101,12 @@ __register_module('zlib', function(module, exports, require) {
         return checkAndFromBase64(raw, op);
     }
 
-    exports.deflateSync  = function(input) { return call('deflate_sync', input);  };
-    exports.inflateSync  = function(input) { return call('inflate_sync', input);  };
-    exports.gzipSync     = function(input) { return call('gzip_sync',    input);  };
-    exports.gunzipSync   = function(input) { return call('gunzip_sync',  input);  };
+    exports.deflateSync       = function(input) { return call('deflate_sync', input);  };
+    exports.inflateSync       = function(input) { return call('inflate_sync', input);  };
+    exports.gzipSync          = function(input) { return call('gzip_sync',    input);  };
+    exports.gunzipSync        = function(input) { return call('gunzip_sync',  input);  };
+    exports.zstdCompressSync  = function(input) { return call('zstd_compress_sync',   input); };
+    exports.zstdDecompressSync = function(input) { return call('zstd_decompress_sync', input); };
 
     // Promise wrappers — handy, free, no actual async under the hood.
     function asPromise(fn) {
@@ -14086,10 +14116,12 @@ __register_module('zlib', function(module, exports, require) {
             });
         };
     }
-    exports.deflate = asPromise(exports.deflateSync);
-    exports.inflate = asPromise(exports.inflateSync);
-    exports.gzip    = asPromise(exports.gzipSync);
-    exports.gunzip  = asPromise(exports.gunzipSync);
+    exports.deflate       = asPromise(exports.deflateSync);
+    exports.inflate       = asPromise(exports.inflateSync);
+    exports.gzip          = asPromise(exports.gzipSync);
+    exports.gunzip        = asPromise(exports.gunzipSync);
+    exports.zstdCompress  = asPromise(exports.zstdCompressSync);
+    exports.zstdDecompress = asPromise(exports.zstdDecompressSync);
 
     // Aliases for the *-raw flavours (no zlib header). flate2 doesn't
     // expose the raw codec through our current host bridge, so we

@@ -1973,6 +1973,8 @@ fn wrap_zlib(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         ("host_zlib_inflate_sync", ZlibOp::Inflate),
         ("host_zlib_gzip_sync", ZlibOp::Gzip),
         ("host_zlib_gunzip_sync", ZlibOp::Gunzip),
+        ("host_zlib_zstd_compress_sync", ZlibOp::ZstdCompress),
+        ("host_zlib_zstd_decompress_sync", ZlibOp::ZstdDecompress),
     ] {
         linker
             .func_wrap(
@@ -2005,6 +2007,8 @@ fn wrap_zlib(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                         ZlibOp::Inflate => zlib_host::inflate_sync(&input),
                         ZlibOp::Gzip => zlib_host::gzip_sync(&input),
                         ZlibOp::Gunzip => zlib_host::gunzip_sync(&input),
+                        ZlibOp::ZstdCompress => zlib_host::zstd_compress_sync(&input),
+                        ZlibOp::ZstdDecompress => zlib_host::zstd_decompress_sync(&input),
                     };
                     match result {
                         Ok(bytes) => {
@@ -2026,6 +2030,8 @@ enum ZlibOp {
     Inflate,
     Gzip,
     Gunzip,
+    ZstdCompress,
+    ZstdDecompress,
 }
 
 // ---- host context (embedder-facing) --------------------------------------

@@ -36,6 +36,10 @@ hex.workspace = true
 uuid.workspace = true
 ureq.workspace = true
 flate2.workspace = true
+# zstd codec (Node 24+ stable). Statically linked C library plus a
+# safe-Rust wrapper. Used by `zlib.zstdCompress*` / `zstdDecompress*`
+# host fns and the `compression`-stream `'zstd'` format.
+zstd = { version = "0.13", default-features = false }
 kovan-channel.workspace = true
 # B7 dns expansion — hickory-resolver replaces ToSocketAddrs for
 # record-type-aware lookups (MX/TXT/CNAME/...). We run it

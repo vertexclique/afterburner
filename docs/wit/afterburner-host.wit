@@ -225,10 +225,12 @@ interface dns {
 interface zlib {
     use types.{host-error};
 
-    deflate-sync: func(input: list<u8>) -> result<list<u8>, host-error>;
-    inflate-sync: func(input: list<u8>) -> result<list<u8>, host-error>;
-    gzip-sync:    func(input: list<u8>) -> result<list<u8>, host-error>;
-    gunzip-sync:  func(input: list<u8>) -> result<list<u8>, host-error>;
+    deflate-sync:        func(input: list<u8>) -> result<list<u8>, host-error>;
+    inflate-sync:        func(input: list<u8>) -> result<list<u8>, host-error>;
+    gzip-sync:           func(input: list<u8>) -> result<list<u8>, host-error>;
+    gunzip-sync:         func(input: list<u8>) -> result<list<u8>, host-error>;
+    zstd-compress-sync:  func(input: list<u8>) -> result<list<u8>, host-error>;
+    zstd-decompress-sync: func(input: list<u8>) -> result<list<u8>, host-error>;
 }
 
 // ---- state store --------------------------------------------------------

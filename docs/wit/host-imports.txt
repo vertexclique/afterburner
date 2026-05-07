@@ -71,6 +71,7 @@ host_http_close
 host_http_listen
 host_http_reply
 host_http_request
+host_http_request_async
 host_last_error
 host_net_close_server
 host_net_connect
@@ -141,3 +142,5 @@ host_zlib_deflate_sync
 host_zlib_gunzip_sync
 host_zlib_gzip_sync
 host_zlib_inflate_sync
+host_zlib_zstd_compress_sync
+host_zlib_zstd_decompress_sync

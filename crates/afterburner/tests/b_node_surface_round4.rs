@@ -293,6 +293,38 @@ fn fs_statfs_sync_returns_filesystem_info_shape() {
     assert_marker(&out, "STATFS-OK");
 }
 
+// ---- zlib.zstd ------------------------------------------------------
+
+#[test]
+fn zlib_zstd_compress_and_decompress_round_trips() {
+    let out = run_inline(
+        r#"
+        const zlib = require('zlib');
+        const data = Buffer.from('the quick brown fox '.repeat(64));
+        const enc = zlib.zstdCompressSync(data);
+        if (enc.length >= data.length) { console.log('FAIL no-compress', enc.length, data.length); process.exit(1); }
+        const dec = zlib.zstdDecompressSync(enc);
+        if (dec.toString('utf8') === data.toString('utf8')) console.log('ZSTD-OK');
+        else console.log('ZSTD-FAIL');
+        "#,
+    );
+    assert_marker(&out, "ZSTD-OK");
+}
+
+#[test]
+fn zlib_zstd_async_promise_form() {
+    let out = run_inline(
+        r#"
+        const zlib = require('zlib');
+        const data = Buffer.from('async zstd round-trip');
+        zlib.zstdCompress(data).then(zlib.zstdDecompress).then(b => {
+            if (b.toString('utf8') === 'async zstd round-trip') console.log('ZSTD-ASYNC-OK');
+        });
+        "#,
+    );
+    assert_marker(&out, "ZSTD-ASYNC-OK");
+}
+
 // ---- http.Server[Symbol.asyncDispose] -------------------------------
 
 #[test]
