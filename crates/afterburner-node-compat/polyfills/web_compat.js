@@ -3,14 +3,302 @@
 
 (function installWebCompat() {
     // structuredClone — ES2022. QuickJS-NG typically has it; fall back
-    // to a JSON deep-copy so scripts don't blow up if this runtime
-    // doesn't.
+    // to a type-preserving deep-copy. Pure JSON round-trip flattens
+    // Date / Map / Set / TypedArray / Buffer so we walk the graph by
+    // hand for those, and fall back to JSON for plain objects.
     if (typeof globalThis.structuredClone !== 'function') {
-        globalThis.structuredClone = function(value) {
-            if (value === undefined) return undefined;
-            return JSON.parse(JSON.stringify(value));
+        globalThis.structuredClone = function(value, _opts) {
+            return _structuredCloneInner(value, new Map());
         };
+        function _structuredCloneInner(v, seen) {
+            if (v === null || typeof v !== 'object') return v;
+            if (seen.has(v)) return seen.get(v);
+            // Date
+            if (v instanceof Date) { var d = new Date(v.getTime()); seen.set(v, d); return d; }
+            // RegExp
+            if (v instanceof RegExp) { var re = new RegExp(v.source, v.flags); seen.set(v, re); return re; }
+            // ArrayBuffer
+            if (v instanceof ArrayBuffer) {
+                var ab = new ArrayBuffer(v.byteLength);
+                new Uint8Array(ab).set(new Uint8Array(v));
+                seen.set(v, ab);
+                return ab;
+            }
+            // Typed arrays (preserves the constructor + offset/length)
+            if (ArrayBuffer.isView(v) && !(v instanceof DataView)) {
+                var TC = v.constructor;
+                var copy = new TC(v.length);
+                copy.set(v);
+                seen.set(v, copy);
+                return copy;
+            }
+            if (v instanceof DataView) {
+                var ab2 = new ArrayBuffer(v.byteLength);
+                new Uint8Array(ab2).set(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
+                var dv = new DataView(ab2);
+                seen.set(v, dv);
+                return dv;
+            }
+            // Map
+            if (v instanceof Map) {
+                var mm = new Map();
+                seen.set(v, mm);
+                v.forEach(function(val, key) {
+                    mm.set(_structuredCloneInner(key, seen), _structuredCloneInner(val, seen));
+                });
+                return mm;
+            }
+            // Set
+            if (v instanceof Set) {
+                var ss = new Set();
+                seen.set(v, ss);
+                v.forEach(function(val) { ss.add(_structuredCloneInner(val, seen)); });
+                return ss;
+            }
+            // Error
+            if (v instanceof Error) {
+                var EC = v.constructor;
+                var er = new EC(v.message);
+                if (v.stack) er.stack = v.stack;
+                seen.set(v, er);
+                return er;
+            }
+            // Array
+            if (Array.isArray(v)) {
+                var ar = new Array(v.length);
+                seen.set(v, ar);
+                for (var i = 0; i < v.length; i++) ar[i] = _structuredCloneInner(v[i], seen);
+                return ar;
+            }
+            // Plain object: walk keys.
+            var out = {};
+            seen.set(v, out);
+            var keys = Object.keys(v);
+            for (var k = 0; k < keys.length; k++) {
+                out[keys[k]] = _structuredCloneInner(v[keys[k]], seen);
+            }
+            return out;
+        }
     }
+
+    // ---- Intl stubs (JS engine doesn't ship full ICU) ---------------
+    //
+    // Real Intl needs ICU, which QuickJS doesn't bundle. Most
+    // libraries probe `typeof Intl !== 'undefined'` then call into
+    // `Intl.NumberFormat` / `Intl.DateTimeFormat` / `Intl.Collator`.
+    // We surface the constructors with English-only behavior so the
+    // probe + canonical formatting paths work; non-English locales
+    // fall back to ASCII formatting (caller can detect via
+    // `resolvedOptions().locale === 'en-US'`).
+    if (typeof globalThis.Intl !== 'object' || globalThis.Intl === null) {
+        var IntlObj = {};
+        function _toString(v) { return v == null ? '' : String(v); }
+
+        function NumberFormat(locales, options) {
+            if (!(this instanceof NumberFormat)) return new NumberFormat(locales, options);
+            this._opts = options || {};
+            this._locale = Array.isArray(locales) ? (locales[0] || 'en-US') : (locales || 'en-US');
+        }
+        NumberFormat.prototype.format = function(n) {
+            n = Number(n);
+            if (!isFinite(n)) {
+                if (isNaN(n)) return 'NaN';
+                return n > 0 ? '∞' : '-∞';
+            }
+            var opts = this._opts;
+            // minimumFractionDigits / maximumFractionDigits.
+            var min = opts.minimumFractionDigits;
+            var max = opts.maximumFractionDigits;
+            var fixed = (typeof max === 'number') ? max
+                      : (typeof min === 'number') ? min
+                      : undefined;
+            var s = (typeof fixed === 'number') ? n.toFixed(fixed) : String(n);
+            if (typeof min === 'number') {
+                var dot = s.indexOf('.');
+                var have = dot < 0 ? 0 : s.length - dot - 1;
+                if (have < min) {
+                    if (dot < 0) s += '.';
+                    while (have < min) { s += '0'; have++; }
+                }
+            }
+            // Group separators.
+            if (opts.useGrouping !== false) {
+                var sign = '';
+                if (s.charAt(0) === '-') { sign = '-'; s = s.slice(1); }
+                var dotIdx = s.indexOf('.');
+                var int = dotIdx < 0 ? s : s.slice(0, dotIdx);
+                var frac = dotIdx < 0 ? '' : s.slice(dotIdx);
+                int = int.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+                s = sign + int + frac;
+            }
+            // Style: percent / currency.
+            if (opts.style === 'percent') s = (Number(n) * 100) + '%';
+            else if (opts.style === 'currency' && opts.currency) {
+                s = opts.currency + ' ' + s;
+            }
+            return s;
+        };
+        NumberFormat.prototype.formatToParts = function(n) {
+            return [{ type: 'integer', value: this.format(n) }];
+        };
+        NumberFormat.prototype.resolvedOptions = function() {
+            return Object.assign({ locale: this._locale, numberingSystem: 'latn' }, this._opts);
+        };
+        NumberFormat.supportedLocalesOf = function(locales) {
+            return Array.isArray(locales) ? locales.slice() : [locales].filter(Boolean);
+        };
+        IntlObj.NumberFormat = NumberFormat;
+
+        function DateTimeFormat(locales, options) {
+            if (!(this instanceof DateTimeFormat)) return new DateTimeFormat(locales, options);
+            this._opts = options || {};
+            this._locale = Array.isArray(locales) ? (locales[0] || 'en-US') : (locales || 'en-US');
+        }
+        DateTimeFormat.prototype.format = function(d) {
+            var date = (d instanceof Date) ? d : new Date(d);
+            // Default: locale-style date+time.
+            return date.toLocaleString
+                ? date.toLocaleString(this._locale)
+                : date.toString();
+        };
+        DateTimeFormat.prototype.formatToParts = function(d) {
+            return [{ type: 'literal', value: this.format(d) }];
+        };
+        DateTimeFormat.prototype.resolvedOptions = function() {
+            return Object.assign({ locale: this._locale, calendar: 'gregory',
+                                   timeZone: 'UTC', numberingSystem: 'latn' }, this._opts);
+        };
+        DateTimeFormat.supportedLocalesOf = NumberFormat.supportedLocalesOf;
+        IntlObj.DateTimeFormat = DateTimeFormat;
+
+        function Collator(locales, options) {
+            if (!(this instanceof Collator)) return new Collator(locales, options);
+            this._opts = options || {};
+            this._locale = Array.isArray(locales) ? (locales[0] || 'en-US') : (locales || 'en-US');
+        }
+        Collator.prototype.compare = function(a, b) {
+            a = _toString(a); b = _toString(b);
+            if (this._opts.sensitivity === 'base') {
+                a = a.toLowerCase(); b = b.toLowerCase();
+            }
+            if (this._opts.numeric) {
+                return a.localeCompare(b, undefined, { numeric: true });
+            }
+            return a < b ? -1 : a > b ? 1 : 0;
+        };
+        Collator.prototype.resolvedOptions = function() {
+            return Object.assign({ locale: this._locale, sensitivity: 'variant',
+                                   numeric: false, caseFirst: 'false' }, this._opts);
+        };
+        Collator.supportedLocalesOf = NumberFormat.supportedLocalesOf;
+        IntlObj.Collator = Collator;
+
+        function PluralRules(locales, options) {
+            if (!(this instanceof PluralRules)) return new PluralRules(locales, options);
+            this._opts = options || {};
+            this._locale = Array.isArray(locales) ? (locales[0] || 'en-US') : (locales || 'en-US');
+        }
+        PluralRules.prototype.select = function(n) {
+            // English-only: 1 → one, anything else → other.
+            return n === 1 ? 'one' : 'other';
+        };
+        PluralRules.prototype.resolvedOptions = function() {
+            return Object.assign({ locale: this._locale, type: 'cardinal',
+                                   pluralCategories: ['one', 'other'] }, this._opts);
+        };
+        PluralRules.supportedLocalesOf = NumberFormat.supportedLocalesOf;
+        IntlObj.PluralRules = PluralRules;
+
+        function ListFormat(locales, options) {
+            if (!(this instanceof ListFormat)) return new ListFormat(locales, options);
+            this._opts = options || {};
+            this._locale = Array.isArray(locales) ? (locales[0] || 'en-US') : (locales || 'en-US');
+        }
+        ListFormat.prototype.format = function(arr) {
+            arr = Array.from(arr || []).map(_toString);
+            if (arr.length === 0) return '';
+            if (arr.length === 1) return arr[0];
+            if (arr.length === 2) return arr[0] + ' and ' + arr[1];
+            return arr.slice(0, -1).join(', ') + ', and ' + arr[arr.length - 1];
+        };
+        ListFormat.prototype.formatToParts = function(arr) {
+            return [{ type: 'literal', value: this.format(arr) }];
+        };
+        ListFormat.prototype.resolvedOptions = function() {
+            return Object.assign({ locale: this._locale, type: 'conjunction', style: 'long' }, this._opts);
+        };
+        ListFormat.supportedLocalesOf = NumberFormat.supportedLocalesOf;
+        IntlObj.ListFormat = ListFormat;
+
+        function RelativeTimeFormat(locales, options) {
+            if (!(this instanceof RelativeTimeFormat)) return new RelativeTimeFormat(locales, options);
+            this._opts = options || {};
+            this._locale = Array.isArray(locales) ? (locales[0] || 'en-US') : (locales || 'en-US');
+        }
+        RelativeTimeFormat.prototype.format = function(value, unit) {
+            if (value === 0) return 'this ' + unit;
+            var abs = Math.abs(value);
+            var u = unit + (abs === 1 ? '' : 's');
+            return value > 0
+                ? 'in ' + abs + ' ' + u
+                : abs + ' ' + u + ' ago';
+        };
+        RelativeTimeFormat.prototype.formatToParts = function(value, unit) {
+            return [{ type: 'literal', value: this.format(value, unit) }];
+        };
+        RelativeTimeFormat.prototype.resolvedOptions = function() {
+            return Object.assign({ locale: this._locale, style: 'long', numeric: 'always' }, this._opts);
+        };
+        RelativeTimeFormat.supportedLocalesOf = NumberFormat.supportedLocalesOf;
+        IntlObj.RelativeTimeFormat = RelativeTimeFormat;
+
+        function Segmenter(locales, options) {
+            if (!(this instanceof Segmenter)) return new Segmenter(locales, options);
+            this._opts = options || {};
+            this._locale = Array.isArray(locales) ? (locales[0] || 'en-US') : (locales || 'en-US');
+        }
+        Segmenter.prototype.segment = function(input) {
+            var s = _toString(input);
+            var granularity = (this._opts && this._opts.granularity) || 'grapheme';
+            var segments;
+            if (granularity === 'word') {
+                segments = s.match(/\S+|\s+/g) || [];
+            } else if (granularity === 'sentence') {
+                segments = s.match(/[^.!?]+[.!?]?/g) || [s];
+            } else {
+                // grapheme: code-point chunks (close enough for ASCII).
+                segments = Array.from(s);
+            }
+            var idx = 0;
+            return {
+                [Symbol.iterator]: function() {
+                    var i = 0;
+                    return { next: function() {
+                        if (i >= segments.length) return { done: true };
+                        var seg = segments[i];
+                        var ent = { segment: seg, index: idx, input: s };
+                        idx += seg.length;
+                        i++;
+                        return { value: ent, done: false };
+                    } };
+                },
+            };
+        };
+        Segmenter.prototype.resolvedOptions = function() {
+            return Object.assign({ locale: this._locale, granularity: 'grapheme' }, this._opts);
+        };
+        Segmenter.supportedLocalesOf = NumberFormat.supportedLocalesOf;
+        IntlObj.Segmenter = Segmenter;
+
+        IntlObj.getCanonicalLocales = function(locales) {
+            if (!locales) return [];
+            return (Array.isArray(locales) ? locales : [locales]).map(_toString);
+        };
+
+        globalThis.Intl = IntlObj;
+    }
+
+    // ---- Symbol.dispose / Symbol.asyncDispose (Node 20+) ------------
 
     // performance.now — no monotonic clock inside the sandbox, but
     // Date.now gives us something non-decreasing for most practical
