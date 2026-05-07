@@ -96,4 +96,14 @@ __register_module('readline', function(module, exports, require) {
     exports.cursorTo = cursorTo;
     exports.moveCursor = moveCursor;
     exports.emitKeypressEvents = emitKeypressEvents;
+
+    /// readline.promises — Node 17+ Promise-shaped wrappers. The
+    /// readline-side `question`/`Interface` aren't usable in our
+    /// current daemon (we don't have a stdin pump), but exposing the
+    /// surface keeps libraries that probe at module-init from
+    /// crashing.
+    exports.promises = {
+        createInterface: createInterface,
+        Interface: Interface,
+    };
 });

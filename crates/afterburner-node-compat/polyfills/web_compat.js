@@ -298,6 +298,40 @@
         globalThis.Intl = IntlObj;
     }
 
+    // ---- JSON.rawJSON / isRawJSON (Stage 4, Node 21+) -------------
+    //
+    // `JSON.rawJSON(text)` returns a value that JSON.stringify
+    // inlines verbatim — useful for embedding precomputed JSON
+    // (BigInt strings, large arrays) without parse → stringify
+    // re-encoding. We tag with a private symbol so `isRawJSON`
+    // recognises the value, and provide `toJSON` so naive
+    // serialisers (JSON.stringify without a replacer) still emit a
+    // valid representation.
+    if (typeof JSON.rawJSON !== 'function') {
+        var RAW_JSON_TAG = Symbol.for('JSON.rawJSON.tag');
+        Object.defineProperty(JSON, 'rawJSON', {
+            value: function rawJSON(text) {
+                var s = String(text);
+                // Validate input is parseable JSON per spec.
+                JSON.parse(s);
+                var out = Object.create(null);
+                Object.defineProperty(out, RAW_JSON_TAG, { value: true });
+                Object.defineProperty(out, 'rawJSON', { value: s, enumerable: true });
+                Object.defineProperty(out, 'toJSON', {
+                    value: function() { return JSON.parse(s); },
+                });
+                return out;
+            },
+            writable: true, configurable: true,
+        });
+        Object.defineProperty(JSON, 'isRawJSON', {
+            value: function isRawJSON(v) {
+                return !!(v && typeof v === 'object' && v[RAW_JSON_TAG] === true);
+            },
+            writable: true, configurable: true,
+        });
+    }
+
     // ---- Symbol.dispose / Symbol.asyncDispose (Node 20+) ------------
 
     // performance.now — no monotonic clock inside the sandbox, but

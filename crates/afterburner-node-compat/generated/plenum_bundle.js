@@ -9630,6 +9630,16 @@ __register_module('readline', function(module, exports, require) {
     exports.cursorTo = cursorTo;
     exports.moveCursor = moveCursor;
     exports.emitKeypressEvents = emitKeypressEvents;
+
+    /// readline.promises — Node 17+ Promise-shaped wrappers. The
+    /// readline-side `question`/`Interface` aren't usable in our
+    /// current daemon (we don't have a stdin pump), but exposing the
+    /// surface keeps libraries that probe at module-init from
+    /// crashing.
+    exports.promises = {
+        createInterface: createInterface,
+        Interface: Interface,
+    };
 });
 
 // ---- repl.js ----
@@ -14109,6 +14119,40 @@ __register_module('wasi', function(module, exports, require) {
         };
 
         globalThis.Intl = IntlObj;
+    }
+
+    // ---- JSON.rawJSON / isRawJSON (Stage 4, Node 21+) -------------
+    //
+    // `JSON.rawJSON(text)` returns a value that JSON.stringify
+    // inlines verbatim — useful for embedding precomputed JSON
+    // (BigInt strings, large arrays) without parse → stringify
+    // re-encoding. We tag with a private symbol so `isRawJSON`
+    // recognises the value, and provide `toJSON` so naive
+    // serialisers (JSON.stringify without a replacer) still emit a
+    // valid representation.
+    if (typeof JSON.rawJSON !== 'function') {
+        var RAW_JSON_TAG = Symbol.for('JSON.rawJSON.tag');
+        Object.defineProperty(JSON, 'rawJSON', {
+            value: function rawJSON(text) {
+                var s = String(text);
+                // Validate input is parseable JSON per spec.
+                JSON.parse(s);
+                var out = Object.create(null);
+                Object.defineProperty(out, RAW_JSON_TAG, { value: true });
+                Object.defineProperty(out, 'rawJSON', { value: s, enumerable: true });
+                Object.defineProperty(out, 'toJSON', {
+                    value: function() { return JSON.parse(s); },
+                });
+                return out;
+            },
+            writable: true, configurable: true,
+        });
+        Object.defineProperty(JSON, 'isRawJSON', {
+            value: function isRawJSON(v) {
+                return !!(v && typeof v === 'object' && v[RAW_JSON_TAG] === true);
+            },
+            writable: true, configurable: true,
+        });
     }
 
     // ---- Symbol.dispose / Symbol.asyncDispose (Node 20+) ------------
