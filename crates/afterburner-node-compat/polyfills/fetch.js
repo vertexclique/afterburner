@@ -95,12 +95,53 @@
 
     function Request(url, init) {
         init = init || {};
-        this.url = String(url);
-        this.method = (init.method || 'GET').toUpperCase();
-        this.headers = new Headers(init.headers);
-        this.body = init.body != null ? String(init.body) : null;
-        this.signal = init.signal || null;
+        // If a Request instance is passed in, copy its fields then
+        // overlay the init (matching the spec's `new Request(req,
+        // {...})` cloning shape).
+        if (url && typeof url === 'object' && url instanceof Request) {
+            this.url = url.url;
+            this.method = url.method;
+            this.headers = new Headers(url.headers);
+            this.body = url.body;
+            this.signal = url.signal;
+            this.redirect = url.redirect;
+            this.cache = url.cache;
+            this.credentials = url.credentials;
+            this.mode = url.mode;
+            this.referrer = url.referrer;
+            this.referrerPolicy = url.referrerPolicy;
+            this.integrity = url.integrity;
+            this.keepalive = url.keepalive;
+        } else {
+            this.url = String(url);
+            this.method = 'GET';
+            this.headers = new Headers();
+            this.body = null;
+            this.signal = null;
+            this.redirect = 'follow';
+            this.cache = 'default';
+            this.credentials = 'same-origin';
+            this.mode = 'cors';
+            this.referrer = '';
+            this.referrerPolicy = '';
+            this.integrity = '';
+            this.keepalive = false;
+        }
+        // Apply init overlays on top.
+        if (init.method) this.method = String(init.method).toUpperCase();
+        if (init.headers) this.headers = new Headers(init.headers);
+        if (init.body != null) this.body = String(init.body);
+        if (init.signal !== undefined) this.signal = init.signal;
+        if (init.redirect) this.redirect = init.redirect;
+        if (init.cache) this.cache = init.cache;
+        if (init.credentials) this.credentials = init.credentials;
+        if (init.mode) this.mode = init.mode;
+        if (init.referrer != null) this.referrer = String(init.referrer);
+        if (init.referrerPolicy) this.referrerPolicy = init.referrerPolicy;
+        if (init.integrity) this.integrity = init.integrity;
+        if (init.keepalive !== undefined) this.keepalive = !!init.keepalive;
     }
+    Request.prototype.clone = function() { return new Request(this); };
 
     function Response(body, init) {
         init = init || {};
