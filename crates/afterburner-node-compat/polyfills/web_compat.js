@@ -404,6 +404,107 @@
         };
     }
 
+    // ---- PerformanceObserver / PerformanceEntry classes -----------
+    //
+    // These let libraries subscribe to mark/measure events. The
+    // observer fires synchronously after each mark/measure when its
+    // observed entryTypes match.
+    if (typeof globalThis.PerformanceEntry !== 'function') {
+        function PerformanceEntry() {
+            this.name = '';
+            this.entryType = '';
+            this.startTime = 0;
+            this.duration = 0;
+        }
+        globalThis.PerformanceEntry = PerformanceEntry;
+        globalThis.PerformanceMark = function PerformanceMark() {
+            PerformanceEntry.call(this);
+            this.entryType = 'mark';
+        };
+        globalThis.PerformanceMark.prototype = Object.create(PerformanceEntry.prototype);
+        globalThis.PerformanceMeasure = function PerformanceMeasure() {
+            PerformanceEntry.call(this);
+            this.entryType = 'measure';
+        };
+        globalThis.PerformanceMeasure.prototype = Object.create(PerformanceEntry.prototype);
+        function PerformanceObserverEntryList(entries) { this._entries = entries.slice(); }
+        PerformanceObserverEntryList.prototype.getEntries = function() {
+            return this._entries.slice();
+        };
+        PerformanceObserverEntryList.prototype.getEntriesByName = function(name, type) {
+            return this._entries.filter(function(e) {
+                return e.name === name && (type === undefined || e.entryType === type);
+            });
+        };
+        PerformanceObserverEntryList.prototype.getEntriesByType = function(type) {
+            return this._entries.filter(function(e) { return e.entryType === type; });
+        };
+        globalThis.PerformanceObserverEntryList = PerformanceObserverEntryList;
+        function PerformanceObserver(callback) {
+            this._callback = callback;
+            this._types = [];
+            this._buffered = false;
+            this._cursor = globalThis.performance._entries.length;
+        }
+        if (!globalThis.performance._observers) globalThis.performance._observers = [];
+        PerformanceObserver.prototype.observe = function(options) {
+            var types = (options && options.entryTypes) || (options && options.type ? [options.type] : []);
+            this._types = types.slice();
+            this._buffered = !!(options && options.buffered);
+            globalThis.performance._observers.push(this);
+            // If buffered, replay pre-existing entries.
+            if (this._buffered) {
+                var self = this;
+                var matching = globalThis.performance._entries.filter(function(e) {
+                    return self._types.indexOf(e.entryType) >= 0;
+                });
+                if (matching.length) {
+                    var list = new PerformanceObserverEntryList(matching);
+                    Promise.resolve().then(function() { self._callback(list, self); });
+                }
+            }
+        };
+        PerformanceObserver.prototype.disconnect = function() {
+            var idx = globalThis.performance._observers.indexOf(this);
+            if (idx >= 0) globalThis.performance._observers.splice(idx, 1);
+        };
+        PerformanceObserver.prototype.takeRecords = function() {
+            var since = globalThis.performance._entries.slice(this._cursor);
+            this._cursor = globalThis.performance._entries.length;
+            return since;
+        };
+        PerformanceObserver.supportedEntryTypes = ['mark', 'measure', 'resource', 'navigation'];
+        globalThis.PerformanceObserver = PerformanceObserver;
+
+        // Hook mark/measure to fan out to observers.
+        var _origMark = globalThis.performance.mark;
+        globalThis.performance.mark = function() {
+            var entry = _origMark.apply(globalThis.performance, arguments);
+            _fanout(entry);
+            return entry;
+        };
+        var _origMeasure = globalThis.performance.measure;
+        globalThis.performance.measure = function() {
+            var entry = _origMeasure.apply(globalThis.performance, arguments);
+            _fanout(entry);
+            return entry;
+        };
+        function _fanout(entry) {
+            var observers = globalThis.performance._observers;
+            if (!observers || observers.length === 0) return;
+            for (var i = 0; i < observers.length; i++) {
+                var obs = observers[i];
+                if (obs._types.indexOf(entry.entryType) < 0) continue;
+                (function(o) {
+                    Promise.resolve().then(function() {
+                        var list = new PerformanceObserverEntryList([entry]);
+                        try { o._callback(list, o); } catch (_) {}
+                    });
+                })(obs);
+            }
+        }
+    }
+
     // `queueMicrotask` — schedule a microtask. QuickJS supports
     // Promise.then which gives us the microtask queue for free.
     if (typeof globalThis.queueMicrotask !== 'function') {
