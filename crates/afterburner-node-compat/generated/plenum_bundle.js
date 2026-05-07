@@ -14290,6 +14290,141 @@ __register_module('wasi', function(module, exports, require) {
         globalThis.WebSocket = WebSocket;
     }
 
+    // ============================================================
+    // EventSource (Server-Sent Events client).
+    //
+    // RFC 6202 / WHATWG. Built on `fetch`. Our fetch buffers the
+    // whole response body (no streaming), so this implementation is
+    // best-effort: it issues a request, parses every `data:` event
+    // out of the returned body in one pass, fires `message` events,
+    // and reconnects per the `retry:` directive (or 3s default).
+    // Works perfectly for finite SSE responses where the server
+    // sends N events then closes; longer-lived infinite streams
+    // would benefit from streaming HTTP responses (separate feature).
+    // ============================================================
+    if (typeof globalThis.EventSource !== 'function') {
+        var ES_CONNECTING = 0, ES_OPEN = 1, ES_CLOSED = 2;
+        function EventSource(url, init) {
+            if (!(this instanceof EventSource)) {
+                throw new TypeError('EventSource is a constructor');
+            }
+            this.url = String(url);
+            this.readyState = ES_CONNECTING;
+            this.withCredentials = !!(init && init.withCredentials);
+            this.onopen = null;
+            this.onmessage = null;
+            this.onerror = null;
+            this._listeners = Object.create(null);
+            this._lastEventId = '';
+            this._retryMs = 3000;
+            this._closed = false;
+            this._connect();
+        }
+        EventSource.CONNECTING = ES_CONNECTING;
+        EventSource.OPEN = ES_OPEN;
+        EventSource.CLOSED = ES_CLOSED;
+        EventSource.prototype.CONNECTING = ES_CONNECTING;
+        EventSource.prototype.OPEN = ES_OPEN;
+        EventSource.prototype.CLOSED = ES_CLOSED;
+
+        EventSource.prototype._fire = function(type, detail) {
+            var ev = Object.assign({ type: type, target: this }, detail || {});
+            var prop = 'on' + type;
+            try { if (typeof this[prop] === 'function') this[prop](ev); } catch (_) {}
+            var arr = this._listeners[type];
+            if (arr) for (var i = 0; i < arr.length; i++) {
+                try { arr[i](ev); } catch (_) {}
+            }
+        };
+        EventSource.prototype.addEventListener = function(type, listener) {
+            if (typeof listener !== 'function') return;
+            if (!this._listeners[type]) this._listeners[type] = [];
+            this._listeners[type].push(listener);
+        };
+        EventSource.prototype.removeEventListener = function(type, listener) {
+            var arr = this._listeners[type];
+            if (!arr) return;
+            var idx = arr.indexOf(listener);
+            if (idx >= 0) arr.splice(idx, 1);
+        };
+        EventSource.prototype.dispatchEvent = function(event) {
+            if (event && typeof event.type === 'string') this._fire(event.type, event);
+            return true;
+        };
+        EventSource.prototype.close = function() {
+            this._closed = true;
+            this.readyState = ES_CLOSED;
+        };
+
+        EventSource.prototype._connect = function() {
+            if (this._closed) return;
+            var self = this;
+            var headers = { 'Accept': 'text/event-stream' };
+            if (this._lastEventId) headers['Last-Event-ID'] = this._lastEventId;
+            // Use the global fetch installed at the top of the
+            // bundle. Buffered body comes back as text — we parse
+            // the whole stream at once.
+            globalThis.fetch(this.url, { headers: headers }).then(function(resp) {
+                if (self._closed) return;
+                if (!resp.ok) {
+                    self._fire('error', { message: 'EventSource HTTP ' + resp.status });
+                    self._scheduleReconnect();
+                    return;
+                }
+                self.readyState = ES_OPEN;
+                self._fire('open', {});
+                return resp.text().then(function(body) {
+                    self._parse(body);
+                    self._scheduleReconnect();
+                });
+            }).catch(function(e) {
+                if (self._closed) return;
+                self._fire('error', { message: e && e.message });
+                self._scheduleReconnect();
+            });
+        };
+
+        EventSource.prototype._scheduleReconnect = function() {
+            if (this._closed) return;
+            var self = this;
+            this.readyState = ES_CONNECTING;
+            setTimeout(function() { self._connect(); }, this._retryMs);
+        };
+
+        EventSource.prototype._parse = function(body) {
+            // Split into events on blank lines (\n\n or \r\n\r\n).
+            // Each event is a sequence of `field: value` lines.
+            var events = String(body).split(/\r?\n\r?\n/);
+            for (var i = 0; i < events.length; i++) {
+                var raw = events[i];
+                if (!raw) continue;
+                var lines = raw.split(/\r?\n/);
+                var name = 'message';
+                var data = '';
+                var id = null;
+                for (var j = 0; j < lines.length; j++) {
+                    var line = lines[j];
+                    if (!line || line.charAt(0) === ':') continue;
+                    var c = line.indexOf(':');
+                    var field = c < 0 ? line : line.slice(0, c);
+                    var value = c < 0 ? '' : line.slice(c + 1);
+                    if (value.charAt(0) === ' ') value = value.slice(1);
+                    if (field === 'event') name = value;
+                    else if (field === 'data') data += (data ? '\n' : '') + value;
+                    else if (field === 'id') id = value;
+                    else if (field === 'retry') {
+                        var n = parseInt(value, 10);
+                        if (!isNaN(n) && n > 0) this._retryMs = n;
+                    }
+                }
+                if (id !== null) this._lastEventId = id;
+                if (data === '' && lines.length === 1 && lines[0] === '') continue;
+                this._fire(name, { data: data, lastEventId: this._lastEventId, origin: this.url });
+            }
+        };
+        globalThis.EventSource = EventSource;
+    }
+
     if (typeof globalThis.URLPattern !== 'function') {
         var COMPONENTS = ['protocol', 'username', 'password', 'hostname', 'port',
                           'pathname', 'search', 'hash'];
