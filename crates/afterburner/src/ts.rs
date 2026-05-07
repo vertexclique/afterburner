@@ -82,12 +82,29 @@ pub fn transpile(source: &str, path: &Path) -> Result<String, TsError> {
 
     Transformer::new(&allocator, path, &opts).build_with_scoping(scoping, &mut program);
 
-    let codegen = Codegen::new().build(&program);
+    // Codegen with inline source map: oxc emits the SourceMap, we
+    // base64-data-url it onto the end of the file so stack traces
+    // can map back to the original TS line numbers when source-map
+    // support is enabled at runtime via
+    // `module.setSourceMapsSupport(true)`.
+    use oxc::codegen::CodegenOptions;
+    let codegen = Codegen::new()
+        .with_options(CodegenOptions {
+            source_map_path: Some(path.to_path_buf()),
+            ..Default::default()
+        })
+        .build(&program);
+    let mut code = codegen.code;
+    if let Some(map) = codegen.map.as_ref() {
+        code.push_str("\n//# sourceMappingURL=");
+        code.push_str(&map.to_data_url());
+        code.push('\n');
+    }
     // after TS strip, lower any remaining ESM declarations to
     // CJS so `import` / `export` in TS files runs under our existing
     // CommonJS runtime. Plain CJS code contains no ESM declarations
     // and passes through unchanged.
-    crate::esm::rewrite_esm_to_cjs(&codegen.code, path).map_err(|e| TsError::Parse {
+    crate::esm::rewrite_esm_to_cjs(&code, path).map_err(|e| TsError::Parse {
         path: path.display().to_string(),
         errors: e,
     })
