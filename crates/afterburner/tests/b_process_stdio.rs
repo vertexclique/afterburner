@@ -47,7 +47,7 @@ fn process_stdio_fds_are_canonical_zero_one_two() {
 }
 
 #[test]
-fn process_stdout_isTTY_is_false_under_pipe() {
+fn process_stdout_is_tty_is_false_under_pipe() {
     let out = run_inline(
         r#"
         if (process.stdout.isTTY === false && process.stderr.isTTY === false)
