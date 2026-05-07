@@ -605,6 +605,17 @@ __register_module('stream', function(module, exports, require) {
         throw new Error('Writable.fromWeb: not implemented');
     };
 
+    /// stream.duplexPair — Node 22+. Returns `[a, b]` two Duplex
+    /// streams cross-connected: writes to `a` appear on reads from
+    /// `b` and vice versa. Useful for in-process protocol simulations.
+    function duplexPair() {
+        var a = new PassThrough();
+        var b = new PassThrough();
+        a.pipe(b);
+        b.pipe(a);
+        return [a, b];
+    }
+
     exports.Readable       = Readable;
     exports.Writable       = Writable;
     exports.Duplex         = Duplex;
@@ -614,7 +625,26 @@ __register_module('stream', function(module, exports, require) {
     exports.finished       = finished;
     exports.compose        = compose;
     exports.addAbortSignal = addAbortSignal;
+    exports.duplexPair     = duplexPair;
     exports.Stream         = Stream;
+    /// stream.promises — Node 15+ Promise-shaped wrappers for
+    /// pipeline / finished. Same names as `require('stream/promises')`.
+    exports.promises = {
+        pipeline: function() {
+            var args = Array.prototype.slice.call(arguments);
+            return new Promise(function(resolve, reject) {
+                args.push(function(err) { if (err) reject(err); else resolve(); });
+                pipeline.apply(null, args);
+            });
+        },
+        finished: function(stream, opts) {
+            return new Promise(function(resolve, reject) {
+                finished(stream, opts || {}, function(err) {
+                    if (err) reject(err); else resolve();
+                });
+            });
+        },
+    };
 
     Stream.Readable        = Readable;
     Stream.Writable        = Writable;
@@ -625,6 +655,8 @@ __register_module('stream', function(module, exports, require) {
     Stream.finished        = finished;
     Stream.compose         = compose;
     Stream.addAbortSignal  = addAbortSignal;
+    Stream.duplexPair      = duplexPair;
+    Stream.promises        = exports.promises;
     Stream.Stream          = Stream;
 
     module.exports = Stream;

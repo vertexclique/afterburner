@@ -403,4 +403,83 @@ __register_module('buffer', function(module, exports, require) {
     exports.Buffer = Buffer;
     exports.kMaxLength = 0x7fffffff;
     exports.INSPECT_MAX_BYTES = 50;
+
+    /// buffer.constants — module-level Node 8.2+ surface. Real apps
+    /// (sharp, fast-glob, node-canvas) probe these at module init.
+    exports.constants = {
+        MAX_LENGTH: 0x7fffffff,
+        MAX_STRING_LENGTH: 0x1fffffe8,
+    };
+
+    /// buffer.atob / buffer.btoa — Node re-exports the Web globals
+    /// here for convenience (some libraries import from buffer
+    /// instead of relying on the global).
+    exports.atob = function(input) {
+        return Buffer.from(String(input), 'base64').toString('binary');
+    };
+    exports.btoa = function(input) {
+        return Buffer.from(String(input), 'binary').toString('base64');
+    };
+
+    /// buffer.transcode — re-encode a Buffer between two single-byte
+    /// or UTF encodings. Uses TextDecoder + TextEncoder for the
+    /// common cross-encoding paths; falls back to identity copy
+    /// when source and target encodings match.
+    exports.transcode = function(source, fromEnc, toEnc) {
+        if (!Buffer.isBuffer(source)) {
+            throw new TypeError('buffer.transcode: source must be a Buffer');
+        }
+        var from = String(fromEnc || '').toLowerCase();
+        var to = String(toEnc || '').toLowerCase();
+        if (from === to) return Buffer.from(source);
+        // Use the canonical TextDecoder/TextEncoder pair for any pair
+        // that involves utf-* on at least one side.
+        var dec = new TextDecoder(from === 'utf16le' ? 'utf-16le' : (from || 'utf-8'));
+        var str = dec.decode(source);
+        if (to === 'utf-8' || to === 'utf8') {
+            return Buffer.from(new TextEncoder().encode(str));
+        }
+        if (to === 'utf16le' || to === 'utf-16le') {
+            // Manual UTF-16LE encode.
+            var out = Buffer.alloc(str.length * 2);
+            for (var i = 0; i < str.length; i++) {
+                var c = str.charCodeAt(i);
+                out[i * 2]     = c & 0xff;
+                out[i * 2 + 1] = (c >> 8) & 0xff;
+            }
+            return out;
+        }
+        if (to === 'latin1' || to === 'binary') {
+            var out2 = Buffer.alloc(str.length);
+            for (var j = 0; j < str.length; j++) {
+                out2[j] = str.charCodeAt(j) & 0xff;
+            }
+            return out2;
+        }
+        if (to === 'ascii') {
+            var out3 = Buffer.alloc(str.length);
+            for (var k = 0; k < str.length; k++) {
+                out3[k] = str.charCodeAt(k) & 0x7f;
+            }
+            return out3;
+        }
+        throw new Error('buffer.transcode: unsupported target encoding: ' + to);
+    };
+
+    /// buffer.resolveObjectURL — returns the Blob registered to a
+    /// `blob:` URL via URL.createObjectURL. Burn doesn't support
+    /// createObjectURL (no DOM), so this always returns undefined.
+    exports.resolveObjectURL = function() { return undefined; };
+
+    /// buffer.SlowBuffer — alias for `Buffer.allocUnsafeSlow` per
+    /// Node's documented re-export.
+    exports.SlowBuffer = function SlowBuffer(size) {
+        return Buffer.allocUnsafeSlow(size);
+    };
+
+    /// buffer.Blob / buffer.File — re-exports of the Web globals
+    /// for callers that import from `node:buffer` instead of using
+    /// the globals directly.
+    if (typeof globalThis.Blob === 'function') exports.Blob = globalThis.Blob;
+    if (typeof globalThis.File === 'function') exports.File = globalThis.File;
 });

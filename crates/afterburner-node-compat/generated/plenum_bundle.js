@@ -1453,6 +1453,85 @@ __register_module('buffer', function(module, exports, require) {
     exports.Buffer = Buffer;
     exports.kMaxLength = 0x7fffffff;
     exports.INSPECT_MAX_BYTES = 50;
+
+    /// buffer.constants — module-level Node 8.2+ surface. Real apps
+    /// (sharp, fast-glob, node-canvas) probe these at module init.
+    exports.constants = {
+        MAX_LENGTH: 0x7fffffff,
+        MAX_STRING_LENGTH: 0x1fffffe8,
+    };
+
+    /// buffer.atob / buffer.btoa — Node re-exports the Web globals
+    /// here for convenience (some libraries import from buffer
+    /// instead of relying on the global).
+    exports.atob = function(input) {
+        return Buffer.from(String(input), 'base64').toString('binary');
+    };
+    exports.btoa = function(input) {
+        return Buffer.from(String(input), 'binary').toString('base64');
+    };
+
+    /// buffer.transcode — re-encode a Buffer between two single-byte
+    /// or UTF encodings. Uses TextDecoder + TextEncoder for the
+    /// common cross-encoding paths; falls back to identity copy
+    /// when source and target encodings match.
+    exports.transcode = function(source, fromEnc, toEnc) {
+        if (!Buffer.isBuffer(source)) {
+            throw new TypeError('buffer.transcode: source must be a Buffer');
+        }
+        var from = String(fromEnc || '').toLowerCase();
+        var to = String(toEnc || '').toLowerCase();
+        if (from === to) return Buffer.from(source);
+        // Use the canonical TextDecoder/TextEncoder pair for any pair
+        // that involves utf-* on at least one side.
+        var dec = new TextDecoder(from === 'utf16le' ? 'utf-16le' : (from || 'utf-8'));
+        var str = dec.decode(source);
+        if (to === 'utf-8' || to === 'utf8') {
+            return Buffer.from(new TextEncoder().encode(str));
+        }
+        if (to === 'utf16le' || to === 'utf-16le') {
+            // Manual UTF-16LE encode.
+            var out = Buffer.alloc(str.length * 2);
+            for (var i = 0; i < str.length; i++) {
+                var c = str.charCodeAt(i);
+                out[i * 2]     = c & 0xff;
+                out[i * 2 + 1] = (c >> 8) & 0xff;
+            }
+            return out;
+        }
+        if (to === 'latin1' || to === 'binary') {
+            var out2 = Buffer.alloc(str.length);
+            for (var j = 0; j < str.length; j++) {
+                out2[j] = str.charCodeAt(j) & 0xff;
+            }
+            return out2;
+        }
+        if (to === 'ascii') {
+            var out3 = Buffer.alloc(str.length);
+            for (var k = 0; k < str.length; k++) {
+                out3[k] = str.charCodeAt(k) & 0x7f;
+            }
+            return out3;
+        }
+        throw new Error('buffer.transcode: unsupported target encoding: ' + to);
+    };
+
+    /// buffer.resolveObjectURL — returns the Blob registered to a
+    /// `blob:` URL via URL.createObjectURL. Burn doesn't support
+    /// createObjectURL (no DOM), so this always returns undefined.
+    exports.resolveObjectURL = function() { return undefined; };
+
+    /// buffer.SlowBuffer — alias for `Buffer.allocUnsafeSlow` per
+    /// Node's documented re-export.
+    exports.SlowBuffer = function SlowBuffer(size) {
+        return Buffer.allocUnsafeSlow(size);
+    };
+
+    /// buffer.Blob / buffer.File — re-exports of the Web globals
+    /// for callers that import from `node:buffer` instead of using
+    /// the globals directly.
+    if (typeof globalThis.Blob === 'function') exports.Blob = globalThis.Blob;
+    if (typeof globalThis.File === 'function') exports.File = globalThis.File;
 });
 
 // ---- child_process.js ----
@@ -3274,8 +3353,139 @@ __register_module('events', function(module, exports, require) {
 
     EventEmitter.EventEmitter = EventEmitter;
     EventEmitter.defaultMaxListeners = 10;
+    EventEmitter.captureRejectionSymbol = Symbol.for('nodejs.rejection');
+    EventEmitter.errorMonitor = Symbol.for('events.errorMonitor');
+    EventEmitter.captureRejections = false;
 
+    /// events.once(emitter, name, opts?) — resolves with the args of
+    /// the first emitted event of the given name. Rejects on 'error'
+    /// (unless `name === 'error'`) or signal abort.
+    EventEmitter.once = function(emitter, name, options) {
+        return new Promise(function(resolve, reject) {
+            var signal = options && options.signal;
+            if (signal && signal.aborted) {
+                return reject(signal.reason || new Error('Aborted'));
+            }
+            function onEvent() {
+                cleanup();
+                resolve(Array.prototype.slice.call(arguments));
+            }
+            function onError(err) { cleanup(); reject(err); }
+            function onAbort() {
+                cleanup();
+                reject(signal.reason || new Error('Aborted'));
+            }
+            function cleanup() {
+                emitter.removeListener(name, onEvent);
+                if (name !== 'error') emitter.removeListener('error', onError);
+                if (signal && signal.removeEventListener) {
+                    signal.removeEventListener('abort', onAbort);
+                }
+            }
+            emitter.once(name, onEvent);
+            if (name !== 'error') emitter.once('error', onError);
+            if (signal && signal.addEventListener) {
+                signal.addEventListener('abort', onAbort, { once: true });
+            }
+        });
+    };
+
+    /// events.on(emitter, name, opts?) — async iterator yielding the
+    /// args of every emitted `name` event until abort or 'error'.
+    EventEmitter.on = function(emitter, name, options) {
+        var signal = options && options.signal;
+        var queue = [];
+        var waiters = [];
+        var done = false;
+        var err = null;
+        function push(args) {
+            if (done) return;
+            if (waiters.length) waiters.shift()({ value: args, done: false });
+            else queue.push(args);
+        }
+        function flushDone() {
+            done = true;
+            while (waiters.length) {
+                var w = waiters.shift();
+                if (err) w(Promise.reject(err));
+                else w({ value: undefined, done: true });
+            }
+        }
+        function onEvent() { push(Array.prototype.slice.call(arguments)); }
+        function onError(e) { err = e; flushDone(); cleanup(); }
+        function onAbort() { err = signal.reason || new Error('Aborted'); flushDone(); cleanup(); }
+        function cleanup() {
+            emitter.removeListener(name, onEvent);
+            if (name !== 'error') emitter.removeListener('error', onError);
+            if (signal && signal.removeEventListener) {
+                signal.removeEventListener('abort', onAbort);
+            }
+        }
+        emitter.on(name, onEvent);
+        if (name !== 'error') emitter.on('error', onError);
+        if (signal) {
+            if (signal.aborted) onAbort();
+            else if (signal.addEventListener) signal.addEventListener('abort', onAbort, { once: true });
+        }
+        return {
+            [Symbol.asyncIterator]: function() { return this; },
+            next: function() {
+                if (queue.length) return Promise.resolve({ value: queue.shift(), done: false });
+                if (done) return err ? Promise.reject(err) : Promise.resolve({ value: undefined, done: true });
+                return new Promise(function(resolve) { waiters.push(resolve); });
+            },
+            return: function(v) {
+                done = true; cleanup();
+                return Promise.resolve({ value: v, done: true });
+            },
+        };
+    };
+
+    EventEmitter.getEventListeners = function(target, name) {
+        if (target && typeof target.listeners === 'function') return target.listeners(name);
+        if (target && target._events && Array.isArray(target._events[name])) {
+            return target._events[name].slice();
+        }
+        return [];
+    };
+
+    EventEmitter.setMaxListeners = function(n) {
+        var args = Array.prototype.slice.call(arguments, 1);
+        if (args.length === 0) {
+            EventEmitter.defaultMaxListeners = n | 0;
+            return;
+        }
+        for (var i = 0; i < args.length; i++) {
+            if (args[i] && typeof args[i].setMaxListeners === 'function') {
+                args[i].setMaxListeners(n);
+            }
+        }
+    };
+    EventEmitter.getMaxListeners = function(emitter) {
+        return (emitter && typeof emitter.getMaxListeners === 'function')
+            ? emitter.getMaxListeners()
+            : EventEmitter.defaultMaxListeners;
+    };
+    EventEmitter.listenerCount = function(emitter, name) {
+        return (emitter && typeof emitter.listenerCount === 'function')
+            ? emitter.listenerCount(name)
+            : 0;
+    };
+
+    // Re-export the static helpers on the module object too — Node
+    // exposes them as both `EventEmitter.once` and
+    // `require('events').once`.
     module.exports = EventEmitter;
+    module.exports.once = EventEmitter.once;
+    module.exports.on = EventEmitter.on;
+    module.exports.getEventListeners = EventEmitter.getEventListeners;
+    module.exports.setMaxListeners = EventEmitter.setMaxListeners;
+    module.exports.getMaxListeners = EventEmitter.getMaxListeners;
+    module.exports.listenerCount = EventEmitter.listenerCount;
+    module.exports.captureRejectionSymbol = EventEmitter.captureRejectionSymbol;
+    module.exports.errorMonitor = EventEmitter.errorMonitor;
+    module.exports.captureRejections = EventEmitter.captureRejections;
+    module.exports.defaultMaxListeners = EventEmitter.defaultMaxListeners;
 });
 
 // ---- fetch.js ----
@@ -11119,6 +11329,17 @@ __register_module('stream', function(module, exports, require) {
         throw new Error('Writable.fromWeb: not implemented');
     };
 
+    /// stream.duplexPair — Node 22+. Returns `[a, b]` two Duplex
+    /// streams cross-connected: writes to `a` appear on reads from
+    /// `b` and vice versa. Useful for in-process protocol simulations.
+    function duplexPair() {
+        var a = new PassThrough();
+        var b = new PassThrough();
+        a.pipe(b);
+        b.pipe(a);
+        return [a, b];
+    }
+
     exports.Readable       = Readable;
     exports.Writable       = Writable;
     exports.Duplex         = Duplex;
@@ -11128,7 +11349,26 @@ __register_module('stream', function(module, exports, require) {
     exports.finished       = finished;
     exports.compose        = compose;
     exports.addAbortSignal = addAbortSignal;
+    exports.duplexPair     = duplexPair;
     exports.Stream         = Stream;
+    /// stream.promises — Node 15+ Promise-shaped wrappers for
+    /// pipeline / finished. Same names as `require('stream/promises')`.
+    exports.promises = {
+        pipeline: function() {
+            var args = Array.prototype.slice.call(arguments);
+            return new Promise(function(resolve, reject) {
+                args.push(function(err) { if (err) reject(err); else resolve(); });
+                pipeline.apply(null, args);
+            });
+        },
+        finished: function(stream, opts) {
+            return new Promise(function(resolve, reject) {
+                finished(stream, opts || {}, function(err) {
+                    if (err) reject(err); else resolve();
+                });
+            });
+        },
+    };
 
     Stream.Readable        = Readable;
     Stream.Writable        = Writable;
@@ -11139,6 +11379,8 @@ __register_module('stream', function(module, exports, require) {
     Stream.finished        = finished;
     Stream.compose         = compose;
     Stream.addAbortSignal  = addAbortSignal;
+    Stream.duplexPair      = duplexPair;
+    Stream.promises        = exports.promises;
     Stream.Stream          = Stream;
 
     module.exports = Stream;
