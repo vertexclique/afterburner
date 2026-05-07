@@ -13882,6 +13882,414 @@ __register_module('wasi', function(module, exports, require) {
     // groups (rare in practice). Real URL Pattern Standard supports
     // them — extend if a real workload surfaces.
     // ============================================================
+    // ============================================================
+    // WebSocket client (RFC 6455).
+    //
+    // Builds on top of `net.connect` / `tls.connect` so no new
+    // Rust host fns are needed. Performs the HTTP/1.1 Upgrade
+    // handshake (verifies `Sec-WebSocket-Accept`), then frames
+    // text / binary / close / ping / pong per the spec. Client
+    // → server frames are masked with a random 4-byte key.
+    //
+    // Surface matches WHATWG WebSocket: constructor(url[, protocols]),
+    // `.send(data)` for string / ArrayBuffer / TypedArray / Blob,
+    // `.close(code?, reason?)`, `readyState` (0..3),
+    // `addEventListener`, on{open,message,error,close} setters,
+    // `binaryType` ('blob' | 'arraybuffer'). Subprotocol negotiation
+    // through the `protocols` argument; `extensions` left empty.
+    // ============================================================
+    if (typeof globalThis.WebSocket !== 'function') {
+        var WS_CONNECTING = 0, WS_OPEN = 1, WS_CLOSING = 2, WS_CLOSED = 3;
+        var WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+
+        function _ws_random16() {
+            var arr = new Uint8Array(16);
+            globalThis.crypto.getRandomValues(arr);
+            return arr;
+        }
+        function _ws_b64(bytes) {
+            // node:buffer is available in our polyfill bundle.
+            var Buf = globalThis.Buffer || (require('buffer') && require('buffer').Buffer);
+            return Buf.from(bytes).toString('base64');
+        }
+        function _ws_sha1_b64(input) {
+            // SHA-1 + base64 — used to verify Sec-WebSocket-Accept.
+            var nc = require('crypto');
+            var h = nc.createHash('sha1');
+            h.update(input);
+            var hex = h.digest('hex');
+            var bytes = new Uint8Array(hex.length / 2);
+            for (var i = 0; i < bytes.length; i++) {
+                bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+            }
+            return _ws_b64(bytes);
+        }
+        function _ws_parseUrl(url) {
+            // Reuse globalThis.URL — we just need scheme/host/port/path.
+            var u = new URL(url);
+            var secure = u.protocol === 'wss:' || u.protocol === 'https:';
+            var port = u.port ? parseInt(u.port, 10) : (secure ? 443 : 80);
+            return { secure: secure, host: u.hostname, port: port,
+                     path: u.pathname + (u.search || '') };
+        }
+
+        function _ws_buildHandshake(parsed, key, protocols) {
+            var lines = [
+                'GET ' + parsed.path + ' HTTP/1.1',
+                'Host: ' + parsed.host + (parsed.port !== (parsed.secure ? 443 : 80)
+                    ? ':' + parsed.port : ''),
+                'Upgrade: websocket',
+                'Connection: Upgrade',
+                'Sec-WebSocket-Key: ' + key,
+                'Sec-WebSocket-Version: 13',
+            ];
+            if (protocols && protocols.length) {
+                var list = Array.isArray(protocols) ? protocols : [protocols];
+                lines.push('Sec-WebSocket-Protocol: ' + list.join(', '));
+            }
+            return lines.join('\r\n') + '\r\n\r\n';
+        }
+
+        function _ws_encodeFrame(opcode, payload) {
+            // RFC 6455 §5.2. Client→server frames are masked.
+            var Buf = globalThis.Buffer || require('buffer').Buffer;
+            var data = (typeof payload === 'string') ? Buf.from(payload, 'utf8')
+                     : Buf.isBuffer(payload) ? payload
+                     : Buf.from(payload);
+            var len = data.length;
+            var hdr;
+            var maskOffset;
+            if (len < 126) {
+                hdr = Buf.alloc(2 + 4);
+                hdr[0] = 0x80 | (opcode & 0x0F); // FIN=1
+                hdr[1] = 0x80 | len; // MASK=1, len
+                maskOffset = 2;
+            } else if (len < 65536) {
+                hdr = Buf.alloc(4 + 4);
+                hdr[0] = 0x80 | (opcode & 0x0F);
+                hdr[1] = 0x80 | 126;
+                hdr[2] = (len >> 8) & 0xFF;
+                hdr[3] = len & 0xFF;
+                maskOffset = 4;
+            } else {
+                hdr = Buf.alloc(10 + 4);
+                hdr[0] = 0x80 | (opcode & 0x0F);
+                hdr[1] = 0x80 | 127;
+                // 64-bit length, big-endian. JS ints are 53-bit safe; cap
+                // at 2^31-1 here. Real-world payloads above 2 GiB hit
+                // memory caps anyway.
+                hdr.writeUInt32BE(0, 2);
+                hdr.writeUInt32BE(len, 6);
+                maskOffset = 10;
+            }
+            var mask = new Uint8Array(4);
+            globalThis.crypto.getRandomValues(mask);
+            hdr[maskOffset]     = mask[0];
+            hdr[maskOffset + 1] = mask[1];
+            hdr[maskOffset + 2] = mask[2];
+            hdr[maskOffset + 3] = mask[3];
+            var masked = Buf.alloc(len);
+            for (var i = 0; i < len; i++) masked[i] = data[i] ^ mask[i % 4];
+            return Buf.concat([hdr, masked]);
+        }
+
+        function _ws_decodeFrames(buffer) {
+            // Returns { frames: [{opcode, payload, fin}], rest: Buffer }
+            // server→client frames are NOT masked.
+            var frames = [];
+            var p = 0;
+            while (p + 2 <= buffer.length) {
+                var b1 = buffer[p];
+                var b2 = buffer[p + 1];
+                var fin = (b1 & 0x80) !== 0;
+                var opcode = b1 & 0x0F;
+                var masked = (b2 & 0x80) !== 0;
+                var len = b2 & 0x7F;
+                var hdrLen = 2;
+                if (len === 126) {
+                    if (buffer.length < p + 4) break;
+                    len = buffer.readUInt16BE(p + 2);
+                    hdrLen = 4;
+                } else if (len === 127) {
+                    if (buffer.length < p + 10) break;
+                    // Top 32 bits ignored — see encode comment.
+                    len = buffer.readUInt32BE(p + 6);
+                    hdrLen = 10;
+                }
+                var maskKey = null;
+                if (masked) {
+                    if (buffer.length < p + hdrLen + 4) break;
+                    maskKey = buffer.slice(p + hdrLen, p + hdrLen + 4);
+                    hdrLen += 4;
+                }
+                if (buffer.length < p + hdrLen + len) break;
+                var payload = buffer.slice(p + hdrLen, p + hdrLen + len);
+                if (masked) {
+                    var unmasked = globalThis.Buffer.alloc(len);
+                    for (var i = 0; i < len; i++) unmasked[i] = payload[i] ^ maskKey[i % 4];
+                    payload = unmasked;
+                }
+                frames.push({ opcode: opcode, payload: payload, fin: fin });
+                p += hdrLen + len;
+            }
+            return { frames: frames, rest: buffer.slice(p) };
+        }
+
+        function WebSocket(url, protocols) {
+            if (!(this instanceof WebSocket)) {
+                throw new TypeError('WebSocket is a constructor');
+            }
+            this.url = String(url);
+            this.readyState = WS_CONNECTING;
+            this.binaryType = 'blob';
+            this.bufferedAmount = 0;
+            this.extensions = '';
+            this.protocol = '';
+            this.onopen = null;
+            this.onmessage = null;
+            this.onerror = null;
+            this.onclose = null;
+            this._listeners = Object.create(null);
+            this._handshakeBuf = globalThis.Buffer.alloc(0);
+            this._frameBuf = globalThis.Buffer.alloc(0);
+            this._handshakeDone = false;
+            this._fragments = [];
+            this._fragmentOpcode = 0;
+
+            var parsed = _ws_parseUrl(this.url);
+            var key = _ws_b64(_ws_random16());
+            this._handshakeKey = key;
+            this._expectedAccept = _ws_sha1_b64(key + WS_GUID);
+
+            var connectMod = parsed.secure ? 'tls' : 'net';
+            var sock;
+            try {
+                var mod = require(connectMod);
+                sock = mod.connect({
+                    host: parsed.host,
+                    port: parsed.port,
+                    servername: parsed.host,
+                });
+            } catch (e) {
+                this._fireError(e);
+                this._setReadyState(WS_CLOSED);
+                return;
+            }
+            this._sock = sock;
+
+            var self = this;
+            sock.once('connect', function() {
+                try {
+                    sock.write(_ws_buildHandshake(parsed, key, protocols));
+                } catch (e) { self._fireError(e); }
+            });
+            // TLS sockets fire 'secureConnect' after the TLS handshake;
+            // both shapes work here because net's connect→data flow
+            // matches.
+            sock.once('secureConnect', function() {
+                try {
+                    sock.write(_ws_buildHandshake(parsed, key, protocols));
+                } catch (e) { self._fireError(e); }
+            });
+            sock.on('data', function(chunk) {
+                if (!self._handshakeDone) {
+                    self._handshakeBuf = globalThis.Buffer.concat([self._handshakeBuf, chunk]);
+                    var idx = self._handshakeBuf.indexOf('\r\n\r\n');
+                    if (idx < 0) return;
+                    var head = self._handshakeBuf.slice(0, idx).toString('utf8');
+                    var rest = self._handshakeBuf.slice(idx + 4);
+                    self._handshakeBuf = globalThis.Buffer.alloc(0);
+                    if (!self._verifyHandshake(head)) return;
+                    self._handshakeDone = true;
+                    self._setReadyState(WS_OPEN);
+                    self._fire('open', {});
+                    if (rest.length) self._handleData(rest);
+                    return;
+                }
+                self._handleData(chunk);
+            });
+            sock.on('error', function(e) {
+                self._fireError(e);
+                self._setReadyState(WS_CLOSED);
+                self._fire('close', { code: 1006, reason: '', wasClean: false });
+            });
+            sock.on('close', function() {
+                if (self.readyState !== WS_CLOSED) {
+                    self._setReadyState(WS_CLOSED);
+                    self._fire('close', { code: 1006, reason: '', wasClean: false });
+                }
+            });
+        }
+        WebSocket.CONNECTING = WS_CONNECTING;
+        WebSocket.OPEN = WS_OPEN;
+        WebSocket.CLOSING = WS_CLOSING;
+        WebSocket.CLOSED = WS_CLOSED;
+        WebSocket.prototype.CONNECTING = WS_CONNECTING;
+        WebSocket.prototype.OPEN = WS_OPEN;
+        WebSocket.prototype.CLOSING = WS_CLOSING;
+        WebSocket.prototype.CLOSED = WS_CLOSED;
+
+        WebSocket.prototype._setReadyState = function(s) { this.readyState = s; };
+        WebSocket.prototype._fireError = function(err) {
+            var e = (err && err.message) ? err : new Error(String(err || 'WebSocket error'));
+            this._fire('error', { error: e, message: e.message });
+        };
+        WebSocket.prototype._fire = function(type, detail) {
+            var ev = Object.assign({ type: type, target: this }, detail || {});
+            var prop = 'on' + type;
+            try { if (typeof this[prop] === 'function') this[prop](ev); } catch (_) {}
+            var arr = this._listeners[type];
+            if (arr) {
+                for (var i = 0; i < arr.length; i++) {
+                    try { arr[i](ev); } catch (_) {}
+                }
+            }
+        };
+        WebSocket.prototype._verifyHandshake = function(head) {
+            var lines = head.split('\r\n');
+            var status = lines[0] || '';
+            if (status.indexOf(' 101 ') === -1) {
+                this._fireError(new Error('WebSocket handshake failed: ' + status));
+                this._setReadyState(WS_CLOSED);
+                this._fire('close', { code: 1006, reason: '', wasClean: false });
+                return false;
+            }
+            var accept = '';
+            var protocol = '';
+            for (var i = 1; i < lines.length; i++) {
+                var c = lines[i].indexOf(':');
+                if (c < 0) continue;
+                var name = lines[i].slice(0, c).trim().toLowerCase();
+                var value = lines[i].slice(c + 1).trim();
+                if (name === 'sec-websocket-accept') accept = value;
+                else if (name === 'sec-websocket-protocol') protocol = value;
+            }
+            if (accept !== this._expectedAccept) {
+                this._fireError(new Error('WebSocket handshake: bad Sec-WebSocket-Accept'));
+                this._setReadyState(WS_CLOSED);
+                this._fire('close', { code: 1006, reason: '', wasClean: false });
+                return false;
+            }
+            this.protocol = protocol;
+            return true;
+        };
+        WebSocket.prototype._handleData = function(chunk) {
+            this._frameBuf = globalThis.Buffer.concat([this._frameBuf, chunk]);
+            var dec = _ws_decodeFrames(this._frameBuf);
+            this._frameBuf = dec.rest;
+            for (var i = 0; i < dec.frames.length; i++) this._handleFrame(dec.frames[i]);
+        };
+        WebSocket.prototype._handleFrame = function(frame) {
+            switch (frame.opcode) {
+                case 0x0: // continuation
+                    this._fragments.push(frame.payload);
+                    if (frame.fin) {
+                        var full = globalThis.Buffer.concat(this._fragments);
+                        this._fragments = [];
+                        this._dispatchMessage(this._fragmentOpcode, full);
+                    }
+                    break;
+                case 0x1: // text
+                case 0x2: // binary
+                    if (frame.fin) {
+                        this._dispatchMessage(frame.opcode, frame.payload);
+                    } else {
+                        this._fragments = [frame.payload];
+                        this._fragmentOpcode = frame.opcode;
+                    }
+                    break;
+                case 0x8: // close
+                    var code = frame.payload.length >= 2 ? frame.payload.readUInt16BE(0) : 1005;
+                    var reason = frame.payload.length > 2
+                        ? frame.payload.slice(2).toString('utf8') : '';
+                    this._setReadyState(WS_CLOSING);
+                    try { this._sock.write(_ws_encodeFrame(0x8, frame.payload)); } catch (_) {}
+                    try { this._sock.end(); } catch (_) {}
+                    this._setReadyState(WS_CLOSED);
+                    this._fire('close', { code: code, reason: reason, wasClean: true });
+                    break;
+                case 0x9: // ping → respond with pong, same payload
+                    try { this._sock.write(_ws_encodeFrame(0xA, frame.payload)); } catch (_) {}
+                    break;
+                case 0xA: // pong → ignore
+                    break;
+                default:
+                    // Unknown opcode → fail the connection per spec.
+                    this._fireError(new Error('WebSocket: unknown opcode ' + frame.opcode));
+                    try { this._sock.end(); } catch (_) {}
+                    break;
+            }
+        };
+        WebSocket.prototype._dispatchMessage = function(opcode, payload) {
+            var data;
+            if (opcode === 0x1) {
+                data = payload.toString('utf8');
+            } else if (this.binaryType === 'arraybuffer') {
+                var ab = new ArrayBuffer(payload.length);
+                new Uint8Array(ab).set(payload);
+                data = ab;
+            } else {
+                // 'blob' default — surface as Buffer (Blob exists but the
+                // canonical browser shape is opaque; node's `ws` package
+                // surfaces Buffer here too).
+                data = payload;
+            }
+            this._fire('message', { data: data });
+        };
+        WebSocket.prototype.send = function(data) {
+            if (this.readyState !== WS_OPEN) {
+                throw new Error('WebSocket is not open: readyState ' + this.readyState);
+            }
+            var opcode = (typeof data === 'string') ? 0x1 : 0x2;
+            var Buf = globalThis.Buffer;
+            var payload;
+            if (typeof data === 'string') {
+                payload = Buf.from(data, 'utf8');
+            } else if (data instanceof ArrayBuffer) {
+                payload = Buf.from(new Uint8Array(data));
+            } else if (ArrayBuffer.isView(data)) {
+                payload = Buf.from(data.buffer, data.byteOffset, data.byteLength);
+            } else if (Buf.isBuffer(data)) {
+                payload = data;
+            } else {
+                payload = Buf.from(String(data), 'utf8');
+            }
+            try { this._sock.write(_ws_encodeFrame(opcode, payload)); }
+            catch (e) { this._fireError(e); }
+        };
+        WebSocket.prototype.close = function(code, reason) {
+            if (this.readyState >= WS_CLOSING) return;
+            this._setReadyState(WS_CLOSING);
+            var Buf = globalThis.Buffer;
+            var payload = Buf.alloc(0);
+            if (typeof code === 'number') {
+                var rb = reason ? Buf.from(String(reason), 'utf8') : Buf.alloc(0);
+                payload = Buf.alloc(2 + rb.length);
+                payload.writeUInt16BE(code, 0);
+                if (rb.length) rb.copy(payload, 2);
+            }
+            try { this._sock.write(_ws_encodeFrame(0x8, payload)); } catch (_) {}
+            try { this._sock.end(); } catch (_) {}
+        };
+        WebSocket.prototype.addEventListener = function(type, listener) {
+            if (typeof listener !== 'function') return;
+            if (!this._listeners[type]) this._listeners[type] = [];
+            this._listeners[type].push(listener);
+        };
+        WebSocket.prototype.removeEventListener = function(type, listener) {
+            var arr = this._listeners[type];
+            if (!arr) return;
+            var idx = arr.indexOf(listener);
+            if (idx >= 0) arr.splice(idx, 1);
+        };
+        WebSocket.prototype.dispatchEvent = function(event) {
+            if (event && typeof event.type === 'string') this._fire(event.type, event);
+            return true;
+        };
+
+        globalThis.WebSocket = WebSocket;
+    }
+
     if (typeof globalThis.URLPattern !== 'function') {
         var COMPONENTS = ['protocol', 'username', 'password', 'hostname', 'port',
                           'pathname', 'search', 'hash'];

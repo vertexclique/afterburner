@@ -74,6 +74,7 @@ dependencies = [
  "rustyline",
  "serde_json",
  "serial_test",
+ "sha1 0.10.6",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

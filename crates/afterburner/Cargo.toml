@@ -76,6 +76,9 @@ base64 = { workspace = true }
 # WebAssembly loader tests — compile WAT to bytes at test time
 # instead of hand-encoding binary modules.
 wat = "1"
+# WebSocket round-trip tests need to compute Sec-WebSocket-Accept;
+# `sha1` is the smallest workspace dep that does it.
+sha1 = { workspace = true }
 
 [features]
 default = ["wasm", "native", "thrust"]
