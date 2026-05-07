@@ -25,19 +25,6 @@ fn run_inline(source: &str) -> std::process::Output {
         .expect("spawn burn")
 }
 
-fn assert_marker(out: &std::process::Output, marker: &str) {
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "burn failed. stdout={stdout}\nstderr={stderr}"
-    );
-    assert!(
-        stdout.contains(marker),
-        "missing marker `{marker}`. stdout={stdout}\nstderr={stderr}"
-    );
-}
-
 #[test]
 fn os_homedir_returns_real_directory_not_root() {
     let out = run_inline(
