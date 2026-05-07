@@ -103,18 +103,6 @@ burn --allow-env=HOME,PATH launcher.js
 burn -A runall.js                          # grant everything
 ```
 
-### Package managers
-
-`burn npm install` and `burn bun add lodash` both complete end-to-
-end. npm runs as the original JS script: its `#!/usr/bin/env node`
-shebang resolves through our PATH shim and the npm CLI, pacote,
-arborist, minizlib, tar — the whole canonical install pipeline —
-runs inside the burn sandbox over real async outbound HTTP. bun
-runs as a native ELF binary and the passthrough hands it args
-verbatim. `burn pnpm install` / `burn yarn add` inherit the npm
-fix; the corepack `__webpack_require__.e(chunkId)` chunked-import
-path is the remaining gap.
-
 See [`examples/`](./examples/) for standalone projects covering single
 UDF, batched UDF, multi-worker scheduling, streaming crypto,
 `HostContext` + capability grants, and rebuilding `burn` in 30 lines.
