@@ -93,6 +93,9 @@ unsafe extern "C" {
     // ---- os ----------------------------------------------------------
     pub fn host_os_platform(out_ptr: *mut u8, out_cap: u32) -> i32;
     pub fn host_os_arch(out_ptr: *mut u8, out_cap: u32) -> i32;
+    pub fn host_os_home_dir(out_ptr: *mut u8, out_cap: u32) -> i32;
+    pub fn host_os_tmpdir(out_ptr: *mut u8, out_cap: u32) -> i32;
+    pub fn host_os_hostname(out_ptr: *mut u8, out_cap: u32) -> i32;
 
     // ---- http + dns --------------------------------------------------
     pub fn host_http_request(

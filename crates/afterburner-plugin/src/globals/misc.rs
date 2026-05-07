@@ -969,6 +969,33 @@ fn install_os<'js>(globals: &Object<'js>) {
             }
         }),
     );
+    let _ = globals.set(
+        "__host_os_home_dir",
+        Func::from(|| -> String {
+            match call_read(|out, cap| unsafe { host_os_home_dir(out, cap) }) {
+                Ok(s) => s,
+                Err(_) => "/".to_string(),
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_os_tmpdir",
+        Func::from(|| -> String {
+            match call_read(|out, cap| unsafe { host_os_tmpdir(out, cap) }) {
+                Ok(s) => s,
+                Err(_) => "/tmp".to_string(),
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_os_hostname",
+        Func::from(|| -> String {
+            match call_read(|out, cap| unsafe { host_os_hostname(out, cap) }) {
+                Ok(s) => s,
+                Err(_) => "afterburner".to_string(),
+            }
+        }),
+    );
 }
 
 fn install_http_dns<'js>(globals: &Object<'js>) {

@@ -756,6 +756,48 @@ fn wrap_os(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         )
         .map_err(link_err)?;
 
+    linker
+        .func_wrap(
+            NS,
+            "host_os_home_dir",
+            |mut caller: Caller<'_, HostState>, out_ptr: i32, out_cap: i32| -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let s = os_host::home_dir();
+                write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes())
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_os_tmpdir",
+            |mut caller: Caller<'_, HostState>, out_ptr: i32, out_cap: i32| -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let s = os_host::tmpdir();
+                write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes())
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_os_hostname",
+            |mut caller: Caller<'_, HostState>, out_ptr: i32, out_cap: i32| -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let s = os_host::hostname();
+                write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes())
+            },
+        )
+        .map_err(link_err)?;
+
     Ok(())
 }
 

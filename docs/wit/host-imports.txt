@@ -83,7 +83,10 @@ host_net_set_keep_alive
 host_net_set_no_delay
 host_net_write
 host_os_arch
+host_os_home_dir
+host_os_hostname
 host_os_platform
+host_os_tmpdir
 host_process_exit
 host_read_column
 host_shadow_argon2_hash
