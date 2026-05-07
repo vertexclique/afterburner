@@ -8431,9 +8431,62 @@ __register_module('perf_hooks', function(module, exports, require) {
             return [seconds, nanos];
         },
 
-        stdout: { write: function(s) { if (globalThis.console) console.log(String(s)); return true; } },
-        stderr: { write: function(s) { if (globalThis.console) console.error(String(s)); return true; } },
-        stdin:  { on: function() {}, read: function() { return null; } },
+        // Node guarantees `process.stdout.fd === 1`, `stderr.fd === 2`,
+        // `stdin.fd === 0`; libraries probe these (chalk reads stdout
+        // for color decisions, log streams pipe by fd). `isTTY` /
+        // `columns` / `rows` shape matches Node's interactive defaults
+        // — caller can override to flip color output off.
+        stdout: {
+            fd: 1, isTTY: false, columns: 80, rows: 24,
+            write: function(s, _enc, cb) {
+                if (globalThis.console) console.log(typeof s === 'string' ? s : String(s));
+                if (typeof cb === 'function') Promise.resolve().then(cb);
+                return true;
+            },
+            on: function() { return this; },
+            once: function() { return this; },
+            removeListener: function() { return this; },
+            off: function() { return this; },
+            emit: function() { return false; },
+            cork: function() {}, uncork: function() {}, end: function() {},
+            getColorDepth: function() { return 1; },
+            hasColors: function() { return false; },
+            clearLine: function() {}, clearScreenDown: function() {}, cursorTo: function() {},
+        },
+        stderr: {
+            fd: 2, isTTY: false, columns: 80, rows: 24,
+            write: function(s, _enc, cb) {
+                if (globalThis.console) console.error(typeof s === 'string' ? s : String(s));
+                if (typeof cb === 'function') Promise.resolve().then(cb);
+                return true;
+            },
+            on: function() { return this; },
+            once: function() { return this; },
+            removeListener: function() { return this; },
+            off: function() { return this; },
+            emit: function() { return false; },
+            cork: function() {}, uncork: function() {}, end: function() {},
+            getColorDepth: function() { return 1; },
+            hasColors: function() { return false; },
+            clearLine: function() {}, clearScreenDown: function() {}, cursorTo: function() {},
+        },
+        stdin: {
+            fd: 0, isTTY: false,
+            on: function() { return this; },
+            once: function() { return this; },
+            removeListener: function() { return this; },
+            off: function() { return this; },
+            emit: function() { return false; },
+            read: function() { return null; },
+            pause: function() { return this; },
+            resume: function() { return this; },
+            setEncoding: function() { return this; },
+            setRawMode: function() { return this; },
+            unref: function() { return this; },
+            ref: function() { return this; },
+            destroy: function() { return this; },
+            pipe: function(dest) { if (dest && dest.end) dest.end(); return dest; },
+        },
 
         // `process.binding(name)` is Node's internal hook for native
         // bindings (e.g. `process.binding('uv')`, `'tcp_wrap'`,
