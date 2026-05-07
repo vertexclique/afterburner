@@ -7915,6 +7915,45 @@ __register_module('perf_hooks', function(module, exports, require) {
                 signalsCount: 0, voluntaryContextSwitches: 0, involuntaryContextSwitches: 0,
             };
         },
+        // process.getActiveResourcesInfo (Node 18+). Returns an array
+        // of strings naming the resources keeping the event loop
+        // alive. Burn's daemon mode tracks listeners, ref'd timers,
+        // outbound HTTP, etc. through `daemon.has_refs()`; for the
+        // JS-level surface we approximate with a per-shard view of
+        // currently alive resources we can detect.
+        getActiveResourcesInfo: function() {
+            var out = [];
+            // Crude best-effort: probe `__ab_*` markers we install
+            // for in-flight outbound HTTP, server handlers, timers.
+            if (globalThis.__ab_http_pending) {
+                var keys = Object.keys(globalThis.__ab_http_pending);
+                for (var i = 0; i < keys.length; i++) out.push('TCPWRAP');
+            }
+            if (globalThis.__ab_http_handlers) {
+                var hkeys = Object.keys(globalThis.__ab_http_handlers);
+                for (var j = 0; j < hkeys.length; j++) out.push('TCPSERVERWRAP');
+            }
+            return out;
+        },
+        // process.getBuiltinModule(id) (Node 22+). Returns the same
+        // module the synchronous CJS `require(id)` would, or
+        // `undefined` if the id isn't a Node built-in (vs throwing —
+        // matches Node's contract).
+        getBuiltinModule: function(id) {
+            if (typeof id !== 'string') return undefined;
+            var bare = id.indexOf('node:') === 0 ? id.slice(5) : id;
+            try {
+                if (typeof globalThis.require === 'function') {
+                    var mod = globalThis.require;
+                    var Module = mod('module');
+                    if (Module && typeof Module.isBuiltin === 'function' && !Module.isBuiltin(bare)) {
+                        return undefined;
+                    }
+                    return mod(bare);
+                }
+            } catch (_) {}
+            return undefined;
+        },
         // process.loadEnvFile (Node 20.6+). The CLI's `--env-file`
         // already loads at startup; this in-process call parses
         // additional files at runtime and merges into `process.env`.
