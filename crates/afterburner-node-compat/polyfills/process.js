@@ -440,6 +440,104 @@
 
     Object.keys(fields).forEach(function(k) { proc[k] = fields[k]; });
 
+    /// process.uptime — seconds since process start. We anchor to the
+    /// JS runtime epoch since the host's timestamp granularity matches
+    /// what Node returns.
+    var _start = Date.now();
+    proc.uptime = function() { return (Date.now() - _start) / 1000; };
+
+    /// process.kill — Node sends a signal to a target PID. Sandbox
+    /// can't actually deliver signals, but the function exists so
+    /// libraries that call it (cleanup hooks, watchdogs) don't crash.
+    /// Matches Node's "always-true" behavior on Windows for SIGTERM.
+    proc.kill = function(pid, _signal) {
+        if (typeof pid !== 'number') {
+            var e = new TypeError('process.kill: pid must be a number');
+            e.code = 'ERR_INVALID_ARG_TYPE';
+            throw e;
+        }
+        // Sandboxed — no actual signal delivery. Silently succeed for
+        // self-pid (many libraries use kill(process.pid, 0) as a probe).
+        return true;
+    };
+
+    /// process.dlopen — opens a native .node addon. Burn's WASM
+    /// sandbox can't load native code; throw so probe-shaped libraries
+    /// fall through to their JS-only path.
+    proc.dlopen = function(_module, _filename, _flags) {
+        var e = new Error(
+            'process.dlopen: native addons (.node files) are not ' +
+            'supported in the Afterburner sandbox');
+        e.code = 'ERR_DLOPEN_DISABLED';
+        throw e;
+    };
+
+    /// process.allowedNodeEnvironmentFlags — Node 12+ Set of CLI flags
+    /// that the runtime accepts via NODE_OPTIONS. Real Node ships ~30;
+    /// we expose the Set shape with a documented subset so feature
+    /// detection works without lying about flags we don't honour.
+    var _allowedFlags = new Set([
+        '--enable-source-maps',
+        '--no-deprecation',
+        '--no-warnings',
+        '--unhandled-rejections=throw',
+        '--unhandled-rejections=warn',
+        '--unhandled-rejections=strict',
+        '--max-old-space-size',
+    ]);
+    Object.defineProperty(proc, 'allowedNodeEnvironmentFlags', {
+        value: _allowedFlags, writable: false, configurable: true, enumerable: true,
+    });
+
+    /// process.features — Node has had this object since 0.5 with
+    /// boolean flags advertising which optional features were
+    /// compiled in. Most libraries grep for `features.tls` or
+    /// `features.cached_builtins`.
+    Object.defineProperty(proc, 'features', {
+        value: Object.freeze({
+            inspector: false,
+            debug: false,
+            uv: false,
+            ipv6: true,
+            tls_alpn: true,
+            tls_sni: true,
+            tls_ocsp: false,
+            tls: true,
+            cached_builtins: true,
+        }),
+        writable: false, configurable: true, enumerable: true,
+    });
+
+    /// process.config — Node's compile-time config object. Real Node
+    /// puts ~hundreds of GYP-style entries here; we surface enough
+    /// that build-tools that sniff the Node ABI version don't crash.
+    Object.defineProperty(proc, 'config', {
+        value: Object.freeze({
+            target_defaults: { default_configuration: 'Release' },
+            variables: {
+                host_arch: proc.arch || 'x64',
+                node_install_npm: false,
+                node_module_version: 127,
+                target_arch: proc.arch || 'x64',
+                v8_enable_i18n_support: 1,
+            },
+        }),
+        writable: false, configurable: true, enumerable: true,
+    });
+
+    /// process.release — release-channel metadata. npm uses
+    /// `process.release.name === 'node'` to gate Node-vs-iojs paths.
+    Object.defineProperty(proc, 'release', {
+        value: Object.freeze({
+            name: 'node',
+            sourceUrl: '',
+            headersUrl: '',
+            libUrl: '',
+            lts: 'Burn',
+        }),
+        writable: false, configurable: true, enumerable: true,
+    });
+
     globalThis.process = proc;
     __register_host_module('process', proc);
 })();

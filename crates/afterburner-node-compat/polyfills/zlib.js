@@ -211,6 +211,52 @@ __register_module('zlib', function(module, exports, require) {
     exports.createBrotliCompress    = function() { BrotliNotSupported(); };
     exports.createBrotliDecompress  = function() { BrotliNotSupported(); };
 
+    /// Brotli async surface — promise-shaped wrappers around the
+    /// not-supported callable so callers that probe for the names
+    /// (and feature-detect via `typeof`) don't trip `is not a function`
+    /// before they get a chance to handle the absence. The callbacks
+    /// fire on a microtask with an ERR_BROTLI_INVALID_PARAM error.
+    exports.brotliCompress = function(_input, optionsOrCb, cb) {
+        if (typeof optionsOrCb === 'function') cb = optionsOrCb;
+        Promise.resolve().then(function() {
+            cb(Object.assign(new Error('zlib brotli codec not available'),
+                             { code: 'ERR_BROTLI_INVALID_PARAM' }));
+        });
+    };
+    exports.brotliDecompress = function(_input, optionsOrCb, cb) {
+        if (typeof optionsOrCb === 'function') cb = optionsOrCb;
+        Promise.resolve().then(function() {
+            cb(Object.assign(new Error('zlib brotli codec not available'),
+                             { code: 'ERR_BROTLI_INVALID_PARAM' }));
+        });
+    };
+    exports.brotliCompressSync = function() { BrotliNotSupported(); };
+    exports.brotliDecompressSync = function() { BrotliNotSupported(); };
+
+    /// `zlib.crc32(data, value)` — Node 22.2+ pure-JS CRC32 (IEEE
+    /// polynomial 0xedb88320). Pulls bytes via Buffer to handle the
+    /// usual mix of string/Buffer/Uint8Array input shapes.
+    var _crc32_table = (function() {
+        var t = new Uint32Array(256);
+        for (var n = 0; n < 256; n++) {
+            var c = n;
+            for (var k = 0; k < 8; k++) {
+                c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+            }
+            t[n] = c >>> 0;
+        }
+        return t;
+    })();
+    exports.crc32 = function(data, value) {
+        var Buffer = require('buffer').Buffer;
+        var bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
+        var crc = ((value | 0) ^ 0xffffffff) >>> 0;
+        for (var i = 0; i < bytes.length; i++) {
+            crc = (_crc32_table[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8)) >>> 0;
+        }
+        return (crc ^ 0xffffffff) >>> 0;
+    };
+
     // Constants block — every Z_* flush flag, error code, and
     // strategy. minizlib reads these by name (`Z_NO_FLUSH`,
     // `Z_FINISH`, etc.). Numeric values match upstream zlib.

@@ -705,6 +705,11 @@ __register_module('fs', function(module, exports, require) {
         var fn = requireHost('realpath_sync');
         return checkHostError(fn(String(path)), 'realpath');
     };
+    /// `fs.realpathSync.native` / `fs.realpath.native` — Node calls
+    /// the underlying libuv realpath here; we have one resolver, so
+    /// the alias just points back at the same fn (matches Node's
+    /// "they always return the same value" contract).
+    exports.realpathSync.native = exports.realpathSync;
     exports.realpath = function(path, options, cb) {
         if (typeof options === 'function') { cb = options; options = undefined; }
         var self = exports;
@@ -1187,6 +1192,14 @@ __register_module('fs', function(module, exports, require) {
     exports.promises.realpath = function(path) {
         return new Promise(function(resolve, reject) {
             try { resolve(exports.realpathSync(path)); }
+            catch (e) { reject(e); }
+        });
+    };
+    /// `fs.promises.statfs(path, options)` — Node 19+ Promise twin
+    /// of `fs.statfs` / `fs.statfsSync`.
+    exports.promises.statfs = function(path, options) {
+        return new Promise(function(resolve, reject) {
+            try { resolve(exports.statfsSync(path, options)); }
             catch (e) { reject(e); }
         });
     };
