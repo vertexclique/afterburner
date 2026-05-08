@@ -164,9 +164,19 @@ __register_module('crypto', function(module, exports, require) {
     exports.getCiphers = function() { return SUPPORTED_CIPHERS.slice(); };
     exports.getCurves  = function() { return ['P-256', 'P-384', 'P-521']; };
 
-    exports.randomBytes = function(len, encoding) {
-        var enc = typeof encoding === 'string' ? encoding : 'hex';
-        return checkErr(ensureHost('random_bytes')(len, enc), 'randomBytes');
+    /// `crypto.randomBytes(len[, callback])` — Node returns a Buffer
+    /// of `len` cryptographically random bytes. The callback form
+    /// (Node 0.5+) takes `(err, buf)`. We get the bytes from the host
+    /// as a hex string, then re-pack into a Buffer to match Node's
+    /// API surface.
+    exports.randomBytes = function(len, cb) {
+        var hex = checkErr(ensureHost('random_bytes')(len, 'hex'), 'randomBytes');
+        var buf = Buffer.from(hex, 'hex');
+        if (typeof cb === 'function') {
+            Promise.resolve().then(function() { cb(null, buf); });
+            return undefined;
+        }
+        return buf;
     };
 
     exports.randomUUID = function() {

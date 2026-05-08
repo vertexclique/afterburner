@@ -2246,9 +2246,19 @@ __register_module('crypto', function(module, exports, require) {
     exports.getCiphers = function() { return SUPPORTED_CIPHERS.slice(); };
     exports.getCurves  = function() { return ['P-256', 'P-384', 'P-521']; };
 
-    exports.randomBytes = function(len, encoding) {
-        var enc = typeof encoding === 'string' ? encoding : 'hex';
-        return checkErr(ensureHost('random_bytes')(len, enc), 'randomBytes');
+    /// `crypto.randomBytes(len[, callback])` — Node returns a Buffer
+    /// of `len` cryptographically random bytes. The callback form
+    /// (Node 0.5+) takes `(err, buf)`. We get the bytes from the host
+    /// as a hex string, then re-pack into a Buffer to match Node's
+    /// API surface.
+    exports.randomBytes = function(len, cb) {
+        var hex = checkErr(ensureHost('random_bytes')(len, 'hex'), 'randomBytes');
+        var buf = Buffer.from(hex, 'hex');
+        if (typeof cb === 'function') {
+            Promise.resolve().then(function() { cb(null, buf); });
+            return undefined;
+        }
+        return buf;
     };
 
     exports.randomUUID = function() {
@@ -13702,7 +13712,13 @@ __register_module('util', function(module, exports, require) {
         return out;
     };
 
-    exports.inspect = function(value, opts) {
+    /// `util.inspect.custom` — Node 6.6+ symbol used by libraries to
+    /// supply a custom inspect string. We define it once so callers
+    /// can attach `obj[util.inspect.custom] = function() {...}` and
+    /// have inspect call it.
+    var INSPECT_CUSTOM = Symbol.for('nodejs.util.inspect.custom');
+
+    exports.inspect = function inspect(value, opts) {
         var seen = [];
         function go(v, depth) {
             if (v === null) return 'null';
@@ -13714,6 +13730,16 @@ __register_module('util', function(module, exports, require) {
             if (t === 'symbol') return v.toString();
             if (seen.indexOf(v) !== -1) return '[Circular]';
             if (depth > 4) return '[Object]';
+            // Honour util.inspect.custom hook before any default
+            // serialization. Callers expect this to be tried before
+            // toString / toJSON / Object.keys.
+            if (typeof v[INSPECT_CUSTOM] === 'function') {
+                try {
+                    var custom = v[INSPECT_CUSTOM](depth, opts || {}, inspect);
+                    if (typeof custom === 'string') return custom;
+                    if (custom !== undefined) return go(custom, depth + 1);
+                } catch (_) {}
+            }
             seen.push(v);
             try {
                 if (Array.isArray(v)) {
@@ -13729,6 +13755,23 @@ __register_module('util', function(module, exports, require) {
             }
         }
         return go(value, 0);
+    };
+    exports.inspect.custom = INSPECT_CUSTOM;
+    exports.inspect.defaultOptions = {
+        depth: 2, colors: false, customInspect: true, showHidden: false,
+        showProxy: false, maxArrayLength: 100, maxStringLength: 10000,
+        breakLength: 128, compact: 3, sorted: false, getters: false,
+        numericSeparator: false,
+    };
+    exports.inspect.colors = {
+        bold: [1, 22], italic: [3, 23], underline: [4, 24], inverse: [7, 27],
+        white: [37, 39], grey: [90, 39], black: [30, 39], blue: [34, 39],
+        cyan: [36, 39], green: [32, 39], magenta: [35, 39], red: [31, 39], yellow: [33, 39],
+    };
+    exports.inspect.styles = {
+        special: 'cyan', number: 'yellow', bigint: 'yellow', boolean: 'yellow',
+        undefined: 'grey', null: 'bold', string: 'green', symbol: 'green',
+        date: 'magenta', regexp: 'red', module: 'underline',
     };
 
     exports.inherits = function(ctor, superCtor) {
