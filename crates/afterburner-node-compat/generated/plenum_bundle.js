@@ -13287,6 +13287,44 @@ __register_module('tls', function(module, exports, require) {
     // Stable defaults — Node exposes these but burn doesn't gate on them.
     exports.DEFAULT_MIN_VERSION = 'TLSv1.2';
     exports.DEFAULT_MAX_VERSION = 'TLSv1.3';
+    /// `tls.DEFAULT_ECDH_CURVE` (Node 8+) — preferred curve list. We
+    /// don't gate on this; Node defaults to 'auto'.
+    exports.DEFAULT_ECDH_CURVE = 'auto';
+    /// `tls.DEFAULT_CIPHERS` — Node's default OpenSSL cipher string.
+    /// We surface the canonical Node 18+ default for libraries that
+    /// echo it back (axios bundle reporting, oncall debugging).
+    exports.DEFAULT_CIPHERS = [
+        'TLS_AES_256_GCM_SHA384',
+        'TLS_CHACHA20_POLY1305_SHA256',
+        'TLS_AES_128_GCM_SHA256',
+        'ECDHE-RSA-AES128-GCM-SHA256',
+        'ECDHE-ECDSA-AES128-GCM-SHA256',
+        'ECDHE-RSA-AES256-GCM-SHA384',
+        'ECDHE-ECDSA-AES256-GCM-SHA384',
+        'DHE-RSA-AES128-GCM-SHA256',
+        'ECDHE-RSA-AES128-SHA256',
+        'DHE-RSA-AES128-SHA256',
+        'ECDHE-RSA-AES256-SHA384',
+        'DHE-RSA-AES256-SHA384',
+        'ECDHE-RSA-AES256-SHA256',
+        'DHE-RSA-AES256-SHA256',
+        'HIGH',
+        '!aNULL',
+        '!eNULL',
+        '!EXPORT',
+        '!DES',
+        '!RC4',
+        '!MD5',
+        '!PSK',
+        '!SRP',
+        '!CAMELLIA',
+    ].join(':');
+    /// Renegotiation guards — Node has had these since 0.6 to defend
+    /// against CVE-2009-3555. We surface the values and accept them as
+    /// configured but our TCP/TLS layer doesn't expose renegotiation,
+    /// so they're informational.
+    exports.CLIENT_RENEG_LIMIT = 3;
+    exports.CLIENT_RENEG_WINDOW = 600;
 
     /// tls.checkServerIdentity(hostname, cert) — verify a peer
     /// certificate matches the requested hostname. Real impl walks
