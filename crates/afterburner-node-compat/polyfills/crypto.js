@@ -494,6 +494,132 @@ __register_module('crypto', function(module, exports, require) {
         return fromB64(raw, 'scryptSync');
     };
 
+    /// `crypto.scrypt(password, salt, keylen, options, cb)` — Node's
+    /// async wrapper. Our scrypt is host-side synchronous, so we
+    /// dispatch on a microtask to preserve the cb-after-IO contract.
+    exports.scrypt = function(password, salt, keylen, options, cb) {
+        if (typeof options === 'function') { cb = options; options = undefined; }
+        Promise.resolve().then(function() {
+            try { cb(null, exports.scryptSync(password, salt, keylen, options)); }
+            catch (e) { cb(e); }
+        });
+    };
+
+    /// `crypto.hash(algorithm, data, encoding)` — Node 21+ one-shot
+    /// hash that skips the `createHash` ceremony. Returns the digest
+    /// directly in the requested encoding (default 'hex').
+    exports.hash = function(algorithm, data, encoding) {
+        var h = exports.createHash(algorithm);
+        h.update(data);
+        return h.digest(encoding || 'hex');
+    };
+
+    /// `crypto.hkdfSync(digest, ikm, salt, info, length)` — Node 15+.
+    /// Composes HKDF-Extract + HKDF-Expand from createHmac. Returns
+    /// the OKM as an ArrayBuffer (Node returns ArrayBuffer too).
+    exports.hkdfSync = function(digest, ikm, salt, info, length) {
+        var Buffer = require('buffer').Buffer;
+        var ikmBuf  = Buffer.isBuffer(ikm)  ? ikm  : Buffer.from(ikm);
+        var saltBuf = Buffer.isBuffer(salt) ? salt : Buffer.from(salt || '');
+        var infoBuf = Buffer.isBuffer(info) ? info : Buffer.from(info || '');
+        // HKDF-Extract: PRK = HMAC(salt, IKM)
+        var extract = exports.createHmac(digest, saltBuf);
+        extract.update(ikmBuf);
+        var prk = Buffer.from(extract.digest('hex'), 'hex');
+        // HKDF-Expand: T(0) = empty; T(i) = HMAC(PRK, T(i-1) || info || 0xi)
+        var hashLen = prk.length;
+        var n = Math.ceil(length / hashLen);
+        if (n > 255) {
+            throw new RangeError('HKDF: length too large');
+        }
+        var okm = Buffer.alloc(0);
+        var t = Buffer.alloc(0);
+        for (var i = 1; i <= n; i++) {
+            var h = exports.createHmac(digest, prk);
+            h.update(Buffer.concat([t, infoBuf, Buffer.from([i])]));
+            t = Buffer.from(h.digest('hex'), 'hex');
+            okm = Buffer.concat([okm, t]);
+        }
+        var out = okm.slice(0, length);
+        return out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength);
+    };
+
+    /// `crypto.hkdf(...)` — async sibling. Mirrors hkdfSync on a
+    /// microtask.
+    exports.hkdf = function(digest, ikm, salt, info, length, cb) {
+        Promise.resolve().then(function() {
+            try { cb(null, exports.hkdfSync(digest, ikm, salt, info, length)); }
+            catch (e) { cb(e); }
+        });
+    };
+
+    /// `crypto.subtle` — alias to globalThis.crypto.subtle (Node 15+
+    /// ships SubtleCrypto via the crypto module, not just globally).
+    Object.defineProperty(exports, 'subtle', {
+        get: function() {
+            return globalThis.crypto && globalThis.crypto.subtle;
+        },
+        configurable: true,
+    });
+
+    /// `crypto.fips` — boolean flag exposed since Node 0.12. We're
+    /// not FIPS-validated; surfacing `false` matches what most non-
+    /// FIPS Node builds report.
+    Object.defineProperty(exports, 'fips', {
+        value: false, writable: false, configurable: true, enumerable: true,
+    });
+
+    /// `crypto.KeyObject` / `X509Certificate` / `createSecretKey` /
+    /// `createPrivateKey` / `createPublicKey` / `generateKeyPair` /
+    /// `generateKeyPairSync` / `diffieHellman` / `checkPrime` /
+    /// `generatePrime` — Node's typed key surface. We don't ship a
+    /// real OpenSSL; the stubs throw a clear ERR_NOT_IMPLEMENTED so
+    /// libraries that probe for these names get a graceful failure
+    /// instead of a `is not a function` crash.
+    function _notImpl(name) {
+        return function() {
+            var err = new Error('crypto.' + name + ' is not implemented in burn');
+            err.code = 'ERR_NOT_IMPLEMENTED';
+            throw err;
+        };
+    }
+    exports.KeyObject = function KeyObject() { throw _notImpl('KeyObject ctor')(); };
+    exports.KeyObject.from = _notImpl('KeyObject.from');
+    exports.X509Certificate = function X509Certificate() { throw _notImpl('X509Certificate ctor')(); };
+    exports.createSecretKey = _notImpl('createSecretKey');
+    exports.createPrivateKey = _notImpl('createPrivateKey');
+    exports.createPublicKey = _notImpl('createPublicKey');
+    exports.generateKeyPairSync = _notImpl('generateKeyPairSync');
+    exports.generateKeyPair = function(type, options, cb) {
+        if (typeof options === 'function') { cb = options; }
+        Promise.resolve().then(function() {
+            cb(new Error('crypto.generateKeyPair is not implemented in burn'));
+        });
+    };
+    exports.diffieHellman = _notImpl('diffieHellman');
+    exports.createDiffieHellman = _notImpl('createDiffieHellman');
+    exports.createDiffieHellmanGroup = _notImpl('createDiffieHellmanGroup');
+    exports.getDiffieHellman = _notImpl('getDiffieHellman');
+    exports.createECDH = _notImpl('createECDH');
+    exports.checkPrimeSync = function(_p, _options) { return false; };
+    exports.checkPrime = function(_p, options, cb) {
+        if (typeof options === 'function') { cb = options; }
+        Promise.resolve().then(function() { cb(null, false); });
+    };
+    exports.generatePrimeSync = _notImpl('generatePrimeSync');
+    exports.generatePrime = function(_size, options, cb) {
+        if (typeof options === 'function') { cb = options; }
+        Promise.resolve().then(function() {
+            cb(new Error('crypto.generatePrime is not implemented in burn'));
+        });
+    };
+    exports.secureHeapUsed = function() {
+        return { total: 0, min: 0, used: 0, utilization: 0 };
+    };
+    exports.setEngine = function() { /* no-op */ };
+    exports.setFips = function() { /* no-op */ };
+    exports.getFips = function() { return 0; };
+
     // ---- crypto.constants -----------------------------------------
     //
     // Subset that real-world packages probe: OpenSSL flag bits + the
