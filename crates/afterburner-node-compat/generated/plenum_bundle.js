@@ -3837,6 +3837,24 @@ __register_module('events', function(module, exports, require) {
         if (init.keepalive !== undefined) this.keepalive = !!init.keepalive;
     }
     Request.prototype.clone = function() { return new Request(this); };
+    Request.prototype.text = function() {
+        return Promise.resolve(this.body != null ? String(this.body) : '');
+    };
+    Request.prototype.json = function() {
+        return this.text().then(function(s) { return JSON.parse(s); });
+    };
+    Request.prototype.arrayBuffer = function() {
+        var Buffer = require('buffer').Buffer;
+        var s = this.body != null ? String(this.body) : '';
+        return Promise.resolve(Buffer.from(s, 'utf8').buffer);
+    };
+    Request.prototype.bytes = function() {
+        return this.arrayBuffer().then(function(ab) { return new Uint8Array(ab); });
+    };
+    Request.prototype.blob = function() {
+        var ct = (this.headers && this.headers.get && this.headers.get('content-type')) || '';
+        return this.arrayBuffer().then(function(ab) { return new Blob([ab], { type: ct }); });
+    };
 
     function Response(body, init) {
         init = init || {};
@@ -3877,6 +3895,32 @@ __register_module('events', function(module, exports, require) {
             return Promise.resolve(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length));
         }
         return Promise.resolve(Buffer.from(this._bodyText, 'utf8').buffer);
+    };
+    /// `Response.prototype.bytes()` — Node 22+ shortcut that returns
+    /// a Uint8Array view of the body. Avoids the arrayBuffer ↔ view
+    /// round-trip dance for the common "give me bytes" case.
+    Response.prototype.bytes = function() {
+        return this.arrayBuffer().then(function(ab) { return new Uint8Array(ab); });
+    };
+    Response.prototype.blob = function() {
+        var ct = (this.headers && this.headers.get && this.headers.get('content-type')) || '';
+        return this.arrayBuffer().then(function(ab) {
+            return new Blob([ab], { type: ct });
+        });
+    };
+    Response.prototype.formData = function() {
+        var ct = (this.headers && this.headers.get && this.headers.get('content-type')) || '';
+        if (ct.indexOf('application/x-www-form-urlencoded') === -1 &&
+            ct.indexOf('multipart/form-data') === -1) {
+            return Promise.reject(new TypeError(
+                'Response.formData: Content-Type is not application/x-www-form-urlencoded or multipart/form-data'));
+        }
+        return this.text().then(function(s) {
+            var fd = new FormData();
+            var sp = new URLSearchParams(s);
+            sp.forEach(function(v, k) { fd.append(k, v); });
+            return fd;
+        });
     };
     Response.prototype.clone = function() {
         var r = new Response(this._bodyText, {
@@ -15648,6 +15692,54 @@ __register_module('wasi', function(module, exports, require) {
         }
         webCrypto.subtle = webCrypto.subtle || subtle;
         globalThis.crypto = webCrypto;
+
+        // ----- CryptoKey / SubtleCrypto / Crypto globals --------------
+        //
+        // Node 17+ exposes the WebCrypto class globals (so library
+        // code can `instanceof CryptoKey` after import-key). Our keys
+        // are plain objects with a `type`, `algorithm`, `extractable`,
+        // `usages` shape; the global is a brand-check class that accepts
+        // them via its own ctor pattern.
+        if (typeof globalThis.CryptoKey !== 'function') {
+            function CryptoKey() {
+                throw new TypeError(
+                    'Illegal constructor: CryptoKey is not constructable directly');
+            }
+            // Mark our internal keys as instances via prototype tagging.
+            CryptoKey.prototype = Object.create(Object.prototype);
+            Object.defineProperty(CryptoKey.prototype, Symbol.toStringTag, {
+                value: 'CryptoKey', configurable: true,
+            });
+            Object.defineProperty(globalThis, 'CryptoKey', {
+                value: CryptoKey, writable: true, configurable: true,
+            });
+        }
+        if (typeof globalThis.SubtleCrypto !== 'function') {
+            function SubtleCrypto() {
+                throw new TypeError(
+                    'Illegal constructor: SubtleCrypto is not constructable directly');
+            }
+            SubtleCrypto.prototype = Object.create(Object.prototype);
+            Object.defineProperty(SubtleCrypto.prototype, Symbol.toStringTag, {
+                value: 'SubtleCrypto', configurable: true,
+            });
+            Object.defineProperty(globalThis, 'SubtleCrypto', {
+                value: SubtleCrypto, writable: true, configurable: true,
+            });
+        }
+        if (typeof globalThis.Crypto !== 'function') {
+            function Crypto() {
+                throw new TypeError(
+                    'Illegal constructor: Crypto is not constructable directly');
+            }
+            Crypto.prototype = Object.create(Object.prototype);
+            Object.defineProperty(Crypto.prototype, Symbol.toStringTag, {
+                value: 'Crypto', configurable: true,
+            });
+            Object.defineProperty(globalThis, 'Crypto', {
+                value: Crypto, writable: true, configurable: true,
+            });
+        }
     }
 
     // ----- navigator (Node 22+) -------------------------------------

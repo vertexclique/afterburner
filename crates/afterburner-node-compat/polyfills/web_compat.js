@@ -1553,6 +1553,54 @@
         }
         webCrypto.subtle = webCrypto.subtle || subtle;
         globalThis.crypto = webCrypto;
+
+        // ----- CryptoKey / SubtleCrypto / Crypto globals --------------
+        //
+        // Node 17+ exposes the WebCrypto class globals (so library
+        // code can `instanceof CryptoKey` after import-key). Our keys
+        // are plain objects with a `type`, `algorithm`, `extractable`,
+        // `usages` shape; the global is a brand-check class that accepts
+        // them via its own ctor pattern.
+        if (typeof globalThis.CryptoKey !== 'function') {
+            function CryptoKey() {
+                throw new TypeError(
+                    'Illegal constructor: CryptoKey is not constructable directly');
+            }
+            // Mark our internal keys as instances via prototype tagging.
+            CryptoKey.prototype = Object.create(Object.prototype);
+            Object.defineProperty(CryptoKey.prototype, Symbol.toStringTag, {
+                value: 'CryptoKey', configurable: true,
+            });
+            Object.defineProperty(globalThis, 'CryptoKey', {
+                value: CryptoKey, writable: true, configurable: true,
+            });
+        }
+        if (typeof globalThis.SubtleCrypto !== 'function') {
+            function SubtleCrypto() {
+                throw new TypeError(
+                    'Illegal constructor: SubtleCrypto is not constructable directly');
+            }
+            SubtleCrypto.prototype = Object.create(Object.prototype);
+            Object.defineProperty(SubtleCrypto.prototype, Symbol.toStringTag, {
+                value: 'SubtleCrypto', configurable: true,
+            });
+            Object.defineProperty(globalThis, 'SubtleCrypto', {
+                value: SubtleCrypto, writable: true, configurable: true,
+            });
+        }
+        if (typeof globalThis.Crypto !== 'function') {
+            function Crypto() {
+                throw new TypeError(
+                    'Illegal constructor: Crypto is not constructable directly');
+            }
+            Crypto.prototype = Object.create(Object.prototype);
+            Object.defineProperty(Crypto.prototype, Symbol.toStringTag, {
+                value: 'Crypto', configurable: true,
+            });
+            Object.defineProperty(globalThis, 'Crypto', {
+                value: Crypto, writable: true, configurable: true,
+            });
+        }
     }
 
     // ----- navigator (Node 22+) -------------------------------------

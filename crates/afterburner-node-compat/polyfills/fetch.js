@@ -142,6 +142,24 @@
         if (init.keepalive !== undefined) this.keepalive = !!init.keepalive;
     }
     Request.prototype.clone = function() { return new Request(this); };
+    Request.prototype.text = function() {
+        return Promise.resolve(this.body != null ? String(this.body) : '');
+    };
+    Request.prototype.json = function() {
+        return this.text().then(function(s) { return JSON.parse(s); });
+    };
+    Request.prototype.arrayBuffer = function() {
+        var Buffer = require('buffer').Buffer;
+        var s = this.body != null ? String(this.body) : '';
+        return Promise.resolve(Buffer.from(s, 'utf8').buffer);
+    };
+    Request.prototype.bytes = function() {
+        return this.arrayBuffer().then(function(ab) { return new Uint8Array(ab); });
+    };
+    Request.prototype.blob = function() {
+        var ct = (this.headers && this.headers.get && this.headers.get('content-type')) || '';
+        return this.arrayBuffer().then(function(ab) { return new Blob([ab], { type: ct }); });
+    };
 
     function Response(body, init) {
         init = init || {};
@@ -182,6 +200,32 @@
             return Promise.resolve(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length));
         }
         return Promise.resolve(Buffer.from(this._bodyText, 'utf8').buffer);
+    };
+    /// `Response.prototype.bytes()` — Node 22+ shortcut that returns
+    /// a Uint8Array view of the body. Avoids the arrayBuffer ↔ view
+    /// round-trip dance for the common "give me bytes" case.
+    Response.prototype.bytes = function() {
+        return this.arrayBuffer().then(function(ab) { return new Uint8Array(ab); });
+    };
+    Response.prototype.blob = function() {
+        var ct = (this.headers && this.headers.get && this.headers.get('content-type')) || '';
+        return this.arrayBuffer().then(function(ab) {
+            return new Blob([ab], { type: ct });
+        });
+    };
+    Response.prototype.formData = function() {
+        var ct = (this.headers && this.headers.get && this.headers.get('content-type')) || '';
+        if (ct.indexOf('application/x-www-form-urlencoded') === -1 &&
+            ct.indexOf('multipart/form-data') === -1) {
+            return Promise.reject(new TypeError(
+                'Response.formData: Content-Type is not application/x-www-form-urlencoded or multipart/form-data'));
+        }
+        return this.text().then(function(s) {
+            var fd = new FormData();
+            var sp = new URLSearchParams(s);
+            sp.forEach(function(v, k) { fd.append(k, v); });
+            return fd;
+        });
     };
     Response.prototype.clone = function() {
         var r = new Response(this._bodyText, {
