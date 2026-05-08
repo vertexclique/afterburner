@@ -14308,6 +14308,45 @@ __register_module('wasi', function(module, exports, require) {
         globalThis.Intl = IntlObj;
     }
 
+    // ---- AsyncIterator global (Stage 3 / Node 22+) ----------------
+    //
+    // QuickJS provides `Iterator` natively but not `AsyncIterator`,
+    // even though TC39 has it as a global constructor with a method
+    // bag (map/filter/take/drop/toArray/forEach/some/every/find).
+    // We synthesise it from the well-known
+    // `%AsyncIteratorPrototype%` (every async generator inherits
+    // from it) so `class X extends AsyncIterator { ... }` and
+    // feature-detect probes work.
+    if (typeof globalThis.AsyncIterator === 'undefined') {
+        var asyncGenFn = (async function*() {})();
+        var asyncIteratorProto = Object.getPrototypeOf(
+            Object.getPrototypeOf(asyncGenFn));
+        var AsyncIteratorCtor = function AsyncIterator() {
+            if (new.target === AsyncIteratorCtor) {
+                throw new TypeError(
+                    'AsyncIterator is not a constructor; subclass it instead');
+            }
+        };
+        AsyncIteratorCtor.prototype = asyncIteratorProto;
+        AsyncIteratorCtor.from = function from(iterable) {
+            if (iterable && typeof iterable[Symbol.asyncIterator] === 'function') {
+                return iterable[Symbol.asyncIterator]();
+            }
+            if (iterable && typeof iterable[Symbol.iterator] === 'function') {
+                var it = iterable[Symbol.iterator]();
+                return (async function*() {
+                    var step = it.next();
+                    while (!step.done) { yield step.value; step = it.next(); }
+                })();
+            }
+            throw new TypeError(
+                'AsyncIterator.from: argument must be iterable or async iterable');
+        };
+        Object.defineProperty(globalThis, 'AsyncIterator', {
+            value: AsyncIteratorCtor, writable: true, configurable: true,
+        });
+    }
+
     // ---- JSON.rawJSON / isRawJSON (Stage 4, Node 21+) -------------
     //
     // `JSON.rawJSON(text)` returns a value that JSON.stringify
