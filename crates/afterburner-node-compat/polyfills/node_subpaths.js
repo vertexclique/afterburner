@@ -746,12 +746,27 @@ __register_module('sqlite', function(module, exports, require) {
         SQLITE_CHANGESET_OMIT: 0,
         SQLITE_CHANGESET_REPLACE: 1,
         SQLITE_CHANGESET_ABORT: 2,
+        SQLITE_CHANGESET_DATA: 1,
+        SQLITE_CHANGESET_NOTFOUND: 2,
+        SQLITE_CHANGESET_CONFLICT: 3,
+        SQLITE_CHANGESET_CONSTRAINT: 4,
+        SQLITE_CHANGESET_FOREIGN_KEY: 5,
     };
 
     module.exports = {
         DatabaseSync: DatabaseSync,
         StatementSync: StatementSync,
         constants: SQLITE_CONSTANTS,
+        // The Node 22 surface puts changeset constants directly on the
+        // module — many libraries import them as named exports.
+        SQLITE_CHANGESET_OMIT: SQLITE_CONSTANTS.SQLITE_CHANGESET_OMIT,
+        SQLITE_CHANGESET_REPLACE: SQLITE_CONSTANTS.SQLITE_CHANGESET_REPLACE,
+        SQLITE_CHANGESET_ABORT: SQLITE_CONSTANTS.SQLITE_CHANGESET_ABORT,
+        SQLITE_CHANGESET_DATA: SQLITE_CONSTANTS.SQLITE_CHANGESET_DATA,
+        SQLITE_CHANGESET_NOTFOUND: SQLITE_CONSTANTS.SQLITE_CHANGESET_NOTFOUND,
+        SQLITE_CHANGESET_CONFLICT: SQLITE_CONSTANTS.SQLITE_CHANGESET_CONFLICT,
+        SQLITE_CHANGESET_CONSTRAINT: SQLITE_CONSTANTS.SQLITE_CHANGESET_CONSTRAINT,
+        SQLITE_CHANGESET_FOREIGN_KEY: SQLITE_CONSTANTS.SQLITE_CHANGESET_FOREIGN_KEY,
         backup: function() { throw Object.assign(
             new Error('sqlite.backup not implemented'),
             { code: 'ERR_NOT_IMPLEMENTED' }

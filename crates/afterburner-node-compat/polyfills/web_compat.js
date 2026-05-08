@@ -951,6 +951,95 @@
         globalThis.File.prototype = Object.create(globalThis.Blob.prototype);
         globalThis.File.prototype.constructor = globalThis.File;
     }
+
+    // ----- FileReader (Web API, Node 23+ global) ---------------------
+    //
+    // The Web API for asynchronous Blob/File reading. Most uses today
+    // call `readAsText` / `readAsArrayBuffer` / `readAsDataURL` and
+    // listen for `loadend` / `load`. We synthesise it on top of the
+    // Blob's `text()` / `arrayBuffer()` Promises so existing code
+    // (image upload widgets, file picker handlers) works.
+    if (typeof globalThis.FileReader !== 'function') {
+        function FileReader() {
+            // EventTarget-shaped emitter for on{load,loadend,error,...}.
+            this._listeners = Object.create(null);
+            this.readyState = 0; // EMPTY
+            this.result = null;
+            this.error = null;
+            this.onload = null; this.onloadend = null; this.onloadstart = null;
+            this.onerror = null; this.onabort = null; this.onprogress = null;
+        }
+        FileReader.EMPTY = 0; FileReader.LOADING = 1; FileReader.DONE = 2;
+        FileReader.prototype.EMPTY = 0;
+        FileReader.prototype.LOADING = 1;
+        FileReader.prototype.DONE = 2;
+        FileReader.prototype.addEventListener = function(name, fn) {
+            (this._listeners[name] = this._listeners[name] || []).push(fn);
+        };
+        FileReader.prototype.removeEventListener = function(name, fn) {
+            var list = this._listeners[name];
+            if (!list) return;
+            this._listeners[name] = list.filter(function(f) { return f !== fn; });
+        };
+        FileReader.prototype._fire = function(name, ev) {
+            var on = this['on' + name];
+            if (typeof on === 'function') { try { on.call(this, ev); } catch (_) {} }
+            var list = this._listeners[name] || [];
+            for (var i = 0; i < list.length; i++) {
+                try { list[i].call(this, ev); } catch (_) {}
+            }
+        };
+        FileReader.prototype._read = function(blob, kind) {
+            var self = this;
+            self.readyState = 1; // LOADING
+            self._fire('loadstart', { type: 'loadstart' });
+            var p;
+            if (kind === 'text') p = blob.text().then(function(t) { return t; });
+            else if (kind === 'arrayBuffer') p = blob.arrayBuffer();
+            else if (kind === 'dataURL') {
+                p = blob.arrayBuffer().then(function(ab) {
+                    var bytes = new Uint8Array(ab);
+                    var bin = '';
+                    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+                    return 'data:' + (blob.type || '') + ';base64,' + btoa(bin);
+                });
+            } else if (kind === 'binaryString') {
+                p = blob.arrayBuffer().then(function(ab) {
+                    var bytes = new Uint8Array(ab);
+                    var s = '';
+                    for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+                    return s;
+                });
+            }
+            p.then(function(value) {
+                self.result = value;
+                self.readyState = 2;
+                self._fire('load', { type: 'load' });
+                self._fire('loadend', { type: 'loadend' });
+            }, function(err) {
+                self.error = err;
+                self.readyState = 2;
+                self._fire('error', { type: 'error', error: err });
+                self._fire('loadend', { type: 'loadend' });
+            });
+        };
+        FileReader.prototype.readAsText = function(blob) { this._read(blob, 'text'); };
+        FileReader.prototype.readAsArrayBuffer = function(blob) { this._read(blob, 'arrayBuffer'); };
+        FileReader.prototype.readAsDataURL = function(blob) { this._read(blob, 'dataURL'); };
+        FileReader.prototype.readAsBinaryString = function(blob) {
+            this._read(blob, 'binaryString');
+        };
+        FileReader.prototype.abort = function() {
+            if (this.readyState === 1) {
+                this.readyState = 2;
+                this._fire('abort', { type: 'abort' });
+                this._fire('loadend', { type: 'loadend' });
+            }
+        };
+        Object.defineProperty(globalThis, 'FileReader', {
+            value: FileReader, writable: true, configurable: true,
+        });
+    }
     if (typeof globalThis.FormData !== 'function') {
         globalThis.FormData = function FormData() {
             this._entries = [];
