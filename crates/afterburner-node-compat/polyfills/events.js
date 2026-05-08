@@ -222,6 +222,36 @@ __register_module('events', function(module, exports, require) {
             : 0;
     };
 
+    /// `events.addAbortListener(signal, listener)` — Node 20+. Adds an
+    /// abort listener and returns a disposable handle (with
+    /// `Symbol.dispose`) that removes it. If the signal is already
+    /// aborted, the listener fires synchronously on a microtask.
+    EventEmitter.addAbortListener = function(signal, listener) {
+        if (!signal || typeof listener !== 'function') {
+            var e = new TypeError('events.addAbortListener: invalid arguments');
+            e.code = 'ERR_INVALID_ARG_TYPE';
+            throw e;
+        }
+        function fire(ev) { try { listener(ev); } catch (_) {} }
+        if (signal.aborted) {
+            Promise.resolve().then(function() { fire({ type: 'abort' }); });
+        } else if (typeof signal.addEventListener === 'function') {
+            signal.addEventListener('abort', fire, { once: true });
+        } else if (typeof signal.once === 'function') {
+            signal.once('abort', fire);
+        }
+        var disposer = {
+            [Symbol.dispose || Symbol.for('Symbol.dispose')]: function() {
+                if (typeof signal.removeEventListener === 'function') {
+                    signal.removeEventListener('abort', fire);
+                } else if (typeof signal.off === 'function') {
+                    signal.off('abort', fire);
+                }
+            },
+        };
+        return disposer;
+    };
+
     // Re-export the static helpers on the module object too — Node
     // exposes them as both `EventEmitter.once` and
     // `require('events').once`.
@@ -232,6 +262,7 @@ __register_module('events', function(module, exports, require) {
     module.exports.setMaxListeners = EventEmitter.setMaxListeners;
     module.exports.getMaxListeners = EventEmitter.getMaxListeners;
     module.exports.listenerCount = EventEmitter.listenerCount;
+    module.exports.addAbortListener = EventEmitter.addAbortListener;
     module.exports.captureRejectionSymbol = EventEmitter.captureRejectionSymbol;
     module.exports.errorMonitor = EventEmitter.errorMonitor;
     module.exports.captureRejections = EventEmitter.captureRejections;
