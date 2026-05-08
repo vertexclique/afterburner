@@ -6200,6 +6200,72 @@ function __plenum_install_http(moduleName) {
         // Maximum number of sockets allowed per host — Node default is
         // Infinity, but some libraries read it. Match Node.
         exports.maxHeaderSize = 16384;
+
+        /// `http.validateHeaderName(name)` — Node 14.3+ guard. Throws
+        /// ERR_INVALID_HTTP_TOKEN for non-RFC 7230 token chars.
+        exports.validateHeaderName = function(name) {
+            if (typeof name !== 'string' || name.length === 0) {
+                var e = new TypeError('Header name must be a non-empty string');
+                e.code = 'ERR_INVALID_HTTP_TOKEN';
+                throw e;
+            }
+            // RFC 7230 token: !#$%&'*+-.^_`|~ + alnum
+            for (var i = 0; i < name.length; i++) {
+                var c = name.charCodeAt(i);
+                var ok = (c === 33 || (c >= 35 && c <= 39) || c === 42 || c === 43 ||
+                          c === 45 || c === 46 || (c >= 48 && c <= 57) ||
+                          (c >= 65 && c <= 90) || c === 94 || c === 95 || c === 96 ||
+                          (c >= 97 && c <= 122) || c === 124 || c === 126);
+                if (!ok) {
+                    var e2 = new TypeError(
+                        'Invalid character in header name "' + name + '"');
+                    e2.code = 'ERR_INVALID_HTTP_TOKEN';
+                    throw e2;
+                }
+            }
+        };
+
+        /// `http.validateHeaderValue(name, value)` — Node 14.3+ guard.
+        /// Throws ERR_HTTP_INVALID_HEADER_VALUE for undefined or
+        /// values containing CR/LF/NUL.
+        exports.validateHeaderValue = function(name, value) {
+            if (value === undefined) {
+                var e = new TypeError(
+                    'Invalid value "undefined" for header "' + name + '"');
+                e.code = 'ERR_HTTP_INVALID_HEADER_VALUE';
+                throw e;
+            }
+            var s = String(value);
+            for (var i = 0; i < s.length; i++) {
+                var c = s.charCodeAt(i);
+                if (c === 0 || c === 10 || c === 13) {
+                    var e2 = new TypeError(
+                        'Invalid character in header content ["' + name + '"]');
+                    e2.code = 'ERR_INVALID_CHAR';
+                    throw e2;
+                }
+            }
+        };
+
+        /// `http.setMaxIdleHTTPParsers(n)` — Node 18.8+. Limits the
+        /// HTTP parser cache. We don't pool parsers, so this is a
+        /// stored-but-unused tunable for Node-shaped probes.
+        var _maxIdleHttpParsers = 1000;
+        exports.setMaxIdleHTTPParsers = function(n) {
+            if (typeof n !== 'number' || n < 1) {
+                var e = new RangeError('setMaxIdleHTTPParsers: n must be >= 1');
+                e.code = 'ERR_OUT_OF_RANGE';
+                throw e;
+            }
+            _maxIdleHttpParsers = n | 0;
+        };
+
+        /// `http.WebSocket` — Node 22+ alias to the global WebSocket
+        /// constructor for libraries that expect to import it from the
+        /// http module.
+        if (typeof globalThis.WebSocket === 'function') {
+            exports.WebSocket = globalThis.WebSocket;
+        }
     });
 }
 __plenum_install_http('http');
