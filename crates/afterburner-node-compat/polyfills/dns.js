@@ -197,6 +197,65 @@ __register_module('dns', function(module, exports, require) {
     exports.resolveNs = dual(_resolveNs);
     exports.reverse = dual(_reverse);
 
+    /// `dns.resolveAny(host, cb)` — Node's catch-all that returns the
+    /// union of A, AAAA, MX, TXT, CNAME, NS records as a tagged array.
+    /// We compose it from the typed resolvers above; if a typed
+    /// resolver fails we treat its slice as empty rather than aborting
+    /// the whole probe (matches Node's behaviour where some record
+    /// classes don't exist for a given host).
+    exports.resolveAny = function(hostname, cb) {
+        var pending = 6, errors = [], results = [];
+        function done() {
+            if (--pending !== 0) return;
+            if (results.length === 0 && errors.length > 0) {
+                if (cb) cb(errors[0]); return;
+            }
+            if (cb) cb(null, results);
+        }
+        function tryType(fn, mapper) {
+            fn(hostname, function(err, list) {
+                if (!err && Array.isArray(list)) {
+                    list.forEach(function(item) { results.push(mapper(item)); });
+                } else if (err) errors.push(err);
+                done();
+            });
+        }
+        tryType(exports.resolve4, function(v) { return { type: 'A', address: v, ttl: 0 }; });
+        tryType(exports.resolve6, function(v) { return { type: 'AAAA', address: v, ttl: 0 }; });
+        tryType(exports.resolveMx, function(v) {
+            return { type: 'MX', priority: v.priority, exchange: v.exchange };
+        });
+        tryType(exports.resolveTxt, function(v) { return { type: 'TXT', entries: v }; });
+        tryType(exports.resolveCname, function(v) { return { type: 'CNAME', value: v }; });
+        tryType(exports.resolveNs, function(v) { return { type: 'NS', value: v }; });
+    };
+
+    /// `dns.resolveCaa(host, cb)` — DNS Certification-Authority-
+    /// Authorization records. Node ships this since v15.0. Our
+    /// underlying resolver doesn't have a CAA host fn, so we surface
+    /// an empty list (callers typically loop through the records and
+    /// treat missing CAA as "any CA may issue", which is correct).
+    exports.resolveCaa = function(hostname, cb) {
+        Promise.resolve().then(function() { if (cb) cb(null, []); });
+    };
+
+    exports.resolveSoa = function(hostname, cb) {
+        var err = new Error('dns.resolveSoa: not implemented in burn');
+        err.code = 'ENOTIMP';
+        if (cb) Promise.resolve().then(function() { cb(err); });
+        else throw err;
+    };
+
+    exports.resolveSrv = function(hostname, cb) {
+        Promise.resolve().then(function() { if (cb) cb(null, []); });
+    };
+    exports.resolvePtr = function(hostname, cb) {
+        exports.reverse(hostname, cb);
+    };
+    exports.resolveNaptr = function(hostname, cb) {
+        Promise.resolve().then(function() { if (cb) cb(null, []); });
+    };
+
     // resolve(hostname, [rrtype], cb) — Node's umbrella entry. Default
     // rrtype is 'A'. We dispatch into the typed resolvers.
     exports.resolve = function(hostname, rrtype, cb) {

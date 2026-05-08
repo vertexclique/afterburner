@@ -60,6 +60,32 @@ __register_module('child_process', function(module, exports, require) {
         return parseResult(raw);
     };
 
+    /// `child_process.execFileSync(file, args, options)` — Node's
+    /// quoting-safe twin of execSync. Doesn't run a shell, takes the
+    /// argv vector directly. We delegate to the same host fn as
+    /// spawnSync. Throws on non-zero exit per Node semantics.
+    exports.execFileSync = function(file, args, options) {
+        args = args || [];
+        var raw = callHost(String(file), args);
+        var result = parseResult(raw);
+        if (result.status !== 0) {
+            var err = new Error("Command failed: " + file + " " + args.join(' ') +
+                "\n" + result.stderr);
+            err.status = result.status;
+            err.stdout = result.stdout;
+            err.stderr = result.stderr;
+            err.pid = result.pid;
+            throw err;
+        }
+        // execFileSync returns the stdout buffer (or string if encoding set).
+        var enc = options && options.encoding;
+        if (enc && enc !== 'buffer') {
+            return String(result.stdout);
+        }
+        var Buffer = require('buffer').Buffer;
+        return Buffer.from(String(result.stdout || ''), 'utf8');
+    };
+
     // ---- Async-style child_process wrappers ------------------------
     //
     // The host backend is synchronous; the async wrappers run the
