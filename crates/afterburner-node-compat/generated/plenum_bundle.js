@@ -13835,6 +13835,123 @@ __register_module('util', function(module, exports, require) {
             }, { once: true });
         });
     };
+
+    // ---- util.getSystemErrorName / Map / Message (Node 17+/22.4+) ---
+    //
+    // Node exposes the libuv error code table so user code can map
+    // negative errno integers to symbolic names ('ENOENT', 'EACCES',
+    // ...). We ship the standard POSIX subset that callers actually
+    // probe for.
+    var SYSTEM_ERRORS = {
+        '-1':  ['EPERM',  'Operation not permitted'],
+        '-2':  ['ENOENT', 'No such file or directory'],
+        '-3':  ['ESRCH',  'No such process'],
+        '-4':  ['EINTR',  'Interrupted system call'],
+        '-5':  ['EIO',    'Input/output error'],
+        '-9':  ['EBADF',  'Bad file descriptor'],
+        '-11': ['EAGAIN', 'Resource temporarily unavailable'],
+        '-12': ['ENOMEM', 'Cannot allocate memory'],
+        '-13': ['EACCES', 'Permission denied'],
+        '-16': ['EBUSY',  'Device or resource busy'],
+        '-17': ['EEXIST', 'File exists'],
+        '-19': ['ENODEV', 'No such device'],
+        '-20': ['ENOTDIR','Not a directory'],
+        '-21': ['EISDIR', 'Is a directory'],
+        '-22': ['EINVAL', 'Invalid argument'],
+        '-24': ['EMFILE', 'Too many open files'],
+        '-28': ['ENOSPC', 'No space left on device'],
+        '-30': ['EROFS',  'Read-only file system'],
+        '-32': ['EPIPE',  'Broken pipe'],
+        '-98': ['EADDRINUSE',    'Address already in use'],
+        '-104':['ECONNRESET',    'Connection reset by peer'],
+        '-110':['ETIMEDOUT',     'Connection timed out'],
+        '-111':['ECONNREFUSED',  'Connection refused'],
+        '-125':['ECANCELED',     'Operation canceled'],
+    };
+    exports.getSystemErrorName = function(err) {
+        var entry = SYSTEM_ERRORS[String(err)];
+        return entry ? entry[0] : 'UNKNOWN';
+    };
+    exports.getSystemErrorMessage = function(err) {
+        var entry = SYSTEM_ERRORS[String(err)];
+        return entry ? entry[1] : 'Unknown system error';
+    };
+    exports.getSystemErrorMap = function() {
+        var m = new Map();
+        Object.keys(SYSTEM_ERRORS).forEach(function(k) {
+            m.set(parseInt(k, 10), SYSTEM_ERRORS[k]);
+        });
+        return m;
+    };
+
+    // ---- util.getCallSites (Node 22.9+) ---------------------------
+    //
+    // Returns the JS call sites for the current frame. We parse
+    // `new Error().stack` to surface a structured array since
+    // QuickJS doesn't expose CallSite objects directly.
+    exports.getCallSites = function getCallSites(framesToSkip, _options) {
+        if (typeof framesToSkip === 'object' && framesToSkip !== null) {
+            framesToSkip = 0;
+        }
+        framesToSkip = framesToSkip | 0;
+        var stack = (new Error()).stack || '';
+        var lines = stack.split('\n');
+        var frames = [];
+        for (var i = 1 + framesToSkip; i < lines.length; i++) {
+            var ln = lines[i].trim();
+            if (!ln) continue;
+            if (ln.indexOf('at ') === 0) ln = ln.slice(3);
+            var m = ln.match(/^(.*?)\s+\((.+):(\d+):(\d+)\)$/);
+            if (m) {
+                frames.push({
+                    functionName: m[1], scriptName: m[2],
+                    lineNumber: parseInt(m[3], 10),
+                    columnNumber: parseInt(m[4], 10),
+                    scriptId: '',
+                });
+            } else {
+                var m2 = ln.match(/^(.+):(\d+):(\d+)$/);
+                if (m2) frames.push({
+                    functionName: '', scriptName: m2[1],
+                    lineNumber: parseInt(m2[2], 10),
+                    columnNumber: parseInt(m2[3], 10),
+                    scriptId: '',
+                });
+            }
+        }
+        return frames;
+    };
+
+    // ---- util.diff (Node 24+, Stage 2) ----------------------------
+    //
+    // A line-oriented LCS diff returning the Node-shaped edit script.
+    // For small inputs the O(n*m) cost is fine.
+    exports.diff = function diff(actual, expected) {
+        var a = String(actual).split('\n');
+        var b = String(expected).split('\n');
+        var n = a.length, m = b.length;
+        var dp = [];
+        for (var i = 0; i <= n; i++) dp.push(new Array(m + 1).fill(0));
+        for (var i2 = n - 1; i2 >= 0; i2--) {
+            for (var j2 = m - 1; j2 >= 0; j2--) {
+                if (a[i2] === b[j2]) dp[i2][j2] = dp[i2 + 1][j2 + 1] + 1;
+                else dp[i2][j2] = Math.max(dp[i2 + 1][j2], dp[i2][j2 + 1]);
+            }
+        }
+        var result = [];
+        var i3 = 0, j3 = 0;
+        while (i3 < n && j3 < m) {
+            if (a[i3] === b[j3]) { result.push({ type: 0, value: a[i3] + '\n' }); i3++; j3++; }
+            else if (dp[i3 + 1][j3] >= dp[i3][j3 + 1]) {
+                result.push({ type: -1, value: a[i3] + '\n' }); i3++;
+            } else {
+                result.push({ type: 1, value: b[j3] + '\n' }); j3++;
+            }
+        }
+        while (i3 < n) { result.push({ type: -1, value: a[i3] + '\n' }); i3++; }
+        while (j3 < m) { result.push({ type: 1, value: b[j3] + '\n' }); j3++; }
+        return result;
+    };
 });
 
 // ---- v8.js ----
