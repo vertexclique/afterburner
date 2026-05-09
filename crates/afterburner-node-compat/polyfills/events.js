@@ -252,6 +252,47 @@ __register_module('events', function(module, exports, require) {
         return disposer;
     };
 
+    /// `EventEmitterAsyncResource` — Node 17.4+. EventEmitter that
+    /// runs every emit() inside an `AsyncResource` scope so
+    /// `AsyncLocalStorage` propagates through listeners. We sit on
+    /// top of `async_hooks.AsyncResource` (already polyfilled).
+    function EventEmitterAsyncResource(options) {
+        EventEmitter.call(this, options);
+        var ah = require('async_hooks');
+        var name = (options && options.name) || 'EventEmitterAsyncResource';
+        var triggerAsyncId = options && options.triggerAsyncId;
+        var requireManualDestroy = options && options.requireManualDestroy;
+        this._asyncResource = new ah.AsyncResource(name, {
+            triggerAsyncId: triggerAsyncId,
+            requireManualDestroy: requireManualDestroy,
+        });
+    }
+    EventEmitterAsyncResource.prototype = Object.create(EventEmitter.prototype);
+    EventEmitterAsyncResource.prototype.constructor = EventEmitterAsyncResource;
+
+    EventEmitterAsyncResource.prototype.emit = function() {
+        var args = arguments;
+        var self = this;
+        var ar = this._asyncResource;
+        // `runInAsyncScope` invokes its callback inside the AsyncResource
+        // — listeners run with the right async ID for ALS to propagate.
+        return ar.runInAsyncScope(function() {
+            return EventEmitter.prototype.emit.apply(self, args);
+        });
+    };
+    EventEmitterAsyncResource.prototype.emitDestroy = function() {
+        return this._asyncResource.emitDestroy();
+    };
+    Object.defineProperty(EventEmitterAsyncResource.prototype, 'asyncId', {
+        get: function() { return this._asyncResource.asyncId(); },
+    });
+    Object.defineProperty(EventEmitterAsyncResource.prototype, 'triggerAsyncId', {
+        get: function() { return this._asyncResource.triggerAsyncId(); },
+    });
+    Object.defineProperty(EventEmitterAsyncResource.prototype, 'asyncResource', {
+        get: function() { return this._asyncResource; },
+    });
+
     // Re-export the static helpers on the module object too — Node
     // exposes them as both `EventEmitter.once` and
     // `require('events').once`.
@@ -267,4 +308,6 @@ __register_module('events', function(module, exports, require) {
     module.exports.errorMonitor = EventEmitter.errorMonitor;
     module.exports.captureRejections = EventEmitter.captureRejections;
     module.exports.defaultMaxListeners = EventEmitter.defaultMaxListeners;
+    module.exports.EventEmitter = EventEmitter;
+    module.exports.EventEmitterAsyncResource = EventEmitterAsyncResource;
 });

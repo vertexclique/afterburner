@@ -17,7 +17,8 @@
 use crate::host::{HostState, TimerSlot};
 use afterburner_core::AfterburnerError;
 use afterburner_node_compat::{
-    child_process_host, crypto_host, dns_host, fs_host, http_host, os_host, zlib_host,
+    child_process_host, crypto_host, dns_host, fs_host, http_host, os_host, prime_host,
+    subtle_host, zlib_host,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -713,6 +714,98 @@ fn wrap_crypto(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 let m = caller.data().manifold.clone();
                 match crypto_host::random_bytes(len as usize, &m) {
                     Ok(bytes) => {
+                        let hex = hex::encode(&bytes);
+                        write_out(&mut caller, &memory, out_ptr, out_cap, hex.as_bytes())
+                    }
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_crypto_subtle_op",
+            |mut caller: Caller<'_, HostState>,
+             op_ptr: i32,
+             op_len: i32,
+             args_ptr: i32,
+             args_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let op = match read_str(&memory, &caller, op_ptr, op_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let args = match read_str(&memory, &caller, args_ptr, args_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let m = caller.data().manifold.clone();
+                match subtle_host::subtle_op(&op, &args, &m) {
+                    Ok(s) => write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes()),
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_crypto_check_prime",
+            |mut caller: Caller<'_, HostState>,
+             cand_ptr: i32,
+             cand_len: i32,
+             checks: u32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                // The plugin passes the candidate as a hex-encoded
+                // string (matches the convention `host_crypto_hash` /
+                // `host_crypto_random_bytes` use for output bytes).
+                let s = match read_str(&memory, &caller, cand_ptr, cand_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let cand = match hex::decode(s.trim()) {
+                    Ok(b) => b,
+                    Err(_) => return E_OTHER,
+                };
+                let m = caller.data().manifold.clone();
+                match prime_host::check_prime(&cand, checks as usize, &m) {
+                    Ok(true) => 1,
+                    Ok(false) => 0,
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_crypto_generate_prime",
+            |mut caller: Caller<'_, HostState>,
+             bits: u32,
+             safe: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let m = caller.data().manifold.clone();
+                match prime_host::generate_prime(bits as usize, safe != 0, &m) {
+                    Ok(bytes) => {
+                        // Hex-encode the BE bytes so JS gets a string —
+                        // matches the convention used by `host_crypto_hash`.
                         let hex = hex::encode(&bytes);
                         write_out(&mut caller, &memory, out_ptr, out_cap, hex.as_bytes())
                     }

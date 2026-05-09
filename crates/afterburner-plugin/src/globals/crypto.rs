@@ -127,6 +127,51 @@ fn install_oneshot<'js>(globals: &Object<'js>) {
     bind_cbc!("__host_crypto_aes_cbc_encrypt", host_crypto_aes_cbc_encrypt);
     bind_cbc!("__host_crypto_aes_cbc_decrypt", host_crypto_aes_cbc_decrypt);
 
+    // Subtle Crypto dispatcher — single host fn, JSON args.
+    let _ = globals.set(
+        "__host_crypto_subtle_op",
+        Func::from(|op: String, args_json: String| -> String {
+            let ob = op.as_bytes();
+            let jb = args_json.as_bytes();
+            match call_read(|out, cap| unsafe {
+                host_crypto_subtle_op(
+                    ob.as_ptr(),
+                    ob.len() as u32,
+                    jb.as_ptr(),
+                    jb.len() as u32,
+                    out,
+                    cap,
+                )
+            }) {
+                Ok(s) => s,
+                Err(e) => format!("__HOST_ERR__:{e}"),
+            }
+        }),
+    );
+
+    let _ = globals.set(
+        "__host_crypto_check_prime",
+        Func::from(|candidate_hex: String, checks: u32| -> i32 {
+            // JS sends hex; the host decodes hex back to BE bytes.
+            // Hex is ASCII so the bytes the host reads are valid UTF-8.
+            let hb = candidate_hex.as_bytes();
+            unsafe { host_crypto_check_prime(hb.as_ptr(), hb.len() as u32, checks) }
+        }),
+    );
+
+    let _ = globals.set(
+        "__host_crypto_generate_prime",
+        Func::from(|bits: u32, safe: bool| -> String {
+            let safe_i = if safe { 1 } else { 0 };
+            match call_read(|out, cap| unsafe {
+                host_crypto_generate_prime(bits, safe_i, out, cap)
+            }) {
+                Ok(s) => s,
+                Err(e) => format!("__HOST_ERR__:{e}"),
+            }
+        }),
+    );
+
     let _ = globals.set(
         "__host_crypto_pbkdf2_sync",
         Func::from(

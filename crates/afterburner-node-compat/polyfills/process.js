@@ -323,8 +323,14 @@
             off: function() { return this; },
             emit: function() { return false; },
             cork: function() {}, uncork: function() {}, end: function() {},
-            getColorDepth: function() { return 1; },
-            hasColors: function() { return false; },
+            // Color depth + hasColors honour NO_COLOR / FORCE_COLOR /
+            // TERM exactly the way `tty.WriteStream.prototype` does;
+            // delegate to the canonical impl so chalk and signale and
+            // supports-color all see the same answer.
+            getColorDepth: function() { return require('tty').WriteStream.prototype.getColorDepth(); },
+            hasColors: function(count) {
+                return require('tty').WriteStream.prototype.hasColors(count);
+            },
             clearLine: function() {}, clearScreenDown: function() {}, cursorTo: function() {},
         },
         stderr: {
@@ -340,8 +346,10 @@
             off: function() { return this; },
             emit: function() { return false; },
             cork: function() {}, uncork: function() {}, end: function() {},
-            getColorDepth: function() { return 1; },
-            hasColors: function() { return false; },
+            getColorDepth: function() { return require('tty').WriteStream.prototype.getColorDepth(); },
+            hasColors: function(count) {
+                return require('tty').WriteStream.prototype.hasColors(count);
+            },
             clearLine: function() {}, clearScreenDown: function() {}, cursorTo: function() {},
         },
         stdin: {

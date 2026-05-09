@@ -21,6 +21,8 @@ host_crypto_aes_cbc_decrypt
 host_crypto_aes_cbc_encrypt
 host_crypto_aes_gcm_decrypt
 host_crypto_aes_gcm_encrypt
+host_crypto_check_prime
+host_crypto_generate_prime
 host_crypto_hash
 host_crypto_hash_digest
 host_crypto_hash_open
@@ -33,6 +35,7 @@ host_crypto_sign
 host_crypto_sign_finalize
 host_crypto_sign_open
 host_crypto_sign_update
+host_crypto_subtle_op
 host_crypto_verify
 host_crypto_verify_finalize
 host_dgram_address

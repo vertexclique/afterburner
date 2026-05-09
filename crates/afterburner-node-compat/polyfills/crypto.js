@@ -154,7 +154,8 @@ __register_module('crypto', function(module, exports, require) {
     // `getHashes()` at module-init time and crash with TypeError when
     // it is missing.
     var SUPPORTED_HASHES = [
-        'md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512'
+        'md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512',
+        'shake128', 'shake256'
     ];
     var SUPPORTED_CIPHERS = [
         'aes-128-cbc', 'aes-192-cbc', 'aes-256-cbc',
@@ -611,16 +612,75 @@ __register_module('crypto', function(module, exports, require) {
     exports.createDiffieHellmanGroup = _notImpl('createDiffieHellmanGroup');
     exports.getDiffieHellman = _notImpl('getDiffieHellman');
     exports.createECDH = _notImpl('createECDH');
-    exports.checkPrimeSync = function(_p, _options) { return false; };
-    exports.checkPrime = function(_p, options, cb) {
-        if (typeof options === 'function') { cb = options; }
-        Promise.resolve().then(function() { cb(null, false); });
+    /// `crypto.checkPrimeSync(candidate, options?)` — Miller-Rabin
+    /// primality test. Accepts `BigInt`, `number`, `Buffer` (BE bytes),
+    /// `Uint8Array`. Node's `options.checks` is honoured (default 0 →
+    /// host picks 40 rounds for ≤2^-80 false-positive probability).
+    function _candidateToHex(c) {
+        if (typeof c === 'bigint') {
+            var s = c.toString(16);
+            if (s.length % 2 !== 0) s = '0' + s;
+            return s;
+        }
+        if (typeof c === 'number') {
+            if (!Number.isFinite(c) || c < 0) return '00';
+            var s2 = Math.floor(c).toString(16);
+            if (s2.length % 2 !== 0) s2 = '0' + s2;
+            return s2;
+        }
+        if (c instanceof ArrayBuffer) c = new Uint8Array(c);
+        if (ArrayBuffer.isView(c) || c instanceof Uint8Array
+            || (typeof Buffer !== 'undefined' && Buffer.isBuffer(c))) {
+            var bytes = (typeof Buffer !== 'undefined' && Buffer.isBuffer(c))
+                ? c : new Uint8Array(c.buffer, c.byteOffset, c.byteLength);
+            var hex = '';
+            for (var i = 0; i < bytes.length; i++) {
+                hex += ('0' + bytes[i].toString(16)).slice(-2);
+            }
+            return hex || '00';
+        }
+        throw new TypeError('checkPrime: candidate must be number / BigInt / Buffer');
+    }
+    exports.checkPrimeSync = function(p, options) {
+        var checks = (options && (options.checks | 0)) || 0;
+        var hex = _candidateToHex(p);
+        if (typeof globalThis.__host_crypto_check_prime !== 'function') {
+            throw new Error('crypto.checkPrimeSync: host fn missing');
+        }
+        var r = globalThis.__host_crypto_check_prime(hex, checks);
+        if (r < 0) throw new Error('checkPrime: host error code ' + r);
+        return r === 1;
     };
-    exports.generatePrimeSync = _notImpl('generatePrimeSync');
-    exports.generatePrime = function(_size, options, cb) {
-        if (typeof options === 'function') { cb = options; }
+    exports.checkPrime = function(p, options, cb) {
+        if (typeof options === 'function') { cb = options; options = undefined; }
         Promise.resolve().then(function() {
-            cb(new Error('crypto.generatePrime is not implemented in burn'));
+            try { cb(null, exports.checkPrimeSync(p, options)); }
+            catch (e) { cb(e); }
+        });
+    };
+    /// `crypto.generatePrimeSync(size, options?)` — Generate a probable
+    /// prime of `size` bits. `options.safe` requires `(p-1)/2` also
+    /// prime. Returns BigInt by default (matches Node 15+).
+    exports.generatePrimeSync = function(size, options) {
+        if (typeof globalThis.__host_crypto_generate_prime !== 'function') {
+            throw new Error('crypto.generatePrimeSync: host fn missing');
+        }
+        var safe = !!(options && options.safe);
+        var hex = globalThis.__host_crypto_generate_prime(size | 0, safe);
+        if (typeof hex === 'string' && hex.indexOf('__HOST_ERR__:') === 0) {
+            throw new Error(hex.slice('__HOST_ERR__:'.length));
+        }
+        if (options && options.bigint === false) {
+            // Buffer of BE bytes when the caller opts out of BigInt.
+            return Buffer.from(hex, 'hex');
+        }
+        return BigInt('0x' + hex);
+    };
+    exports.generatePrime = function(size, options, cb) {
+        if (typeof options === 'function') { cb = options; options = undefined; }
+        Promise.resolve().then(function() {
+            try { cb(null, exports.generatePrimeSync(size, options)); }
+            catch (e) { cb(e); }
         });
     };
     exports.secureHeapUsed = function() {

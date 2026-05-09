@@ -12,6 +12,8 @@ use md5::Md5;
 use pbkdf2::pbkdf2_hmac;
 use sha1::Sha1;
 use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};
+use sha3::digest::{ExtendableOutput, XofReader};
+use sha3::{Shake128, Shake256};
 
 type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
@@ -30,6 +32,11 @@ pub enum DigestState {
     Sha384(Sha384),
     Sha512(Sha512),
     Md5(Md5),
+    /// SHAKE is a XOF — variable-length output. We accumulate input
+    /// state here; finalization picks the byte length at digest time
+    /// (defaults match Node: shake128→16 bytes, shake256→32 bytes).
+    Shake128(Shake128),
+    Shake256(Shake256),
 }
 
 impl DigestState {
@@ -48,6 +55,8 @@ impl DigestState {
             "RS384" | "sha384" => Ok(DigestState::Sha384(Sha384::new())),
             "RS512" | "sha512" => Ok(DigestState::Sha512(Sha512::new())),
             "md5" => Ok(DigestState::Md5(Md5::new())),
+            "shake128" => Ok(DigestState::Shake128(Shake128::default())),
+            "shake256" => Ok(DigestState::Shake256(Shake256::default())),
             other => Err(AfterburnerError::Host(format!(
                 "digest: unsupported algorithm '{other}'"
             ))),
@@ -62,11 +71,22 @@ impl DigestState {
             DigestState::Sha384(h) => h.update(data),
             DigestState::Sha512(h) => h.update(data),
             DigestState::Md5(h) => h.update(data),
+            DigestState::Shake128(h) => sha3::digest::Update::update(h, data),
+            DigestState::Shake256(h) => sha3::digest::Update::update(h, data),
         }
     }
 
-    /// Consume the state and return the raw digest bytes.
+    /// Consume the state and return the raw digest bytes. SHAKE is a
+    /// XOF; without a caller-supplied length we emit Node's default
+    /// (shake128 → 16 bytes, shake256 → 32 bytes).
     pub fn finalize_bytes(self) -> Vec<u8> {
+        self.finalize_bytes_n(0)
+    }
+
+    /// Same as `finalize_bytes` but allows variable-length output for
+    /// XOF algorithms. `n_override == 0` selects the default length per
+    /// algorithm. Non-XOF algorithms ignore `n_override`.
+    pub fn finalize_bytes_n(self, n_override: usize) -> Vec<u8> {
         match self {
             DigestState::Sha1(h) => h.finalize().to_vec(),
             DigestState::Sha224(h) => h.finalize().to_vec(),
@@ -74,6 +94,20 @@ impl DigestState {
             DigestState::Sha384(h) => h.finalize().to_vec(),
             DigestState::Sha512(h) => h.finalize().to_vec(),
             DigestState::Md5(h) => h.finalize().to_vec(),
+            DigestState::Shake128(h) => {
+                let n = if n_override == 0 { 16 } else { n_override };
+                let mut out = vec![0u8; n];
+                let mut reader = h.finalize_xof();
+                reader.read(&mut out);
+                out
+            }
+            DigestState::Shake256(h) => {
+                let n = if n_override == 0 { 32 } else { n_override };
+                let mut out = vec![0u8; n];
+                let mut reader = h.finalize_xof();
+                reader.read(&mut out);
+                out
+            }
         }
     }
 }

@@ -318,6 +318,62 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
     )
     .map_err(err_to_ab)?;
 
+    // The Subtle Crypto dispatcher mirrors the wasi `host_crypto_subtle_op`
+    // import so JS code that runs on either path sees identical behaviour.
+    // Output is always a base64url string (or `[<b64>,<b64>]` JSON for
+    // keypair ops); the JS shim decodes.
+    g.set(
+        "__host_crypto_subtle_op",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, op: String, args_json: String| -> rquickjs::Result<String> {
+                active_manifold::with(|m| crate::subtle_host::subtle_op(&op, &args_json, m))
+                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_crypto_check_prime",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, candidate_hex: String, checks: u32| -> rquickjs::Result<i32> {
+                let bytes = match hex::decode(&candidate_hex) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return Err(Exception::throw_message(
+                            &ctx,
+                            &format!("checkPrime: hex decode: {e}"),
+                        ));
+                    }
+                };
+                active_manifold::with(|m| crate::prime_host::check_prime(&bytes, checks as usize, m))
+                    .map(|ok| if ok { 1 } else { 0 })
+                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_crypto_generate_prime",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, bits: u32, safe: bool| -> rquickjs::Result<String> {
+                let bytes = active_manifold::with(|m| {
+                    crate::prime_host::generate_prime(bits as usize, safe, m)
+                })
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                Ok(hex::encode(&bytes))
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
     // ---- os --------------------------------------------------------------
     g.set(
         "__host_os_platform",

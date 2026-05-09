@@ -89,6 +89,35 @@ unsafe extern "C" {
         out_cap: u32,
     ) -> i32;
     pub fn host_crypto_random_bytes(len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
+    /// Subtle Crypto dispatcher. Single import covers the whole Web
+    /// Crypto algorithm set — `op` is `<algo>:<verb>[:<curve_or_hash>]`,
+    /// `args_json` is a JSON array of base64url-encoded byte buffers
+    /// (scalars are base64url-encoded UTF-8). Output is base64url
+    /// bytes, or `[<b64>,<b64>]` for ops returning a key pair.
+    pub fn host_crypto_subtle_op(
+        op_ptr: *const u8,
+        op_len: u32,
+        args_ptr: *const u8,
+        args_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    /// Miller-Rabin primality test. `candidate_be` is the big-endian
+    /// integer; `checks` is the round count (0 → default 40).
+    /// Returns `1` (prime), `0` (composite), or negative on error.
+    pub fn host_crypto_check_prime(
+        candidate_ptr: *const u8,
+        candidate_len: u32,
+        checks: u32,
+    ) -> i32;
+    /// Generate a probable prime of `bits` bits. Returns big-endian
+    /// bytes. `safe = 1` requires (p-1)/2 also prime.
+    pub fn host_crypto_generate_prime(
+        bits: u32,
+        safe: i32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
 
     // ---- os ----------------------------------------------------------
     pub fn host_os_platform(out_ptr: *mut u8, out_cap: u32) -> i32;
