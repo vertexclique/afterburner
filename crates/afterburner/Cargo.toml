@@ -63,6 +63,15 @@ rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 rcgen = { workspace = true }
+# HTTP/3 client tests — quinn + h3 + h3-quinn used to exercise
+# `node:quic`'s server side from the test harness. Pulls only when
+# the `http3` feature is enabled on the binary.
+quinn = { workspace = true }
+h3 = { workspace = true }
+h3-quinn = { workspace = true }
+http = "1"
+http-body-util.workspace = true
+bytes.workspace = true
 tokio = { workspace = true, features = [
     "rt-multi-thread",
     "io-util",
@@ -128,6 +137,10 @@ all-shadows = [
     "shadow-sqlite3",
     "shadow-sharp",
 ]
+# HTTP/3 — passes through to afterburner-wasi's `http3` feature
+# (quinn + h3 + h3-quinn). Off by default; opt-in for builds that
+# want a real H3 server.
+http3 = ["afterburner-wasi/http3"]
 # Convenience: full-fat release build of the `burn` CLI — every
 # runtime backend, every L3 shadow, host HTTP daemon, TypeScript
 # loader. This is what `--features release-cli` should pass to
@@ -142,4 +155,5 @@ release-cli = [
     "host-http",
     "ts",
     "all-shadows",
+    "http3",
 ]

@@ -374,6 +374,35 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
     )
     .map_err(err_to_ab)?;
 
+    // QUIC / HTTP/3 listener — native path stub. The native runtime
+    // doesn't run a daemon (no event loop), so the API path always
+    // surfaces the no-daemon error and JS callers land in the
+    // "use the daemon CLI" branch.
+    g.set(
+        "__host_http3_listen",
+        Function::new(
+            ctx.clone(),
+            |_ctx: Ctx<'_>,
+             _port: u32,
+             _server_id: i32,
+             _cert: String,
+             _key: String|
+             -> rquickjs::Result<i32> { Ok(-1) },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_http3_listen_set_cert",
+        Function::new(
+            ctx.clone(),
+            |_ctx: Ctx<'_>, _cert: String, _key: String| -> rquickjs::Result<i32> { Ok(0) },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
     g.set(
         "__host_v8_serialize",
         Function::new(

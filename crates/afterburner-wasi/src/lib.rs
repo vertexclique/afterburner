@@ -10,6 +10,8 @@ pub mod columnar;
 pub mod daemon_dgram;
 pub mod daemon_envelopes;
 pub mod daemon_http;
+#[cfg(feature = "http3")]
+pub mod daemon_http3;
 #[cfg(feature = "daemon")]
 pub mod daemon_http_outbound;
 #[cfg(feature = "daemon")]

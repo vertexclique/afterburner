@@ -788,6 +788,89 @@ fn wrap_crypto(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         )
         .map_err(link_err)?;
 
+    // HTTP/3 listen — two host imports, one to stash the cert+key
+    // strings, one to bind. Splitting them keeps the wasm trampoline
+    // signature small (single u32 vs five mixed-i32-and-u32 args)
+    // which sidesteps a wasmtime trampoline anomaly we hit when
+    // `host_http3_listen` was called as a single 5-arg function.
+    #[cfg(feature = "http3")]
+    linker
+        .func_wrap(
+            NS,
+            "host_http3_listen_set_cert",
+            |mut caller: Caller<'_, HostState>,
+             cert_ptr: i32,
+             cert_len: i32,
+             key_ptr: i32,
+             key_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let cert = match read_str(&memory, &caller, cert_ptr, cert_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let key = match read_str(&memory, &caller, key_ptr, key_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                crate::daemon_http3::stash_pending_cert(cert, key);
+                0
+            },
+        )
+        .map_err(link_err)?;
+
+    #[cfg(feature = "http3")]
+    linker
+        .func_wrap(
+            NS,
+            "host_http3_listen",
+            |caller: Caller<'_, HostState>, port: u32, server_id: i32| -> i32 {
+                let Some(daemon) = caller.data().daemon_http.clone() else {
+                    return crate::daemon_http::LISTEN_ERR_NO_DAEMON;
+                };
+                let Some((cert, key)) = crate::daemon_http3::take_pending_cert() else {
+                    return crate::daemon_http::LISTEN_ERR_IO;
+                };
+                crate::daemon_http3::bind_h3_listener(
+                    daemon,
+                    server_id,
+                    port as u16,
+                    &cert,
+                    &key,
+                )
+            },
+        )
+        .map_err(link_err)?;
+
+    // Stubs when the http3 feature is off — keeps plugin instantiation
+    // happy (abi_parity test pins both names unconditionally).
+    #[cfg(not(feature = "http3"))]
+    linker
+        .func_wrap(
+            NS,
+            "host_http3_listen_set_cert",
+            |_caller: Caller<'_, HostState>,
+             _cert_ptr: i32,
+             _cert_len: i32,
+             _key_ptr: i32,
+             _key_len: i32|
+             -> i32 { 0 },
+        )
+        .map_err(link_err)?;
+
+    #[cfg(not(feature = "http3"))]
+    linker
+        .func_wrap(
+            NS,
+            "host_http3_listen",
+            |_caller: Caller<'_, HostState>, _port: u32, _server_id: i32| -> i32 {
+                crate::daemon_http::LISTEN_ERR_NO_DAEMON
+            },
+        )
+        .map_err(link_err)?;
+
     linker
         .func_wrap(
             NS,

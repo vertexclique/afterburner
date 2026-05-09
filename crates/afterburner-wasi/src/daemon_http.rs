@@ -72,6 +72,17 @@ pub const LISTEN_ERR_NO_DAEMON: i32 = -1;
 pub const LISTEN_ERR_ADDR_IN_USE: i32 = -2;
 pub const LISTEN_ERR_IO: i32 = -3;
 
+/// Outcome of `try_claim_port_for`. Sibling-protocol coordinators
+/// branch on this: [`Owner`] performs the bind; [`Follower`] returns
+/// the existing id without binding (shared-listeners shard rejoin);
+/// [`Busy`] is the unshared-mode collision path.
+#[derive(Debug, Clone, Copy)]
+pub enum PortClaim {
+    Owner(ServerId),
+    Follower(ServerId),
+    Busy,
+}
+
 /// Host-side coordinator attached to `HostState::daemon_http` when a
 /// script enters daemon mode.
 pub struct DaemonHttp {
@@ -82,6 +93,13 @@ pub struct DaemonHttp {
     /// the same port fail with EADDRINUSE without racing through the
     /// OS bind, and keeps close() accounting honest.
     ports_in_use: HopscotchMap<u16, ServerId>,
+    /// Parallel claim map for QUIC/UDP listeners. Same shape as
+    /// `ports_in_use` — a port can be simultaneously claimed by an
+    /// HTTP TCP listener (this map's TCP sibling) and an H3 UDP
+    /// listener (this map). The two are independent because TCP and
+    /// UDP are distinct sockets at the kernel level; sharing the
+    /// port number is RFC-legal.
+    h3_ports_in_use: HopscotchMap<u16, ServerId>,
     pending: HopscotchMap<ReqId, PendingReply>,
     /// When true, `bind_listener` for an already-bound port returns
     /// the existing `server_id` instead of `LISTEN_ERR_ADDR_IN_USE`.
@@ -150,6 +168,7 @@ impl DaemonHttp {
             next_req_id: AtomicI64::new(1),
             listeners: HopscotchMap::new(),
             ports_in_use: HopscotchMap::new(),
+            h3_ports_in_use: HopscotchMap::new(),
             pending: HopscotchMap::new(),
             shared_listeners: AtomicBool::new(false),
             #[cfg(feature = "daemon")]
@@ -192,6 +211,7 @@ impl DaemonHttp {
             next_req_id: AtomicI64::new(1),
             listeners: HopscotchMap::new(),
             ports_in_use: HopscotchMap::new(),
+            h3_ports_in_use: HopscotchMap::new(),
             pending: HopscotchMap::new(),
             shared_listeners: AtomicBool::new(false),
             event_tx: Some(tx),
@@ -289,6 +309,99 @@ impl DaemonHttp {
         } else {
             false
         }
+    }
+
+    /// Three-way claim outcome for sibling-protocol coordinators (H3,
+    /// any future transport). [`PortClaim::Owner`] means this caller
+    /// won the CAS and must perform the real bind; [`PortClaim::
+    /// Follower`] means another shard already bound the port — the
+    /// caller should *not* bind, just register its JS handler under
+    /// the existing id (shared-listeners mode); [`PortClaim::Busy`]
+    /// is the single-shard collision path.
+    pub fn try_claim_port_for(&self, port: u16) -> PortClaim {
+        let new_id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
+        let claimed = self.ports_in_use.get_or_insert(port, new_id);
+        if claimed != new_id {
+            if self.shared_listeners.load(Ordering::Acquire) {
+                return PortClaim::Follower(claimed);
+            }
+            return PortClaim::Busy;
+        }
+        self.listeners.insert(new_id, ListenerSlot { port });
+        PortClaim::Owner(new_id)
+    }
+
+    /// Back-compat shim — the H3 path used to call this. Routes to
+    /// [`Self::try_claim_port_for`] and flattens to a positive id (
+    /// owner or follower) or a negative LISTEN_ERR. Only the owner
+    /// path should bind; callers that need the distinction should
+    /// use the typed [`PortClaim`] variant directly.
+    pub fn allocate_server_id_for(&self, port: u16) -> ServerId {
+        match self.try_claim_port_for(port) {
+            PortClaim::Owner(id) | PortClaim::Follower(id) => id,
+            PortClaim::Busy => LISTEN_ERR_ADDR_IN_USE,
+        }
+    }
+
+    /// Release a port claim AND its listener-slot accounting (used by
+    /// sibling-protocol coordinators when their bind fails after
+    /// [`Self::allocate_server_id_for`] already ran). Both removals
+    /// are required — leaving the listener slot in place keeps
+    /// `listener_count() > 0`, which triggers shard-pool expansion
+    /// and re-evaluates the script across N shards (which in turn
+    /// re-calls the failing listen, looping).
+    pub fn release_port(&self, port: u16) {
+        if let Some(id) = self.ports_in_use.remove(&port) {
+            self.listeners.remove(&id);
+        }
+    }
+
+    /// QUIC sibling of [`Self::try_claim_port_for`]. Independent map
+    /// (`h3_ports_in_use`) so the same port number can be claimed by
+    /// a TCP listener (HTTP/1+H2) and a UDP listener (H3) at the same
+    /// time, exactly as the kernel allows.
+    pub fn try_claim_h3_port(&self, port: u16) -> PortClaim {
+        // Negative sentinel pool — we don't need a real `server_id`
+        // here, just a "did I win the CAS" signal. UDP-side
+        // `server_id` for event dispatch comes from the JS-side
+        // HTTP listener.
+        let new_id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
+        let claimed = self.h3_ports_in_use.get_or_insert(port, new_id);
+        if claimed != new_id {
+            if self.shared_listeners.load(Ordering::Acquire) {
+                return PortClaim::Follower(claimed);
+            }
+            return PortClaim::Busy;
+        }
+        PortClaim::Owner(new_id)
+    }
+
+    pub fn release_h3_port(&self, port: u16) {
+        self.h3_ports_in_use.remove(&port);
+    }
+
+    /// Register an abort handle for a sibling listener task so
+    /// `server.close()` aborts it cleanly.
+    #[cfg(feature = "daemon")]
+    pub fn register_listener_task(&self, id: ServerId, abort: tokio::task::AbortHandle) {
+        self.listener_tasks.insert(id, abort);
+    }
+
+    /// Tokio runtime handle attached to the coordinator. `None` in
+    /// stub mode (no `with_runtime` call). Sibling coordinators that
+    /// need to spawn tasks call this once at bind time.
+    #[cfg(feature = "daemon")]
+    pub fn runtime_handle(&self) -> Option<tokio::runtime::Handle> {
+        self.runtime.clone()
+    }
+
+    /// Sender side of the daemon event channel — sibling coordinators
+    /// (HTTP/3 etc.) push their incoming requests onto the same
+    /// channel the H1/H2 axum loop uses, so JS sees one unified
+    /// dispatch stream.
+    #[cfg(feature = "daemon")]
+    pub fn event_sender(&self) -> Option<kovan_channel::flavors::bounded::Sender<DaemonEvent>> {
+        self.event_tx.clone()
     }
 
     /// Bind a TCP listener on `port` synchronously; on success,

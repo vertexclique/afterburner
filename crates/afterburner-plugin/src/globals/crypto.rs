@@ -173,6 +173,33 @@ fn install_oneshot<'js>(globals: &Object<'js>) {
     );
 
     // V8 serialize/deserialize — JSON tree → base64 wire bytes (and back).
+    // `node:quic` / `http3.createServer().listen()` — bind a QUIC
+    // endpoint with TLS-1.3 + ALPN "h3". Two-step: stash cert+key,
+    // then call listen with the port. This keeps the wasm trampoline
+    // argument count low (two i32 strings + one u32 was triggering a
+    // wasmtime trampoline misbehaviour we couldn't repro elsewhere).
+    let _ = globals.set(
+        "__host_http3_listen",
+        Func::from(
+            |port: u32, server_id: i32, cert_pem: String, key_pem: String| -> i32 {
+                let cb = cert_pem.as_bytes();
+                let kb = key_pem.as_bytes();
+                let stash = unsafe {
+                    host_http3_listen_set_cert(
+                        cb.as_ptr(),
+                        cb.len() as u32,
+                        kb.as_ptr(),
+                        kb.len() as u32,
+                    )
+                };
+                if stash != 0 {
+                    return -3;
+                }
+                unsafe { host_http3_listen(port, server_id) }
+            },
+        ),
+    );
+
     let _ = globals.set(
         "__host_v8_serialize",
         Func::from(|json: String| -> String {

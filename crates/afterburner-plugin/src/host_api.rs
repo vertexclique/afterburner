@@ -106,6 +106,25 @@ unsafe extern "C" {
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
+    /// Bind an HTTP/3 (QUIC) listener on `127.0.0.1:port`. The cert
+    /// + key are PEM-encoded TLS-1.3 material; ALPN advertises `h3`
+    /// only. Returns the daemon's `server_id` (≥0) or a negative
+    /// error code matching `host_http_listen`'s contract.
+    ///
+    /// The PEM strings cross via the buffer-protocol (`out_ptr/out_cap`
+    /// shape — caller writes them into a host-allocated stash via
+    /// `host_http3_listen_set_cert` first). Two-step pattern keeps
+    /// the wasm trampoline's argument count modest and matches the
+    /// shape `host_crypto_subtle_op` uses for its JSON tree input.
+    pub fn host_http3_listen(port: u32, server_id: i32) -> i32;
+    /// Stash the PEM cert + key in the host's per-thread slot ahead of
+    /// the next `host_http3_listen` call. Returns 0 on success.
+    pub fn host_http3_listen_set_cert(
+        cert_ptr: *const u8,
+        cert_len: u32,
+        key_ptr: *const u8,
+        key_len: u32,
+    ) -> i32;
     /// Subtle Crypto dispatcher. Single import covers the whole Web
     /// Crypto algorithm set — `op` is `<algo>:<verb>[:<curve_or_hash>]`,
     /// `args_json` is a JSON array of base64url-encoded byte buffers

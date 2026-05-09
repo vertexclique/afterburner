@@ -38,6 +38,7 @@ mod tag {
     pub const UTF8_STRING: u8 = b'S';
     pub const ONE_BYTE_STRING: u8 = b'"';
     pub const TWO_BYTE_STRING: u8 = b'c';
+    #[allow(dead_code)] // V8 ref-table support — pending cyclic-graph wiring.
     pub const OBJECT_REF: u8 = b'^';
     pub const BEGIN_OBJECT: u8 = b'o';
     pub const END_OBJECT: u8 = b'{';
