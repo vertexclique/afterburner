@@ -18,7 +18,7 @@ use crate::host::{HostState, TimerSlot};
 use afterburner_core::AfterburnerError;
 use afterburner_node_compat::{
     child_process_host, crypto_host, dns_host, fs_host, http_host, os_host, prime_host,
-    subtle_host, zlib_host,
+    subtle_host, v8_host, zlib_host,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -782,6 +782,56 @@ fn wrap_crypto(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 match prime_host::check_prime(&cand, checks as usize, &m) {
                     Ok(true) => 1,
                     Ok(false) => 0,
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_v8_serialize",
+            |mut caller: Caller<'_, HostState>,
+             json_ptr: i32,
+             json_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let json = match read_str(&memory, &caller, json_ptr, json_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                match v8_host::serialize_json(&json) {
+                    Ok(b64) => write_out(&mut caller, &memory, out_ptr, out_cap, b64.as_bytes()),
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_v8_deserialize",
+            |mut caller: Caller<'_, HostState>,
+             b64_ptr: i32,
+             b64_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let b64 = match read_str(&memory, &caller, b64_ptr, b64_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                match v8_host::deserialize_to_json(&b64) {
+                    Ok(json) => write_out(&mut caller, &memory, out_ptr, out_cap, json.as_bytes()),
                     Err(e) => map_err(&mut caller, e),
                 }
             },

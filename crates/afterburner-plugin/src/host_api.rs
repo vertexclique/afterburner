@@ -89,6 +89,23 @@ unsafe extern "C" {
         out_cap: u32,
     ) -> i32;
     pub fn host_crypto_random_bytes(len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
+    /// V8 ValueSerializer encode. Input is a JSON tree describing the
+    /// JS value (typed shape — see `v8_host.rs`); output is base64-
+    /// encoded V8 wire-format bytes.
+    pub fn host_v8_serialize(
+        json_ptr: *const u8,
+        json_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    /// V8 ValueSerializer decode. Input is base64-encoded V8 wire bytes;
+    /// output is a JSON tree describing the value.
+    pub fn host_v8_deserialize(
+        b64_ptr: *const u8,
+        b64_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
     /// Subtle Crypto dispatcher. Single import covers the whole Web
     /// Crypto algorithm set — `op` is `<algo>:<verb>[:<curve_or_hash>]`,
     /// `args_json` is a JSON array of base64url-encoded byte buffers

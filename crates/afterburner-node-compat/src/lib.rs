@@ -23,6 +23,8 @@ pub mod subtle_aes;
 pub mod subtle_ec;
 pub mod subtle_host;
 pub mod subtle_rsa;
+pub mod v8_host;
+pub mod v8_serde;
 pub mod fs_host;
 pub mod hash_handles;
 pub mod host_context_active;

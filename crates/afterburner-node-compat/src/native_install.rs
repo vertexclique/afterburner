@@ -374,6 +374,32 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
     )
     .map_err(err_to_ab)?;
 
+    g.set(
+        "__host_v8_serialize",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, json: String| -> rquickjs::Result<String> {
+                crate::v8_host::serialize_json(&json)
+                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
+        "__host_v8_deserialize",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, b64: String| -> rquickjs::Result<String> {
+                crate::v8_host::deserialize_to_json(&b64)
+                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
     // ---- os --------------------------------------------------------------
     g.set(
         "__host_os_platform",

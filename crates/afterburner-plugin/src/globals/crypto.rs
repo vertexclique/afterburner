@@ -172,6 +172,32 @@ fn install_oneshot<'js>(globals: &Object<'js>) {
         }),
     );
 
+    // V8 serialize/deserialize — JSON tree → base64 wire bytes (and back).
+    let _ = globals.set(
+        "__host_v8_serialize",
+        Func::from(|json: String| -> String {
+            let jb = json.as_bytes();
+            match call_read(|out, cap| unsafe {
+                host_v8_serialize(jb.as_ptr(), jb.len() as u32, out, cap)
+            }) {
+                Ok(s) => s,
+                Err(e) => format!("__HOST_ERR__:{e}"),
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_v8_deserialize",
+        Func::from(|b64: String| -> String {
+            let bb = b64.as_bytes();
+            match call_read(|out, cap| unsafe {
+                host_v8_deserialize(bb.as_ptr(), bb.len() as u32, out, cap)
+            }) {
+                Ok(s) => s,
+                Err(e) => format!("__HOST_ERR__:{e}"),
+            }
+        }),
+    );
+
     let _ = globals.set(
         "__host_crypto_pbkdf2_sync",
         Func::from(

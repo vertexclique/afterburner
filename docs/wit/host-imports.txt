@@ -113,6 +113,8 @@ host_state_delete
 host_state_get
 host_state_increment
 host_state_set
+host_v8_deserialize
+host_v8_serialize
 host_timer_clear
 host_timer_ref
 host_timer_set
