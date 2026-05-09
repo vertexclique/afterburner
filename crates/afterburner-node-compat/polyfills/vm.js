@@ -114,19 +114,321 @@ __register_module('vm', function(module, exports, require) {
         return Buffer ? Buffer.alloc(0) : new Uint8Array(0);
     };
 
-    // `Module` / `SourceTextModule` / `SyntheticModule` — Node has
-    // these as experimental ES module support inside vm. We don't
-    // expose them; callers who hit them will see the stub class
-    // throw a useful error.
+    // ---- Module / SourceTextModule / SyntheticModule -------------
+    //
+    // ES module records inside vm. Lifecycle: unlinked → linking →
+    // linked → evaluating → evaluated (or errored). Lowered to CJS
+    // shape via the host TS / ESM transpile hook so the body can run
+    // through `new Function` with a custom dependency map.
 
-    function unsupportedModule(name) {
-        return function() {
-            throw new Error(
-                'vm.' + name + ' (ES Module support) is not implemented in burn yet — ' +
-                'use Script + runInContext for evaluating CJS-shaped code.'
-            );
-        };
+    var ABSTRACT_MODULE_BASE = function() {};
+
+    function _lowerEsm(source, identifier) {
+        var hook = globalThis.__host_ts_transpile;
+        if (typeof hook !== 'function') {
+            throw new Error('vm.SourceTextModule: ESM lowering requires the '
+                + '`ts` cargo feature (or any build that enables '
+                + '__host_ts_transpile)');
+        }
+        var path = '/__vm_module__/' + identifier + '.mjs';
+        var lowered = hook(source, path);
+        if (typeof lowered === 'string' && lowered.indexOf('__HOST_ERR__:') === 0) {
+            throw new SyntaxError(lowered.slice('__HOST_ERR__:'.length));
+        }
+        return String(lowered);
     }
+
+    /// Top-level `require('xxx')` calls in the lowered body become
+    /// dep-map lookups. We swap them out at evaluate-time so the body
+    /// can be re-evaluated against different linker resolutions
+    /// (matches Node's vm.SourceTextModule semantics where each link
+    /// → evaluate cycle binds fresh imports).
+    var _REQUIRE_RX = /require\(\s*['"]([^'"]+)['"]\s*\)/g;
+    function _scanSpecifiers(body) {
+        var seen = Object.create(null);
+        var out = [];
+        var m;
+        _REQUIRE_RX.lastIndex = 0;
+        while ((m = _REQUIRE_RX.exec(body)) !== null) {
+            if (!seen[m[1]]) {
+                seen[m[1]] = true;
+                out.push(m[1]);
+            }
+        }
+        return out;
+    }
+    function _rewriteRequiresToDepMap(body) {
+        return body.replace(_REQUIRE_RX, function(_, spec) {
+            return '__ab_stm_dep[' + JSON.stringify(spec) + ']';
+        });
+    }
+
+    function SourceTextModule(source, options) {
+        if (!(this instanceof SourceTextModule)) {
+            throw new TypeError('Class constructor SourceTextModule cannot be invoked without new');
+        }
+        options = options || {};
+        this._source = String(source);
+        this.identifier = options.identifier || 'vm:source-text-module-' + (++_modCounter);
+        this.context = options.context;
+        this._status = 'unlinked';
+        this._error = null;
+        this._namespace = null;
+        this._deps = Object.create(null);
+        this._depNamespaces = Object.create(null);
+
+        // Lower ESM body once at construction.
+        this._cjsBody = _lowerEsm(this._source, this.identifier);
+        this._dependencySpecifiers = _scanSpecifiers(this._cjsBody);
+    }
+    var _modCounter = 0;
+
+    SourceTextModule.prototype = Object.create(ABSTRACT_MODULE_BASE.prototype);
+    SourceTextModule.prototype.constructor = SourceTextModule;
+
+    Object.defineProperty(SourceTextModule.prototype, 'status', {
+        get: function() { return this._status; },
+    });
+    Object.defineProperty(SourceTextModule.prototype, 'error', {
+        get: function() {
+            if (this._status !== 'errored') {
+                throw new Error('Module status is ' + this._status + ', not errored');
+            }
+            return this._error;
+        },
+    });
+    Object.defineProperty(SourceTextModule.prototype, 'namespace', {
+        get: function() {
+            if (this._status !== 'linked' && this._status !== 'evaluating'
+                && this._status !== 'evaluated') {
+                throw new Error('Module namespace requested before link()');
+            }
+            return this._namespace;
+        },
+    });
+    Object.defineProperty(SourceTextModule.prototype, 'dependencySpecifiers', {
+        get: function() { return this._dependencySpecifiers.slice(); },
+    });
+
+    SourceTextModule.prototype.link = function(linker) {
+        var self = this;
+        if (typeof linker !== 'function') {
+            return Promise.reject(new TypeError('linker must be a function'));
+        }
+        if (self._status !== 'unlinked') {
+            return Promise.reject(new Error(
+                'Module status is ' + self._status + ', expected unlinked'));
+        }
+        self._status = 'linking';
+        var specs = self._dependencySpecifiers.slice();
+        var i = 0;
+        function next() {
+            if (i >= specs.length) {
+                self._namespace = Object.create(null);
+                self._status = 'linked';
+                return undefined;
+            }
+            var spec = specs[i++];
+            return Promise.resolve(linker(spec, self, { assert: {} }))
+                .then(function(dep) {
+                    if (dep == null) {
+                        throw new Error('linker returned null for ' + spec);
+                    }
+                    self._deps[spec] = dep;
+                    // If the resolved dep is itself a Module, link it
+                    // recursively when not already linked.
+                    if (dep instanceof ABSTRACT_MODULE_BASE && dep._status === 'unlinked') {
+                        return Promise.resolve(dep.link(linker)).then(function() {
+                            self._depNamespaces[spec] = dep.namespace || dep;
+                            return next();
+                        });
+                    }
+                    self._depNamespaces[spec] = (dep instanceof ABSTRACT_MODULE_BASE)
+                        ? dep.namespace
+                        : dep;
+                    return next();
+                });
+        }
+        return Promise.resolve().then(next);
+    };
+
+    SourceTextModule.prototype.evaluate = function(_options) {
+        var self = this;
+        if (self._status === 'evaluated') return Promise.resolve(undefined);
+        if (self._status !== 'linked') {
+            return Promise.reject(new Error(
+                'Module status is ' + self._status + ', expected linked'));
+        }
+        self._status = 'evaluating';
+        return new Promise(function(resolve, reject) {
+            try {
+                // First, eagerly evaluate dependent SourceTextModules so
+                // their namespaces are populated before our body runs.
+                var depKeys = Object.keys(self._deps);
+                var i = 0;
+                function evalNext() {
+                    if (i >= depKeys.length) return runBody();
+                    var dep = self._deps[depKeys[i++]];
+                    if (dep instanceof ABSTRACT_MODULE_BASE
+                        && dep._status === 'linked') {
+                        return dep.evaluate().then(function() {
+                            // Refresh the namespace after evaluate.
+                            self._depNamespaces[depKeys[i - 1]] = dep.namespace;
+                            return evalNext();
+                        });
+                    }
+                    if (dep instanceof ABSTRACT_MODULE_BASE) {
+                        self._depNamespaces[depKeys[i - 1]] = dep.namespace;
+                    }
+                    return evalNext();
+                }
+                function runBody() {
+                    var body = _rewriteRequiresToDepMap(self._cjsBody);
+                    var moduleObj = { exports: Object.create(null) };
+                    var fn = new Function(
+                        '__ab_stm_dep', 'module', 'exports', '__filename', '__dirname',
+                        body
+                    );
+                    fn(self._depNamespaces, moduleObj, moduleObj.exports,
+                       '/__vm_module__/' + self.identifier + '.mjs',
+                       '/__vm_module__');
+                    var actualExports = moduleObj.exports;
+                    var ns = Object.create(null);
+                    if (actualExports && typeof actualExports === 'object') {
+                        var keys = Object.keys(actualExports);
+                        for (var j = 0; j < keys.length; j++) {
+                            ns[keys[j]] = actualExports[keys[j]];
+                        }
+                        if ('default' in actualExports && !('default' in ns)) {
+                            ns['default'] = actualExports['default'];
+                        }
+                    } else if (actualExports !== undefined) {
+                        ns['default'] = actualExports;
+                    }
+                    Object.freeze(ns);
+                    self._namespace = ns;
+                    self._status = 'evaluated';
+                    resolve(undefined);
+                }
+                Promise.resolve().then(evalNext).catch(function(e) {
+                    self._status = 'errored';
+                    self._error = e;
+                    reject(e);
+                });
+            } catch (e) {
+                self._status = 'errored';
+                self._error = e;
+                reject(e);
+            }
+        });
+    };
+
+    SourceTextModule.prototype.createCachedData = function() {
+        // No bytecode caching surface exposed from QuickJS to JS.
+        return Buffer.alloc(0);
+    };
+
+    /// `vm.SyntheticModule(exportNames, evaluateCallback, options)` —
+    /// a module whose body is a JS callback that calls
+    /// `setExport(name, value)` for each named export. Used by hosts
+    /// embedding non-JS data as ESM (CSS imports, JSON modules).
+    function SyntheticModule(exportNames, evaluateCallback, options) {
+        if (!(this instanceof SyntheticModule)) {
+            throw new TypeError('Class constructor SyntheticModule cannot be invoked without new');
+        }
+        options = options || {};
+        if (!Array.isArray(exportNames)) {
+            throw new TypeError('exportNames must be an array of strings');
+        }
+        if (typeof evaluateCallback !== 'function') {
+            throw new TypeError('evaluateCallback must be a function');
+        }
+        this.identifier = options.identifier || 'vm:synthetic-module-' + (++_modCounter);
+        this.context = options.context;
+        this._status = 'unlinked';
+        this._error = null;
+        this._exportNames = exportNames.slice();
+        this._evaluateCallback = evaluateCallback;
+        this._exports = Object.create(null);
+        this._namespace = null;
+        this._dependencySpecifiers = [];
+    }
+    SyntheticModule.prototype = Object.create(ABSTRACT_MODULE_BASE.prototype);
+    SyntheticModule.prototype.constructor = SyntheticModule;
+
+    Object.defineProperty(SyntheticModule.prototype, 'status', {
+        get: function() { return this._status; },
+    });
+    Object.defineProperty(SyntheticModule.prototype, 'error', {
+        get: function() {
+            if (this._status !== 'errored') {
+                throw new Error('Module status is ' + this._status + ', not errored');
+            }
+            return this._error;
+        },
+    });
+    Object.defineProperty(SyntheticModule.prototype, 'namespace', {
+        get: function() {
+            if (this._status !== 'linked' && this._status !== 'evaluating'
+                && this._status !== 'evaluated') {
+                throw new Error('Module namespace requested before link()');
+            }
+            return this._namespace;
+        },
+    });
+    Object.defineProperty(SyntheticModule.prototype, 'dependencySpecifiers', {
+        get: function() { return []; },
+    });
+
+    SyntheticModule.prototype.link = function(_linker) {
+        if (this._status !== 'unlinked') {
+            return Promise.reject(new Error(
+                'Module status is ' + this._status + ', expected unlinked'));
+        }
+        this._status = 'linked';
+        // Pre-allocate the namespace bag with `undefined` for each name
+        // so callers can probe `module.namespace.foo` without throwing.
+        this._namespace = Object.create(null);
+        for (var i = 0; i < this._exportNames.length; i++) {
+            this._namespace[this._exportNames[i]] = undefined;
+        }
+        return Promise.resolve();
+    };
+
+    SyntheticModule.prototype.setExport = function(name, value) {
+        if (this._exportNames.indexOf(name) < 0) {
+            throw new Error('SyntheticModule.setExport: unknown export name ' + name);
+        }
+        this._exports[name] = value;
+        if (this._namespace && Object.isExtensible(this._namespace)) {
+            this._namespace[name] = value;
+        }
+    };
+
+    SyntheticModule.prototype.evaluate = function() {
+        if (this._status === 'evaluated') return Promise.resolve(undefined);
+        if (this._status !== 'linked') {
+            return Promise.reject(new Error(
+                'Module status is ' + this._status + ', expected linked'));
+        }
+        this._status = 'evaluating';
+        var self = this;
+        try {
+            var maybe = self._evaluateCallback.call(self);
+            return Promise.resolve(maybe).then(function() {
+                Object.freeze(self._namespace);
+                self._status = 'evaluated';
+            }, function(e) {
+                self._status = 'errored';
+                self._error = e;
+                throw e;
+            });
+        } catch (e) {
+            self._status = 'errored';
+            self._error = e;
+            return Promise.reject(e);
+        }
+    };
 
     exports.createContext = createContext;
     exports.isContext = isContext;
@@ -151,9 +453,9 @@ __register_module('vm', function(module, exports, require) {
             other: mode === 'detailed' ? [] : undefined,
         });
     };
-    exports.SourceTextModule = unsupportedModule('SourceTextModule');
-    exports.SyntheticModule = unsupportedModule('SyntheticModule');
-    exports.Module = unsupportedModule('Module');
+    exports.SourceTextModule = SourceTextModule;
+    exports.SyntheticModule = SyntheticModule;
+    exports.Module = ABSTRACT_MODULE_BASE;
     exports.constants = {
         DONT_CONTEXTIFY: 0,
         USE_MAIN_CONTEXT_DEFAULT_LOADER: 1,
