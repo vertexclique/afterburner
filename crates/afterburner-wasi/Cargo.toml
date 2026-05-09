@@ -26,6 +26,8 @@ daemon = [
     "dep:axum",
     "dep:tokio",
     "dep:hyper",
+    "dep:hyper-util",
+    "dep:http-body-util",
     "dep:bytes",
     "dep:rustls",
     "dep:tokio-rustls",
@@ -74,6 +76,8 @@ base64.workspace = true
 axum = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }

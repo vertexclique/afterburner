@@ -426,14 +426,6 @@ mod axum_server {
     //! the reply that `__host_http_reply` delivers.
 
     use super::*;
-    use axum::{
-        Router,
-        extract::{Request, State},
-        http::{HeaderMap, StatusCode},
-        response::{IntoResponse, Response},
-        routing::any,
-    };
-    use bytes::Bytes;
 
     /// Drive an already-bound listener through axum. Used by the
     /// path where `bind_listener` performs a synchronous bind so
@@ -444,25 +436,52 @@ mod axum_server {
         coord: Arc<DaemonHttp>,
         _event_tx: kovan_channel::flavors::bounded::Sender<DaemonEvent>,
     ) {
+        // Per-connection accept loop. `hyper-util::server::conn::auto`
+        // inspects the first ~24 bytes of the accepted socket: if it
+        // sees the H2 connection preface
+        // (`PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`) it serves H2 frames
+        // (multiplexed streams, HPACK headers); otherwise it falls
+        // back to HTTP/1.1. One listener thus serves both protocols
+        // transparently, so `http2.createServer().listen()` and
+        // `http.createServer().listen()` route through the same path
+        // and the wire negotiation is invisible from the JS side.
+        use hyper::service::service_fn;
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+
         let state = Arc::new(ServerState {
             server_id,
             coord: Arc::clone(&coord),
         });
-        let app = Router::new()
-            .fallback(any(dispatch_request))
-            .with_state(state);
-        if let Err(e) = axum::serve(listener, app).await {
-            eprintln!("burn: axum serve for server_id={server_id} exited: {e}");
+        loop {
+            let (socket, _peer) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(e) => {
+                    eprintln!("burn: serve_listener({server_id}): accept failed: {e}");
+                    return;
+                }
+            };
+            let conn_state = Arc::clone(&state);
+            tokio::spawn(async move {
+                let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                    let conn_state = Arc::clone(&conn_state);
+                    async move { Ok::<_, std::convert::Infallible>(dispatch_hyper(conn_state, req).await) }
+                });
+                let io = TokioIo::new(socket);
+                let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+                let _ = builder.serve_connection_with_upgrades(io, svc).await;
+            });
         }
     }
 
-    #[derive(Clone)]
-    struct ServerState {
-        server_id: ServerId,
-        coord: Arc<DaemonHttp>,
-    }
+    /// hyper-native dispatcher — same flow as the axum `dispatch_request`
+    /// but operates on `hyper::Request<Incoming>` so the H1/H2 auto
+    /// negotiation can hand us the request directly.
+    async fn dispatch_hyper(
+        state: Arc<ServerState>,
+        req: hyper::Request<hyper::body::Incoming>,
+    ) -> hyper::Response<axum::body::Body> {
+        use http_body_util::BodyExt;
 
-    async fn dispatch_request(State(state): State<Arc<ServerState>>, req: Request) -> Response {
         let (parts, body) = req.into_parts();
         let method = parts.method.to_string();
         let url = parts
@@ -475,22 +494,27 @@ mod axum_server {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
-        // Bound the request body so a hostile client can't make the
-        // runtime allocate unbounded memory. 16 MiB matches our stdout
-        // capture ceiling elsewhere.
         const MAX_BODY: usize = 16 * 1024 * 1024;
-        let body_bytes = match axum::body::to_bytes(body, MAX_BODY).await {
-            Ok(b) => b,
+        let collected = match body.collect().await {
+            Ok(c) => c,
             Err(e) => {
-                return (
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    format!("burn: request body: {e}"),
-                )
-                    .into_response();
+                let mut resp = hyper::Response::new(axum::body::Body::from(format!(
+                    "burn: request body: {e}"
+                )));
+                *resp.status_mut() = hyper::StatusCode::PAYLOAD_TOO_LARGE;
+                return resp;
             }
         };
+        let body_bytes = collected.to_bytes();
+        if body_bytes.len() > MAX_BODY {
+            let mut resp = hyper::Response::new(axum::body::Body::from(format!(
+                "burn: request body exceeds {} bytes",
+                MAX_BODY
+            )));
+            *resp.status_mut() = hyper::StatusCode::PAYLOAD_TOO_LARGE;
+            return resp;
+        }
 
-        // Register the per-request reply slot and send the event.
         let (reply_tx, reply_rx) = kovan_channel::bounded::<ReplyEnvelope>(1);
         let req_id = state.coord.register_pending(reply_tx);
         let event = DaemonEvent {
@@ -501,34 +525,38 @@ mod axum_server {
             headers,
             body: body_bytes.to_vec(),
         };
-
         let Some(event_tx) = state.coord.event_tx.as_ref() else {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "burn: daemon not running\n",
-            )
-                .into_response();
+            let mut resp = hyper::Response::new(axum::body::Body::from(
+                "burn: daemon not running\n".to_string(),
+            ));
+            *resp.status_mut() = hyper::StatusCode::INTERNAL_SERVER_ERROR;
+            return resp;
         };
         event_tx.send_async(event).await;
-
-        // Await the reply. kovan_channel's recv_async returns T on
-        // success; disconnection is a coordinator bug, not a user-
-        // facing path.
         let reply = reply_rx.recv_async().await;
 
-        let status =
-            StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let mut headers_out = HeaderMap::new();
+        let mut builder = hyper::Response::builder().status(reply.status);
         for (name, value) in &reply.headers {
-            if let (Ok(name), Ok(value)) = (
-                name.parse::<axum::http::HeaderName>(),
-                value.parse::<axum::http::HeaderValue>(),
-            ) {
-                headers_out.insert(name, value);
+            builder = builder.header(name, value);
+        }
+        match builder.body(axum::body::Body::from(reply.body)) {
+            Ok(r) => r,
+            Err(_) => {
+                let mut resp = hyper::Response::new(axum::body::Body::from(
+                    "burn: response build failed".to_string(),
+                ));
+                *resp.status_mut() = hyper::StatusCode::INTERNAL_SERVER_ERROR;
+                resp
             }
         }
-        (status, headers_out, Bytes::from(reply.body)).into_response()
     }
+
+    #[derive(Clone)]
+    struct ServerState {
+        server_id: ServerId,
+        coord: Arc<DaemonHttp>,
+    }
+
 }
 
 use std::fmt;

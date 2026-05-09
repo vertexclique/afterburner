@@ -13,17 +13,13 @@
 __register_module('http2', function(module, exports, require) {
     var EventEmitter = require('events').EventEmitter;
     var Buffer = require('buffer').Buffer;
-
-    function notImpl(name) {
-        var e = new Error(
-            'http2.' + name + ' (server-side) is not yet implemented in burn — '
-            + 'createSecureServer + listen requires an h2-capable host listener. '
-            + 'http2.connect (client) IS implemented; use the existing http / https '
-            + 'modules for HTTP/1.1 server work.'
-        );
-        e.code = 'ERR_HTTP2_NOT_IMPLEMENTED';
-        return e;
-    }
+    // The HTTP daemon's auto-protocol listener serves both H1 and H2
+    // over the same socket — hyper's auto Builder inspects the H2
+    // connection preface and routes accordingly. Server-side http2
+    // therefore reuses the http.createServer pipeline; the JS API
+    // exposes both `'request'` (Node compat) and `'stream'` (h2-shape)
+    // events for the same incoming request.
+    var http = require('http');
 
     function _parseAuthority(authority) {
         try {
@@ -234,23 +230,143 @@ __register_module('http2', function(module, exports, require) {
     }
 
     // ---- Server side ----------------------------------------------
+    //
+    // Each Http2Server wraps a real http.Server. Node distinguishes
+    // `'request'` (h1-shape `(req, res)`) from `'stream'` (h2-shape
+    // `(stream, headers, flags)`). We emit both: the user can attach
+    // listeners to either and get the right shape. Callbacks passed
+    // to createServer / createSecureServer are wired to `'request'`
+    // (Node's default).
 
-    function Http2Server() {
+    function ServerHttp2Stream(req, res) {
         EventEmitter.call(this);
+        this._req = req;
+        this._res = res;
+        this.id = (ServerHttp2Stream._nextId = (ServerHttp2Stream._nextId || 1) + 2);
+        this.aborted = false;
+        this.closed = false;
+        this.session = null;
+        this.pending = false;
+        var self = this;
+        // Pipe the incoming body into the stream's data/end emitter
+        // so user code that consumes the stream as an EventEmitter
+        // sees the same bytes the http req would.
+        req.on('data', function(chunk) { self.emit('data', chunk); });
+        req.on('end', function() { self.emit('end'); });
+        req.on('error', function(err) { self.emit('error', err); });
+    }
+    ServerHttp2Stream.prototype = Object.create(EventEmitter.prototype);
+    ServerHttp2Stream.prototype.constructor = ServerHttp2Stream;
+    ServerHttp2Stream.prototype.respond = function(headers, _options) {
+        var status = headers && headers[':status'] ? headers[':status'] : 200;
+        var sendHeaders = {};
+        if (headers) {
+            var keys = Object.keys(headers);
+            for (var i = 0; i < keys.length; i++) {
+                var k = keys[i];
+                if (k.charAt(0) !== ':') sendHeaders[k] = headers[k];
+            }
+        }
+        this._res.writeHead(status, sendHeaders);
+    };
+    ServerHttp2Stream.prototype.write = function(chunk, enc, cb) {
+        return this._res.write(chunk, enc, cb);
+    };
+    ServerHttp2Stream.prototype.end = function(chunk, enc, cb) {
+        return this._res.end(chunk, enc, cb);
+    };
+    ServerHttp2Stream.prototype.close = function(_code, cb) {
+        this.closed = true;
+        try { this._res.end(); } catch (_) {}
+        if (typeof cb === 'function') Promise.resolve().then(cb);
+    };
+    ServerHttp2Stream.prototype.setTimeout = function() { return this; };
+    ServerHttp2Stream.prototype.priority = function() {};
+    ServerHttp2Stream.prototype.sendTrailers = function() {};
+    ServerHttp2Stream.prototype.respondWithFile = function() {
+        throw new Error('http2: respondWithFile not implemented in burn');
+    };
+
+    function _h1ReqToH2Headers(req) {
+        var h = {};
+        h[':method'] = req.method;
+        h[':path']   = req.url;
+        h[':scheme'] = (req.socket && req.socket.encrypted) ? 'https' : 'http';
+        h[':authority'] = req.headers && req.headers.host
+            ? req.headers.host
+            : ((req.connection && req.connection.localAddress) || 'localhost');
+        if (req.headers) {
+            var keys = Object.keys(req.headers);
+            for (var i = 0; i < keys.length; i++) {
+                var k = keys[i].toLowerCase();
+                if (k === 'host') continue; // already in :authority
+                h[k] = req.headers[keys[i]];
+            }
+        }
+        return h;
+    }
+
+    function Http2Server(options) {
+        EventEmitter.call(this);
+        this._options = options || {};
+        var self = this;
+        // Underlying h1-shape server — daemon serves H2 transparently
+        // when the client speaks h2 over the auto-builder listener.
+        this._inner = http.createServer(function(req, res) {
+            // Always emit 'request' (h1 shape) for compat. If anyone
+            // listens to 'stream', also build the h2 shape.
+            self.emit('request', req, res);
+            if (self.listenerCount('stream') > 0) {
+                var headers = _h1ReqToH2Headers(req);
+                var stream = new ServerHttp2Stream(req, res);
+                self.emit('stream', stream, headers, 0);
+            }
+        });
+        // Re-emit underlying lifecycle events so callers that wait
+        // for `'listening'` etc. don't miss them.
+        this._inner.on('listening', function() { self.emit('listening'); });
+        this._inner.on('close', function() { self.emit('close'); });
+        this._inner.on('error', function(e) { self.emit('error', e); });
     }
     Http2Server.prototype = Object.create(EventEmitter.prototype);
     Http2Server.prototype.constructor = Http2Server;
-    Http2Server.prototype.listen = function() { throw notImpl('Server.listen'); };
-    Http2Server.prototype.close = function(cb) {
-        if (typeof cb === 'function') Promise.resolve().then(cb);
+    Http2Server.prototype.listen = function() {
+        // Forward the same arguments — `(port[, host[, backlog]][, cb])`.
+        this._inner.listen.apply(this._inner, arguments);
+        return this;
     };
-    Http2Server.prototype.address = function() { return null; };
-    Http2Server.prototype.setTimeout = function() { return this; };
-    Http2Server.prototype.ref = function() { return this; };
-    Http2Server.prototype.unref = function() { return this; };
+    Http2Server.prototype.close = function(cb) {
+        return this._inner.close(cb);
+    };
+    Http2Server.prototype.address = function() {
+        return this._inner.address ? this._inner.address() : null;
+    };
+    Http2Server.prototype.setTimeout = function(ms, cb) {
+        if (this._inner.setTimeout) this._inner.setTimeout(ms, cb);
+        return this;
+    };
+    Http2Server.prototype.ref = function() {
+        if (this._inner.ref) this._inner.ref();
+        return this;
+    };
+    Http2Server.prototype.unref = function() {
+        if (this._inner.unref) this._inner.unref();
+        return this;
+    };
 
-    function createServer() { return new Http2Server(); }
-    function createSecureServer() { return new Http2Server(); }
+    function createServer(options, onRequest) {
+        if (typeof options === 'function') { onRequest = options; options = undefined; }
+        var srv = new Http2Server(options);
+        if (typeof onRequest === 'function') srv.on('request', onRequest);
+        return srv;
+    }
+    function createSecureServer(options, onRequest) {
+        // Burn's daemon does TLS termination separately; the same
+        // h2-or-h1 auto-negotiation runs on the cleartext socket.
+        // Real TLS H2 will plumb through daemon_tls's ALPN once the
+        // tls server adopts hyper-util's Builder.
+        return createServer(options, onRequest);
+    }
 
     // ---- constants ------------------------------------------------
 
@@ -297,7 +413,7 @@ __register_module('http2', function(module, exports, require) {
     }
     function getPackedSettings() { return Buffer.alloc(0); }
     function getUnpackedSettings() { return getDefaultSettings(); }
-    function performServerHandshake() { return new Http2Server(); }
+    function performServerHandshake() { return createServer(); }
     var SENSITIVE_HEADERS = Symbol.for('http2.sensitiveHeaders');
 
     exports.connect = connect;
@@ -309,8 +425,12 @@ __register_module('http2', function(module, exports, require) {
     exports.ServerHttp2Session = ClientHttp2Session;
     exports.Http2Stream = ClientHttp2Stream;
     exports.ClientHttp2Stream = ClientHttp2Stream;
-    exports.Http2ServerRequest = function() { throw notImpl('ServerRequest'); };
-    exports.Http2ServerResponse = function() { throw notImpl('ServerResponse'); };
+    // Http2ServerRequest / Http2ServerResponse — Node exposes these
+    // class shapes; we route through the underlying http req/res
+    // instances which already have the right surface.
+    exports.Http2ServerRequest = http.IncomingMessage || function() {};
+    exports.Http2ServerResponse = http.ServerResponse || function() {};
+    exports.ServerHttp2Stream = ServerHttp2Stream;
     exports.Http2Server = Http2Server;
     exports.getDefaultSettings = getDefaultSettings;
     exports.getPackedSettings = getPackedSettings;

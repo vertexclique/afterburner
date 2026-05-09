@@ -100,7 +100,9 @@ anyhow = "1"
 # don't pay the compile-time or binary-size cost.
 axum = "0.7"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "macros", "signal", "sync"] }
-hyper = "1"
+hyper = { version = "1", features = ["http1", "http2", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
+http-body-util = "0.1"
 bytes = "1"
 
 # B7 tls — `tls.connect` / `tls.createServer`, gated the same way as
