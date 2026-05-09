@@ -152,18 +152,62 @@ __register_module('quic', function(module, exports, require) {
         return { address: this._host, family: 'IPv4', port: this._port };
     };
 
-    /// `quic.connect(addr, options)` — client-side. Outbound QUIC
-    /// would need a separate host bridge (quinn client endpoint); the
-    /// http2 module's `http2.connect()` already covers the H2-shape
-    /// client API for most users. Surface remains for feature
-    /// detection; full implementation tracks Node's still-experimental
-    /// client-side spec.
+    /// `quic.connect(addr, _options)` — client-side QUIC over HTTP/3.
+    /// Returns a Session whose `request(headers, body)` issues a real
+    /// outbound H3 request via the host's quinn client + h3 client
+    /// stack. Each `request` round-trips synchronously from the JS
+    /// side (the host runs `block_on` against the daemon's tokio
+    /// runtime).
     function connect(addr, _options) {
-        var e = _err('ERR_QUIC_CONNECT_NOT_IMPLEMENTED',
-            'quic.connect: client side pending — use http2.connect for h2 ' +
-            'or fetch() for h3 outbound (Manifold::net)');
-        e.address = addr;
-        throw e;
+        if (typeof globalThis.__host_http3_request !== 'function') {
+            throw _err('ERR_QUIC_NO_DAEMON',
+                'quic.connect: outbound h3 needs the daemon runtime '
+                + '(build with --features http3)');
+        }
+        var session = new EventEmitter();
+        session.addr = addr;
+        session.closed = false;
+        session.close = function() { session.closed = true; };
+        /// `session.request(headers, body)` — minimal H3 client
+        /// request shape. Returns a Promise resolving to
+        /// `{status, headers, body}` (Buffer) — matches what an h3
+        /// client would yield for a single-stream request.
+        session.request = function(headers, body) {
+            headers = headers || {};
+            var method = headers[':method'] || 'GET';
+            var path = headers[':path'] || '/';
+            var scheme = headers[':scheme'] || 'https';
+            var authority = headers[':authority']
+                || (typeof addr === 'string' ? addr : (addr && addr.address));
+            var url = scheme + '://' + authority + path;
+            var Buf = globalThis.Buffer || require('buffer').Buffer;
+            var bodyBytes = body == null ? new Uint8Array(0)
+                : (typeof body === 'string' ? Buf.from(body, 'utf8')
+                : Buf.isBuffer(body) ? body
+                : new Uint8Array(body));
+            var bodyB64 = Buf.from(bodyBytes).toString('base64');
+            var raw = globalThis.__host_http3_request(url, String(method), bodyB64);
+            if (typeof raw === 'string' && raw.indexOf('__HOST_ERR__:') === 0) {
+                return Promise.reject(_err('ERR_QUIC_REQUEST',
+                    'quic.connect.request: ' + raw.slice('__HOST_ERR__:'.length)));
+            }
+            try {
+                var parsed = JSON.parse(raw);
+                var bodyOut = parsed.body_b64
+                    ? Buf.from(parsed.body_b64, 'base64')
+                    : Buf.alloc(0);
+                return Promise.resolve({
+                    status: parsed.status,
+                    headers: parsed.headers || {},
+                    body: bodyOut,
+                });
+            } catch (e) {
+                return Promise.reject(_err('ERR_QUIC_REQUEST',
+                    'quic.connect.request: bad host response: ' + e.message));
+            }
+        };
+        Promise.resolve().then(function() { session.emit('connect'); });
+        return session;
     }
 
     exports.QuicEndpoint = QuicEndpoint;

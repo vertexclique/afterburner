@@ -75,10 +75,13 @@
         // Node 24+ `process.threadCpuUsage` — return a zeroed object.
         threadCpuUsage:     function() { return { user: 0, system: 0 }; },
         cpuUsage:           function(_prev) { return { user: 0, system: 0 }; },
-        // Node 11+ `process.report` — diagnostic-report API. We don't
-        // generate real V8 heap dumps; the methods/properties exist so
-        // probing libs (clinic.js, node-inspector wrappers) don't
-        // crash at module init.
+        /// Node 11+ `process.report` — diagnostic-report API. We
+        /// produce a real Node-shaped report from the runtime's
+        /// process state: live memory numbers via `process.memoryUsage`,
+        /// captured stack via `Error.captureStackTrace`, env vars from
+        /// `process.env`, command-line argv, plus the resource-usage
+        /// snapshot. Output is the canonical JSON shape clinic.js /
+        /// node-inspector parsers expect.
         report: {
             directory: '',
             filename: '',
@@ -88,20 +91,93 @@
             signal: 'SIGUSR2',
             compact: false,
             excludeNetwork: false,
-            getReport: function(_err) {
-                return {
-                    header: { event: 'JavaScript API', filename: '' },
-                    javascriptStack: { message: '', stack: [] },
+            getReport: function(err) {
+                var stack = '';
+                try {
+                    if (err && err.stack) {
+                        stack = err.stack;
+                    } else {
+                        var probe = {};
+                        Error.captureStackTrace(probe, this.getReport);
+                        stack = probe.stack || '';
+                    }
+                } catch (_) { /* defensive */ }
+                var stackLines = String(stack).split('\n').filter(Boolean);
+                var memUsage = (typeof process.memoryUsage === 'function')
+                    ? process.memoryUsage() : {};
+                var report = {
+                    header: {
+                        reportVersion: 5,
+                        event: err ? 'Exception' : 'JavaScript API',
+                        trigger: err ? 'Exception' : 'GetReport',
+                        filename: '',
+                        dumpEventTime: new Date().toISOString(),
+                        dumpEventTimeStamp: String(Date.now()),
+                        processId: (process.pid | 0) || 0,
+                        threadId: 0,
+                        cwd: typeof process.cwd === 'function' ? process.cwd() : '',
+                        commandLine: (process.argv || []).slice(),
+                        nodejsVersion: process.version || '',
+                        wordSize: 64,
+                        arch: process.arch || '',
+                        platform: process.platform || '',
+                        componentVersions: process.versions || {},
+                        release: process.release || {},
+                        osName: process.platform || '',
+                        osRelease: '',
+                        osVersion: '',
+                        osMachine: process.arch || '',
+                        cpus: [],
+                        networkInterfaces: [],
+                        host: 'localhost',
+                    },
+                    javascriptStack: {
+                        message: err && err.message ? String(err.message) : '',
+                        stack: stackLines,
+                        errorProperties: err ? Object.assign({}, err) : {},
+                    },
                     nativeStack: [],
+                    javascriptHeap: {
+                        totalMemory: String(memUsage.heapTotal | 0),
+                        executableMemory: '0',
+                        totalCommittedMemory: String(memUsage.heapTotal | 0),
+                        availableMemory: String(Math.max(0,
+                            (memUsage.heapTotal | 0) - (memUsage.heapUsed | 0))),
+                        totalGlobalHandlesMemory: '0',
+                        usedGlobalHandlesMemory: '0',
+                        usedMemory: String(memUsage.heapUsed | 0),
+                        memoryLimit: String(memUsage.heapTotal | 0),
+                        mallocedMemory: String(memUsage.external | 0),
+                        externalMemory: String(memUsage.external | 0),
+                        peakMallocedMemory: String(memUsage.external | 0),
+                        nativeContextCount: 1,
+                        detachedContextCount: 0,
+                        doesZapGarbage: 0,
+                        heapSpaces: {},
+                    },
+                    resourceUsage: typeof process.resourceUsage === 'function'
+                        ? process.resourceUsage() : {},
                     sharedObjects: [],
                     libuv: [],
                     workers: [],
-                    environmentVariables: {},
+                    environmentVariables: Object.assign({}, process.env || {}),
+                    userLimits: {},
+                    uvthreadResourceUsage: typeof process.resourceUsage === 'function'
+                        ? process.resourceUsage() : {},
                 };
+                return report;
             },
-            writeReport: function(_filename) {
-                // Returns the produced filename; we no-op and return ''.
-                return '';
+            writeReport: function(filename, err) {
+                if (typeof filename === 'object' && filename !== null) {
+                    err = filename;
+                    filename = undefined;
+                }
+                var report = this.getReport(err);
+                var fs = require('fs');
+                var path = filename || ('report.' + Date.now() + '.'
+                    + (process.pid | 0) + '.001.json');
+                fs.writeFileSync(path, JSON.stringify(report, null, 2));
+                return path;
             },
         },
         resourceUsage:      function() {

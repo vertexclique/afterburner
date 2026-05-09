@@ -125,6 +125,20 @@ unsafe extern "C" {
         key_ptr: *const u8,
         key_len: u32,
     ) -> i32;
+    /// Outbound HTTP/3 request — sync wrapper that runs a quinn
+    /// client connect + h3 request inside the daemon's tokio runtime
+    /// via `block_on`. Output is JSON
+    /// `{"status":N,"headers":{...},"body_b64":"..."}`.
+    pub fn host_http3_request(
+        url_ptr: *const u8,
+        url_len: u32,
+        method_ptr: *const u8,
+        method_len: u32,
+        body_ptr: *const u8,
+        body_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
     /// Subtle Crypto dispatcher. Single import covers the whole Web
     /// Crypto algorithm set — `op` is `<algo>:<verb>[:<curve_or_hash>]`,
     /// `args_json` is a JSON array of base64url-encoded byte buffers

@@ -179,6 +179,30 @@ fn install_oneshot<'js>(globals: &Object<'js>) {
     // argument count low (two i32 strings + one u32 was triggering a
     // wasmtime trampoline misbehaviour we couldn't repro elsewhere).
     let _ = globals.set(
+        "__host_http3_request",
+        Func::from(|url: String, method: String, body_b64: String| -> String {
+            let ub = url.as_bytes();
+            let mb = method.as_bytes();
+            let bb = body_b64.as_bytes();
+            match call_read(|out, cap| unsafe {
+                host_http3_request(
+                    ub.as_ptr(),
+                    ub.len() as u32,
+                    mb.as_ptr(),
+                    mb.len() as u32,
+                    bb.as_ptr(),
+                    bb.len() as u32,
+                    out,
+                    cap,
+                )
+            }) {
+                Ok(s) => s,
+                Err(e) => format!("__HOST_ERR__:{e}"),
+            }
+        }),
+    );
+
+    let _ = globals.set(
         "__host_http3_listen",
         Func::from(
             |port: u32, server_id: i32, cert_pem: String, key_pem: String| -> i32 {

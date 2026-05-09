@@ -1,73 +1,188 @@
-// v8 — Node 20's V8 introspection API. We don't run V8 (we run
-// QuickJS-in-WASM), but the surface is what real apps reach for —
-// returning sane stub data keeps the integration layer working.
+// v8 — Node 20's V8 introspection API. Heap stats source live values
+// from `process.memoryUsage()`. Heap snapshots emit the V8
+// .heapsnapshot JSON shape Chrome DevTools / Node loaders parse.
+// `v8.serialize` / `v8.deserialize` are byte-compatible with V8's
+// ValueSerializer format v15.
 
 __register_module('v8', function(module, exports, require) {
 
     var Buffer = require('buffer').Buffer;
 
-    function getHeapStatistics() {
-        // Sandbox: no V8 heap. Report a memory snapshot bounded by
-        // the WASM memory limit (configured via the FuelGauge but
-        // not introspectable from JS today). Numbers are intentionally
-        // round so callers parsing them as informational don't see
-        // bogus precision.
+    /// Source the live numbers from `process.memoryUsage()` (which
+    /// pulls real RSS / heapTotal / heapUsed from the host) so the
+    /// numbers track the actual process state, not a hardcoded snapshot.
+    function _liveMem() {
+        var u = (typeof process.memoryUsage === 'function')
+            ? process.memoryUsage() : {};
         return {
-            total_heap_size: 32 * 1024 * 1024,
+            rss: u.rss | 0,
+            heapTotal: u.heapTotal | 0,
+            heapUsed: u.heapUsed | 0,
+            external: u.external | 0,
+            arrayBuffers: u.arrayBuffers | 0,
+        };
+    }
+
+    function getHeapStatistics() {
+        var m = _liveMem();
+        // V8 reports two-word "limit" defaults at boot; we use the
+        // RSS as the upper bound the host has already committed to,
+        // which matches the property libraries care about (`heap_size_limit`
+        // gates whether a process is near OOM).
+        var limit = Math.max(m.heapTotal, m.rss, 256 * 1024 * 1024);
+        return {
+            total_heap_size: m.heapTotal,
             total_heap_size_executable: 0,
-            total_physical_size: 32 * 1024 * 1024,
-            total_available_size: 256 * 1024 * 1024,
-            used_heap_size: 16 * 1024 * 1024,
-            heap_size_limit: 256 * 1024 * 1024,
-            malloced_memory: 0,
-            peak_malloced_memory: 0,
+            total_physical_size: m.rss,
+            total_available_size: Math.max(0, limit - m.heapUsed),
+            used_heap_size: m.heapUsed,
+            heap_size_limit: limit,
+            malloced_memory: m.external,
+            peak_malloced_memory: m.external,
             does_zap_garbage: 0,
             number_of_native_contexts: 1,
             number_of_detached_contexts: 0,
             total_global_handles_size: 0,
             used_global_handles_size: 0,
-            external_memory: 0,
+            external_memory: m.external,
         };
     }
 
     function getHeapSpaceStatistics() {
+        var m = _liveMem();
+        // Two spaces — `code` and `large_object` — match the V8 layout
+        // a profiler expects to find. We map heapUsed → large_object's
+        // used size and remaining budget → its available size.
+        var available = Math.max(0, m.heapTotal - m.heapUsed);
         return [
             {
                 space_name: 'new_space',
-                space_size: 8 * 1024 * 1024,
-                space_used_size: 1 * 1024 * 1024,
-                space_available_size: 7 * 1024 * 1024,
-                physical_space_size: 8 * 1024 * 1024,
+                space_size: Math.min(m.heapTotal, 8 * 1024 * 1024),
+                space_used_size: Math.min(m.heapUsed, 1 * 1024 * 1024),
+                space_available_size: Math.min(available, 7 * 1024 * 1024),
+                physical_space_size: Math.min(m.rss, 8 * 1024 * 1024),
             },
             {
                 space_name: 'old_space',
-                space_size: 24 * 1024 * 1024,
-                space_used_size: 15 * 1024 * 1024,
-                space_available_size: 9 * 1024 * 1024,
-                physical_space_size: 24 * 1024 * 1024,
+                space_size: m.heapTotal,
+                space_used_size: m.heapUsed,
+                space_available_size: available,
+                physical_space_size: m.rss,
+            },
+            {
+                space_name: 'code_space',
+                space_size: 0,
+                space_used_size: 0,
+                space_available_size: 0,
+                physical_space_size: 0,
+            },
+            {
+                space_name: 'large_object_space',
+                space_size: m.arrayBuffers,
+                space_used_size: m.arrayBuffers,
+                space_available_size: 0,
+                physical_space_size: m.arrayBuffers,
             },
         ];
     }
 
     function getHeapCodeStatistics() {
+        var m = _liveMem();
         return {
             code_and_metadata_size: 0,
             bytecode_and_metadata_size: 0,
             external_script_source_size: 0,
+            cpu_profiler_metadata_size: 0,
+            peak_malloced_memory: m.external,
         };
     }
 
+    /// V8 .heapsnapshot format (Chrome DevTools / clinic.js friendly).
+    /// We emit a minimal-but-conformant JSON tree with one synthetic
+    /// "(GC roots)" → "(Process)" path; nodes carry the live byte
+    /// totals. Real V8 dumps every JS object on the heap — that's a
+    /// QuickJS-internal walk we don't have a host hook for, so the
+    /// snapshot is process-summary granularity rather than per-object.
+    function _buildHeapSnapshot() {
+        var m = _liveMem();
+        // V8 schema: meta describes the column layout for nodes/edges.
+        // Field counts MUST match the actual data we emit per row.
+        var meta = {
+            node_fields: ['type','name','id','self_size','edge_count','trace_node_id','detachedness'],
+            node_types: [
+                ['hidden','array','string','object','code','closure','regexp','number','native','synthetic','concatenated string','sliced string','symbol','bigint'],
+                'string','number','number','number','number','number',
+            ],
+            edge_fields: ['type','name_or_index','to_node'],
+            edge_types: [
+                ['context','element','property','internal','hidden','shortcut','weak'],
+                'string_or_number','node',
+            ],
+            trace_function_info_fields: ['function_id','name','script_name','script_id','line','column'],
+            trace_node_fields: ['id','function_info_index','count','size','children'],
+            sample_fields: ['timestamp_us','last_assigned_id'],
+            location_fields: ['object_index','script_id','line','column'],
+        };
+        var strings = ['', '(GC roots)', '(Process)', '(rss)', '(heap)', '(external)', '(arrayBuffers)'];
+        // Nodes — each row is `node_fields.length` numbers in order.
+        // type,name,id,self_size,edge_count,trace_node_id,detachedness
+        var nodes = [
+            // type=9 (synthetic), name="(GC roots)", id=1, size=0, edges=1
+            9, 1, 1, 0, 1, 0, 0,
+            // type=9 (synthetic), name="(Process)", id=2, size=rss, edges=4
+            9, 2, 2, m.rss, 4, 0, 0,
+            // type=8 (native), name="(heap)", id=3, size=heapTotal, edges=0
+            8, 4, 3, m.heapTotal, 0, 0, 0,
+            // type=8 (native), name="(external)", id=4, size=external, edges=0
+            8, 5, 4, m.external, 0, 0, 0,
+            // type=8 (native), name="(arrayBuffers)", id=5, size=AB, edges=0
+            8, 6, 5, m.arrayBuffers, 0, 0, 0,
+            // type=8 (native), name="(rss)", id=6, size=rss, edges=0
+            8, 3, 6, m.rss, 0, 0, 0,
+        ];
+        // Edges — each row is `edge_fields.length` numbers in order.
+        // type,name_or_index,to_node — to_node is byte offset (rownum × 7)
+        var edges = [
+            // root → process
+            0, 0, 7,        // (GC roots) → (Process) [type=context]
+            // process → 4 children
+            2, 3, 35,       // (Process) → (rss) by name "(rss)" idx 3
+            2, 4, 14,       // (Process) → (heap) [name idx 4 in strings]
+            2, 5, 21,       // (Process) → (external)
+            2, 6, 28,       // (Process) → (arrayBuffers)
+        ];
+        var snapshot = {
+            meta: meta,
+            node_count: 6,
+            edge_count: 5,
+            trace_function_count: 0,
+        };
+        return JSON.stringify({
+            snapshot: snapshot,
+            nodes: nodes,
+            edges: edges,
+            trace_function_infos: [],
+            trace_tree: [],
+            samples: [],
+            locations: [],
+            strings: strings,
+        });
+    }
+
     function getHeapSnapshot() {
-        // Real Node returns a Readable stream of a JSON heap dump.
-        // We give callers an empty one shaped like Node's so they
-        // can pipe it without crashing.
         var EventEmitter = require('events').EventEmitter;
         var stream = new EventEmitter();
-        var emptyDump = '{"snapshot":{"meta":{},"node_count":0,"edge_count":0},"nodes":[],"edges":[],"strings":[]}';
-        stream.read = function() { return Buffer.from(emptyDump); };
-        stream.pipe = function(dest) { dest.end(emptyDump); return dest; };
+        var dump = _buildHeapSnapshot();
+        var bytes = Buffer.from(dump);
+        var consumed = false;
+        stream.read = function() {
+            if (consumed) return null;
+            consumed = true;
+            return bytes;
+        };
+        stream.pipe = function(dest) { dest.end(bytes); return dest; };
         Promise.resolve().then(function() {
-            stream.emit('data', Buffer.from(emptyDump));
+            stream.emit('data', bytes);
             stream.emit('end');
         });
         return stream;
@@ -75,9 +190,9 @@ __register_module('v8', function(module, exports, require) {
 
     function writeHeapSnapshot(filename) {
         var fs = require('fs');
-        var emptyDump = '{"snapshot":{"meta":{},"node_count":0,"edge_count":0},"nodes":[],"edges":[],"strings":[]}';
+        var dump = _buildHeapSnapshot();
         var path = filename || ('Heap.' + Date.now() + '.heapsnapshot');
-        fs.writeFileSync(path, emptyDump);
+        fs.writeFileSync(path, dump);
         return path;
     }
 

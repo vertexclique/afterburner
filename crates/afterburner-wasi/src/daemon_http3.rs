@@ -19,6 +19,7 @@ use crate::daemon_http::{
 };
 use bytes::{Buf, Bytes};
 use std::cell::RefCell;
+use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
 thread_local! {
@@ -241,6 +242,155 @@ async fn handle_h3_request(
         let _ = stream.send_data(Bytes::from(reply.body)).await;
     }
     let _ = stream.finish().await;
+}
+
+/// Outbound HTTP/3 request — synchronous wrapper around quinn client
+/// + h3 client. Used by `quic.connect(...).request(...)` from JS.
+/// Returns JSON `{"status":N,"headers":{...},"body_b64":"..."}` on
+/// success or `__HOST_ERR__:<msg>` on failure. The runtime is the
+/// same daemon tokio runtime — `block_on` on a sync host import,
+/// matching the shape of `host_http_request`.
+pub fn h3_request_sync(
+    daemon: &Arc<DaemonHttp>,
+    url: &str,
+    method: &str,
+    body: &[u8],
+) -> Result<String, String> {
+    let runtime = daemon.runtime_handle().ok_or_else(|| "no daemon runtime".to_string())?;
+    let url_owned = url.to_string();
+    let method_owned = method.to_string();
+    let body_owned = body.to_vec();
+    runtime.block_on(async move {
+        h3_request_inner(&url_owned, &method_owned, &body_owned).await
+    })
+}
+
+async fn h3_request_inner(url: &str, method: &str, body: &[u8]) -> Result<String, String> {
+    use base64::Engine;
+    use hyper::Uri;
+
+    let uri: Uri = url.parse().map_err(|e| format!("bad url: {e}"))?;
+    let host = uri.host().ok_or("url missing host")?.to_string();
+    let port = uri.port_u16().unwrap_or(443);
+
+    // Resolve the host via a sync getaddrinfo since quinn accepts a
+    // SocketAddr. For loopback IPs this is fast; remote hosts go
+    // through the OS resolver.
+    let mut addrs_iter = (host.as_str(), port)
+        .to_socket_addrs()
+        .map_err(|e| format!("dns: {e}"))?;
+    let server_addr = addrs_iter.next().ok_or("dns: no addresses")?;
+
+    // Client TLS — accept any cert per Manifold::net (which already
+    // gates the outbound). The client equivalent of
+    // `webpki_roots` is the right default but tests with self-signed
+    // certs won't validate; for now mirror what fetch does.
+    let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .map_err(|e| format!("tls config: {e}"))?
+    .dangerous()
+    .with_custom_certificate_verifier(Arc::new(NoVerifyClient))
+    .with_no_client_auth();
+    tls.alpn_protocols = vec![b"h3".to_vec()];
+
+    let quic_client = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
+        .map_err(|e| format!("quic client cfg: {e}"))?;
+    let client_cfg = quinn::ClientConfig::new(Arc::new(quic_client));
+
+    let mut endpoint = quinn::Endpoint::client(
+        "0.0.0.0:0".parse().unwrap()
+    ).map_err(|e| format!("client endpoint: {e}"))?;
+    endpoint.set_default_client_config(client_cfg);
+
+    let conn = endpoint.connect(server_addr, &host)
+        .map_err(|e| format!("connect: {e}"))?
+        .await
+        .map_err(|e| format!("handshake: {e}"))?;
+    let h3_conn = h3_quinn::Connection::new(conn);
+    let (mut driver, mut send_request) = h3::client::new(h3_conn).await
+        .map_err(|e| format!("h3 client: {e}"))?;
+    let drive_task = tokio::spawn(async move {
+        let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
+    });
+
+    let req = hyper::Request::builder()
+        .method(method)
+        .uri(url)
+        .body(())
+        .map_err(|e| format!("req build: {e}"))?;
+    let mut stream = send_request.send_request(req).await
+        .map_err(|e| format!("send: {e}"))?;
+    if !body.is_empty() {
+        stream.send_data(Bytes::copy_from_slice(body)).await
+            .map_err(|e| format!("send body: {e}"))?;
+    }
+    stream.finish().await.map_err(|e| format!("finish: {e}"))?;
+
+    let resp = stream.recv_response().await.map_err(|e| format!("recv resp: {e}"))?;
+    let status = resp.status().as_u16();
+    let mut hmap = std::collections::BTreeMap::<String, String>::new();
+    for (k, v) in resp.headers().iter() {
+        hmap.insert(k.to_string(), v.to_str().unwrap_or("").to_string());
+    }
+
+    let mut body_bytes: Vec<u8> = Vec::new();
+    while let Some(mut chunk) = stream.recv_data().await
+        .map_err(|e| format!("recv data: {e}"))? {
+        let n = chunk.remaining();
+        let bs = chunk.copy_to_bytes(n);
+        body_bytes.extend_from_slice(&bs);
+    }
+    drive_task.abort();
+    let body_b64 = base64::engine::general_purpose::STANDARD.encode(&body_bytes);
+
+    Ok(serde_json::json!({
+        "status": status,
+        "headers": hmap,
+        "body_b64": body_b64,
+    }).to_string())
+}
+
+#[derive(Debug)]
+struct NoVerifyClient;
+impl rustls::client::danger::ServerCertVerifier for NoVerifyClient {
+    fn verify_server_cert(
+        &self,
+        _: &rustls::pki_types::CertificateDer<'_>,
+        _: &[rustls::pki_types::CertificateDer<'_>],
+        _: &rustls::pki_types::ServerName<'_>,
+        _: &[u8],
+        _: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        _: &[u8],
+        _: &rustls::pki_types::CertificateDer<'_>,
+        _: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(
+        &self,
+        _: &[u8],
+        _: &rustls::pki_types::CertificateDer<'_>,
+        _: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::ED25519,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
+        ]
+    }
 }
 
 async fn send_simple_response(

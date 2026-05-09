@@ -825,6 +825,68 @@ fn wrap_crypto(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
     linker
         .func_wrap(
             NS,
+            "host_http3_request",
+            |mut caller: Caller<'_, HostState>,
+             url_ptr: i32,
+             url_len: i32,
+             method_ptr: i32,
+             method_len: i32,
+             body_ptr: i32,
+             body_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let url = match read_str(&memory, &caller, url_ptr, url_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let method = match read_str(&memory, &caller, method_ptr, method_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let body = match read_bytes(&memory, &caller, body_ptr, body_len) {
+                    Some(b) => b,
+                    None => return E_OTHER,
+                };
+                let Some(daemon) = caller.data().daemon_http.clone() else {
+                    return crate::daemon_http::LISTEN_ERR_NO_DAEMON;
+                };
+                match crate::daemon_http3::h3_request_sync(&daemon, &url, &method, &body) {
+                    Ok(json) => write_out(&mut caller, &memory, out_ptr, out_cap, json.as_bytes()),
+                    Err(e) => map_err(
+                        &mut caller,
+                        afterburner_core::AfterburnerError::Host(e),
+                    ),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    #[cfg(not(feature = "http3"))]
+    linker
+        .func_wrap(
+            NS,
+            "host_http3_request",
+            |_caller: Caller<'_, HostState>,
+             _url_ptr: i32,
+             _url_len: i32,
+             _method_ptr: i32,
+             _method_len: i32,
+             _body_ptr: i32,
+             _body_len: i32,
+             _out_ptr: i32,
+             _out_cap: i32|
+             -> i32 { crate::daemon_http::LISTEN_ERR_NO_DAEMON },
+        )
+        .map_err(link_err)?;
+
+    #[cfg(feature = "http3")]
+    linker
+        .func_wrap(
+            NS,
             "host_http3_listen",
             |caller: Caller<'_, HostState>, port: u32, server_id: i32| -> i32 {
                 let Some(daemon) = caller.data().daemon_http.clone() else {

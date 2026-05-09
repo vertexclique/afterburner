@@ -280,11 +280,111 @@ __register_module('http2', function(module, exports, require) {
         try { this._res.end(); } catch (_) {}
         if (typeof cb === 'function') Promise.resolve().then(cb);
     };
-    ServerHttp2Stream.prototype.setTimeout = function() { return this; };
-    ServerHttp2Stream.prototype.priority = function() {};
-    ServerHttp2Stream.prototype.sendTrailers = function() {};
-    ServerHttp2Stream.prototype.respondWithFile = function() {
-        throw new Error('http2: respondWithFile not implemented in burn');
+    ServerHttp2Stream.prototype.setTimeout = function(ms, cb) {
+        if (this._res && typeof this._res.setTimeout === 'function') {
+            this._res.setTimeout(ms, cb);
+        }
+        return this;
+    };
+    ServerHttp2Stream.prototype.priority = function(_options) {
+        // RFC 9218 (Extensible Prioritization Scheme for HTTP) — h3
+        // expresses priorities via the `priority` header. We forward
+        // the urgency/incremental signals as that header so Node code
+        // setting priorities still produces wire-visible output.
+        var opts = _options || {};
+        var urgency = (opts.weight != null) ? opts.weight | 0 : 16;
+        var incremental = !!opts.exclusive ? '?1' : '?0';
+        try {
+            this._res.setHeader('priority',
+                'u=' + urgency + ', i=' + incremental);
+        } catch (_) {}
+    };
+    ServerHttp2Stream.prototype.sendTrailers = function(headers) {
+        // Trailers are headers sent after the body. Node exposes
+        // `res.addTrailers(headers)` on the underlying ServerResponse;
+        // route through that so they actually land on the wire.
+        if (!headers) return;
+        if (typeof this._res.addTrailers === 'function') {
+            this._res.addTrailers(headers);
+            return;
+        }
+        // Last-resort: write them as a final chunk in
+        // `key: value\r\n` form before end. Spec-incorrect but
+        // produces visible bytes rather than dropping them.
+        var keys = Object.keys(headers);
+        var lines = '';
+        for (var i = 0; i < keys.length; i++) {
+            lines += keys[i] + ': ' + headers[keys[i]] + '\r\n';
+        }
+        if (lines) this._res.write(lines);
+    };
+    ServerHttp2Stream.prototype.respondWithFile = function(path, headers, options) {
+        var self = this;
+        var fs = require('fs');
+        options = options || {};
+        var stat;
+        try {
+            stat = fs.statSync(path);
+        } catch (e) {
+            // Run the optional `onError` per Node spec, then close
+            // the stream with a 404.
+            if (typeof options.onError === 'function') {
+                try { options.onError(e); } catch (_) {}
+            }
+            self.respond({ ':status': 404 });
+            self.end();
+            return;
+        }
+        // Node disallows directories for respondWithFile per docs.
+        if (stat.isDirectory && stat.isDirectory()) {
+            var err = new Error('http2: respondWithFile path is a directory');
+            err.code = 'ERR_HTTP2_SEND_FILE';
+            if (typeof options.onError === 'function') options.onError(err);
+            else self.emit('error', err);
+            return;
+        }
+
+        var send = headers ? Object.assign({}, headers) : {};
+        // Avoid colon-prefixed pseudo-headers leaking into a normal
+        // response — strip them defensively.
+        Object.keys(send).forEach(function(k) {
+            if (k.charAt(0) === ':') delete send[k];
+        });
+        // Honour Node's offset/length window if the caller asked for
+        // a partial-body send.
+        var offset = (options.offset | 0) || 0;
+        var length = options.length != null
+            ? Math.min(options.length | 0, Math.max(0, stat.size - offset))
+            : Math.max(0, stat.size - offset);
+        if (send['content-length'] == null && send['Content-Length'] == null) {
+            send['content-length'] = String(length);
+        }
+        if (send['last-modified'] == null && send['Last-Modified'] == null
+            && stat.mtime instanceof Date) {
+            send['last-modified'] = stat.mtime.toUTCString();
+        }
+        var status = (headers && (headers[':status'] || headers.status)) || 200;
+        self.respond(Object.assign({ ':status': status }, send));
+
+        if (length === 0) {
+            self.end();
+            return;
+        }
+        // Stream the file in 64 KiB chunks so we don't fault on
+        // large bodies. fs.createReadStream supports start/end
+        // (inclusive) which maps to offset/length here.
+        var stream = fs.createReadStream(path, {
+            start: offset,
+            end: offset + length - 1,
+            highWaterMark: 64 * 1024,
+        });
+        stream.on('data', function(chunk) { self.write(chunk); });
+        stream.on('end', function() { self.end(); });
+        stream.on('error', function(e) {
+            if (typeof options.onError === 'function') options.onError(e);
+            else self.emit('error', e);
+            try { self.end(); } catch (_) {}
+        });
     };
 
     function _h1ReqToH2Headers(req) {

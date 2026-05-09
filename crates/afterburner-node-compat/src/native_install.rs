@@ -403,6 +403,26 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
     )
     .map_err(err_to_ab)?;
 
+    // Native (rquickjs) path doesn't run a tokio runtime, so the
+    // outbound H3 client surfaces the no-daemon sentinel — JS callers
+    // either fall back to fetch() (which is wired) or run via the
+    // daemon CLI / library API where a tokio handle is attached.
+    g.set(
+        "__host_http3_request",
+        Function::new(
+            ctx.clone(),
+            |_ctx: Ctx<'_>,
+             _url: String,
+             _method: String,
+             _body_b64: String|
+             -> rquickjs::Result<String> {
+                Ok("__HOST_ERR__:no-daemon".into())
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
     g.set(
         "__host_v8_serialize",
         Function::new(
