@@ -545,6 +545,32 @@ fn wrap_fs(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
     linker
         .func_wrap(
             NS,
+            "host_fs_readlink_sync",
+            |mut caller: Caller<'_, HostState>,
+             ptr: i32,
+             len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let path = match read_str(&memory, &caller, ptr, len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let m = caller.data().manifold.clone();
+                match fs_host::readlink_sync(&path, &m) {
+                    Ok(s) => write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes()),
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
             "host_fs_cp",
             |mut caller: Caller<'_, HostState>,
              src_ptr: i32,
@@ -1328,6 +1354,45 @@ fn wrap_dns(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
     );
     wrap_string_list!("host_dns_resolve_ns", dns_host::resolve_ns, "dns.resolveNs");
     wrap_string_list!("host_dns_reverse", dns_host::reverse, "dns.reverse");
+
+    // SOA returns a structured record (single object), so it doesn't
+    // fit the wrap_string_list shape. Linker emits the JSON directly.
+    linker
+        .func_wrap(
+            NS,
+            "host_dns_resolve_soa",
+            |mut caller: Caller<'_, HostState>,
+             ptr: i32,
+             len: i32,
+             servers_ptr: i32,
+             servers_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let name = match read_str(&memory, &caller, ptr, len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let servers_csv = match read_str(&memory, &caller, servers_ptr, servers_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let servers: Vec<String> = if servers_csv.is_empty() {
+                    Vec::new()
+                } else {
+                    servers_csv.split(',').map(|s| s.trim().to_string()).collect()
+                };
+                let m = caller.data().manifold.clone();
+                match dns_host::resolve_soa(&name, &servers, &m) {
+                    Ok(v) => write_out(&mut caller, &memory, out_ptr, out_cap, v.to_string().as_bytes()),
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
 
     linker
         .func_wrap(

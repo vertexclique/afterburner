@@ -240,10 +240,25 @@ __register_module('dns', function(module, exports, require) {
     };
 
     exports.resolveSoa = function(hostname, cb) {
-        var err = new Error('dns.resolveSoa: not implemented in burn');
-        err.code = 'ENOTIMP';
-        if (cb) Promise.resolve().then(function() { cb(err); });
-        else throw err;
+        var fn = globalThis.__host_dns_resolve_soa;
+        if (typeof fn !== 'function') {
+            var err = new Error('dns.resolveSoa: host fn unavailable');
+            err.code = 'ENOSYS';
+            if (cb) Promise.resolve().then(function() { cb(err); });
+            else throw err;
+            return;
+        }
+        Promise.resolve().then(function() {
+            var raw = fn(String(hostname), _moduleServersCsv);
+            if (typeof raw === 'string' && raw.indexOf('__HOST_ERR__:') === 0) {
+                if (cb) cb(new Error(raw.slice('__HOST_ERR__:'.length)));
+                return;
+            }
+            try {
+                var rec = JSON.parse(raw);
+                if (cb) cb(null, rec);
+            } catch (e) { if (cb) cb(e); }
+        });
     };
 
     exports.resolveSrv = function(hostname, cb) {

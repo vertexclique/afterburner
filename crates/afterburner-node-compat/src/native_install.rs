@@ -184,6 +184,16 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
     .map_err(err_to_ab)?;
 
     g.set(
+        "__host_fs_readlink_sync",
+        Function::new(ctx.clone(), |ctx: Ctx<'_>, path: String| {
+            active_manifold::with(|m| fs_host::readlink_sync(&path, m))
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))
+        })
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
+
+    g.set(
         "__host_fs_cp",
         Function::new(
             ctx.clone(),
@@ -1072,6 +1082,21 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
     native_dns_string_list!("__host_dns_resolve_cname", dns_host::resolve_cname);
     native_dns_string_list!("__host_dns_resolve_ns", dns_host::resolve_ns);
     native_dns_string_list!("__host_dns_reverse", dns_host::reverse);
+
+    g.set(
+        "__host_dns_resolve_soa",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'_>, hostname: String, servers_csv: String| {
+                let servers = split_servers(&servers_csv);
+                let v = active_manifold::with(|m| dns_host::resolve_soa(&hostname, &servers, m))
+                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                Ok::<_, rquickjs::Error>(v.to_string())
+            },
+        )
+        .map_err(err_to_ab)?,
+    )
+    .map_err(err_to_ab)?;
 
     g.set(
         "__host_dns_resolve_mx",

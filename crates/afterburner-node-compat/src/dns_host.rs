@@ -263,6 +263,38 @@ pub fn resolve_ns(hostname: &str, servers: &[String], m: &Manifold) -> Result<Ve
     })
 }
 
+/// SOA (Start Of Authority) record. Returns the single SOA Node
+/// shape: `{nsname, hostmaster, serial, refresh, retry, expire, minttl}`.
+pub fn resolve_soa(
+    hostname: &str,
+    servers: &[String],
+    m: &Manifold,
+) -> Result<serde_json::Value> {
+    check_net(m, &format!("dns.resolveSoa({hostname})"))?;
+    let hn = hostname.to_string();
+    let s = servers.to_vec();
+    with_timeout(m, format!("dns.resolveSoa({hostname})"), move || {
+        use hickory_resolver::proto::rr::RecordType;
+        let resolver = make_resolver(&s)?;
+        let lookup = resolver
+            .lookup(&hn, RecordType::SOA)
+            .map_err(|e| AfterburnerError::Host(format!("dns.resolveSoa({hn}): {e}")))?;
+        let soa = lookup
+            .iter()
+            .find_map(|r| r.as_soa())
+            .ok_or_else(|| AfterburnerError::Host(format!("dns.resolveSoa({hn}): no SOA record")))?;
+        Ok(serde_json::json!({
+            "nsname":     soa.mname().to_string(),
+            "hostmaster": soa.rname().to_string(),
+            "serial":     soa.serial(),
+            "refresh":    soa.refresh(),
+            "retry":      soa.retry(),
+            "expire":     soa.expire(),
+            "minttl":     soa.minimum(),
+        }))
+    })
+}
+
 pub fn reverse(ip: &str, servers: &[String], m: &Manifold) -> Result<Vec<String>> {
     check_net(m, &format!("dns.reverse({ip})"))?;
     let parsed: IpAddr = ip.parse().map_err(|_| {

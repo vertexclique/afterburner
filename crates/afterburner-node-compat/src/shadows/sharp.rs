@@ -114,6 +114,31 @@ enum Op {
     Blur(f32),
     /// Negate (invert) the image.
     Negate,
+    /// Per-pixel multiply by an RGB tint colour.
+    Tint { r: u8, g: u8, b: u8 },
+    /// HSL adjustment — brightness multiplier, saturation multiplier,
+    /// hue rotation in degrees. brightness=1, saturation=1, hue=0 is
+    /// the identity.
+    Modulate { brightness: f32, saturation: f32, hue: f32 },
+    /// Unsharp mask. `sigma` controls the blur radius of the mask;
+    /// `flat` and `jagged` are the strength multipliers from sharp's
+    /// `m1` / `m2`.
+    Sharpen { sigma: f32, flat: f32, jagged: f32 },
+    /// Histogram stretch — find min/max per channel, scale to [0,255].
+    Normalize,
+    /// Threshold to binary; pixels with luminance ≥ level go white.
+    /// `grayscale: true` returns a single-channel image.
+    Threshold { level: u8, grayscale: bool },
+    /// Composite layers over the base image. Each layer is decoded
+    /// from its own source bytes and alpha-blended at (left, top).
+    Composite(Vec<CompositeLayer>),
+}
+
+#[derive(Debug, Clone)]
+struct CompositeLayer {
+    bytes: Vec<u8>,
+    top: u32,
+    left: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -321,6 +346,75 @@ fn parse_op(v: &serde_json::Value) -> Result<Op, String> {
             }
             Ok(Op::Blur(sigma as f32))
         }
+        "tint" => {
+            let r = v.get("r").and_then(|x| x.as_u64()).unwrap_or(255) as u8;
+            let g = v.get("g").and_then(|x| x.as_u64()).unwrap_or(255) as u8;
+            let b = v.get("b").and_then(|x| x.as_u64()).unwrap_or(255) as u8;
+            Ok(Op::Tint { r, g, b })
+        }
+        "modulate" => {
+            let brightness = v
+                .get("brightness")
+                .and_then(|x| x.as_f64())
+                .unwrap_or(1.0) as f32;
+            let saturation = v
+                .get("saturation")
+                .and_then(|x| x.as_f64())
+                .unwrap_or(1.0) as f32;
+            let hue = v.get("hue").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+            Ok(Op::Modulate {
+                brightness,
+                saturation,
+                hue,
+            })
+        }
+        "sharpen" => {
+            let sigma = v.get("sigma").and_then(|x| x.as_f64()).unwrap_or(1.0) as f32;
+            let flat = v.get("flat").and_then(|x| x.as_f64()).unwrap_or(1.0) as f32;
+            let jagged = v.get("jagged").and_then(|x| x.as_f64()).unwrap_or(2.0) as f32;
+            if sigma <= 0.0 {
+                return Err("sharp.sharpen: sigma must be > 0".into());
+            }
+            Ok(Op::Sharpen {
+                sigma,
+                flat,
+                jagged,
+            })
+        }
+        "normalize" => Ok(Op::Normalize),
+        "threshold" => {
+            let level = v
+                .get("level")
+                .and_then(|x| x.as_u64())
+                .map(|n| n.clamp(0, 255) as u8)
+                .unwrap_or(128);
+            let grayscale = v
+                .get("grayscale")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(true);
+            Ok(Op::Threshold { level, grayscale })
+        }
+        "composite" => {
+            let arr = v
+                .get("layers")
+                .and_then(|x| x.as_array())
+                .ok_or_else(|| "sharp.composite: `layers` array required".to_string())?;
+            let mut layers = Vec::with_capacity(arr.len());
+            for layer in arr {
+                use base64::Engine;
+                let b64 = layer
+                    .get("source_b64")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| "sharp.composite: layer.source_b64 required".to_string())?;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .map_err(|e| format!("sharp.composite: base64: {e}"))?;
+                let top = layer.get("top").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+                let left = layer.get("left").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+                layers.push(CompositeLayer { bytes, top, left });
+            }
+            Ok(Op::Composite(layers))
+        }
         other => Err(format!("sharp: unsupported op `{other}`")),
     }
 }
@@ -463,7 +557,223 @@ fn apply_op(img: DynamicImage, op: &Op) -> Result<DynamicImage, String> {
             Ok(img.crop_imm(e.left, e.top, e.width, e.height))
         }
         Op::Blur(sigma) => Ok(img.blur(*sigma)),
+        Op::Tint { r, g, b } => Ok(apply_tint(img, *r, *g, *b)),
+        Op::Modulate {
+            brightness,
+            saturation,
+            hue,
+        } => Ok(apply_modulate(img, *brightness, *saturation, *hue)),
+        Op::Sharpen {
+            sigma,
+            flat,
+            jagged,
+        } => Ok(apply_sharpen(img, *sigma, *flat, *jagged)),
+        Op::Normalize => Ok(apply_normalize(img)),
+        Op::Threshold { level, grayscale } => Ok(apply_threshold(img, *level, *grayscale)),
+        Op::Composite(layers) => apply_composite(img, layers),
     }
+}
+
+/// Multiply each pixel's RGB channels by `(r,g,b) / 255`. Alpha
+/// channel is preserved. This is what sharp's `tint(rgb)` does.
+fn apply_tint(img: DynamicImage, r: u8, g: u8, b: u8) -> DynamicImage {
+    let mut rgba = img.to_rgba8();
+    let rf = r as f32 / 255.0;
+    let gf = g as f32 / 255.0;
+    let bf = b as f32 / 255.0;
+    for px in rgba.pixels_mut() {
+        px.0[0] = (px.0[0] as f32 * rf).clamp(0.0, 255.0) as u8;
+        px.0[1] = (px.0[1] as f32 * gf).clamp(0.0, 255.0) as u8;
+        px.0[2] = (px.0[2] as f32 * bf).clamp(0.0, 255.0) as u8;
+    }
+    DynamicImage::ImageRgba8(rgba)
+}
+
+/// HSL-space adjustment via per-pixel RGB→HSL→tweak→RGB.
+fn apply_modulate(img: DynamicImage, brightness: f32, saturation: f32, hue: f32) -> DynamicImage {
+    let mut rgba = img.to_rgba8();
+    for px in rgba.pixels_mut() {
+        let (r, g, b) = (
+            px.0[0] as f32 / 255.0,
+            px.0[1] as f32 / 255.0,
+            px.0[2] as f32 / 255.0,
+        );
+        let (mut h, mut s, mut l) = rgb_to_hsl(r, g, b);
+        h = (h + hue / 360.0).rem_euclid(1.0);
+        s = (s * saturation).clamp(0.0, 1.0);
+        l = (l * brightness).clamp(0.0, 1.0);
+        let (r2, g2, b2) = hsl_to_rgb(h, s, l);
+        px.0[0] = (r2 * 255.0).clamp(0.0, 255.0) as u8;
+        px.0[1] = (g2 * 255.0).clamp(0.0, 255.0) as u8;
+        px.0[2] = (b2 * 255.0).clamp(0.0, 255.0) as u8;
+    }
+    DynamicImage::ImageRgba8(rgba)
+}
+
+fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) * 0.5;
+    let d = max - min;
+    if d.abs() < f32::EPSILON {
+        return (0.0, 0.0, l);
+    }
+    let s = if l < 0.5 {
+        d / (max + min)
+    } else {
+        d / (2.0 - max - min)
+    };
+    let h = if (max - r).abs() < f32::EPSILON {
+        ((g - b) / d) + (if g < b { 6.0 } else { 0.0 })
+    } else if (max - g).abs() < f32::EPSILON {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    } / 6.0;
+    (h, s, l)
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
+    if s == 0.0 {
+        return (l, l, l);
+    }
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+    let r = hue_to_rgb(p, q, h + 1.0 / 3.0);
+    let g = hue_to_rgb(p, q, h);
+    let b = hue_to_rgb(p, q, h - 1.0 / 3.0);
+    (r, g, b)
+}
+
+fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
+    if t < 0.0 {
+        t += 1.0;
+    }
+    if t > 1.0 {
+        t -= 1.0;
+    }
+    if t < 1.0 / 6.0 {
+        return p + (q - p) * 6.0 * t;
+    }
+    if t < 0.5 {
+        return q;
+    }
+    if t < 2.0 / 3.0 {
+        return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+    }
+    p
+}
+
+/// Unsharp mask: `out = img + amount * (img - blurred)`. We use the
+/// `image` crate's blur for the low-pass, then walk pixels.
+fn apply_sharpen(img: DynamicImage, sigma: f32, flat: f32, jagged: f32) -> DynamicImage {
+    let blurred = img.blur(sigma);
+    let mut src = img.to_rgba8();
+    let blur_rgba = blurred.to_rgba8();
+    // sharp's m1/m2: flat (low-frequency) and jagged (high-frequency)
+    // multipliers. We approximate by using a single amount that
+    // averages them — matches what most users expect from sharpen().
+    let amount = (flat + jagged) * 0.5;
+    for (px, bpx) in src.pixels_mut().zip(blur_rgba.pixels()) {
+        for c in 0..3 {
+            let s = px.0[c] as f32;
+            let bl = bpx.0[c] as f32;
+            let v = s + amount * (s - bl);
+            px.0[c] = v.clamp(0.0, 255.0) as u8;
+        }
+    }
+    DynamicImage::ImageRgba8(src)
+}
+
+/// Histogram stretch: find min/max across the RGB channels and
+/// scale all pixels so the dynamic range covers [0,255].
+fn apply_normalize(img: DynamicImage) -> DynamicImage {
+    let mut rgba = img.to_rgba8();
+    let (mut lo, mut hi) = (255u8, 0u8);
+    for px in rgba.pixels() {
+        for c in 0..3 {
+            let v = px.0[c];
+            if v < lo {
+                lo = v;
+            }
+            if v > hi {
+                hi = v;
+            }
+        }
+    }
+    if hi <= lo {
+        return DynamicImage::ImageRgba8(rgba);
+    }
+    let range = (hi - lo) as f32;
+    for px in rgba.pixels_mut() {
+        for c in 0..3 {
+            let v = ((px.0[c] - lo) as f32 / range) * 255.0;
+            px.0[c] = v.clamp(0.0, 255.0) as u8;
+        }
+    }
+    DynamicImage::ImageRgba8(rgba)
+}
+
+/// Threshold by luminance (ITU-R BT.601). Pixels at or above `level`
+/// → white; below → black. Optionally collapse to single-channel.
+fn apply_threshold(img: DynamicImage, level: u8, grayscale: bool) -> DynamicImage {
+    let rgba = img.to_rgba8();
+    if grayscale {
+        let mut luma = image::GrayImage::new(rgba.width(), rgba.height());
+        for (l, src) in luma.pixels_mut().zip(rgba.pixels()) {
+            let y = (0.299 * src.0[0] as f32
+                + 0.587 * src.0[1] as f32
+                + 0.114 * src.0[2] as f32) as u8;
+            l.0[0] = if y >= level { 255 } else { 0 };
+        }
+        DynamicImage::ImageLuma8(luma)
+    } else {
+        let mut out = rgba;
+        for px in out.pixels_mut() {
+            let y = (0.299 * px.0[0] as f32
+                + 0.587 * px.0[1] as f32
+                + 0.114 * px.0[2] as f32) as u8;
+            let v = if y >= level { 255 } else { 0 };
+            px.0[0] = v;
+            px.0[1] = v;
+            px.0[2] = v;
+        }
+        DynamicImage::ImageRgba8(out)
+    }
+}
+
+/// Alpha-blend each layer over the base image at its (left, top)
+/// origin. Layers are decoded from their bytes via `image::load_from_memory`.
+fn apply_composite(base: DynamicImage, layers: &[CompositeLayer]) -> Result<DynamicImage, String> {
+    let mut out = base.to_rgba8();
+    for (i, layer) in layers.iter().enumerate() {
+        let layer_img = image::load_from_memory(&layer.bytes)
+            .map_err(|e| format!("sharp.composite: layer {i} decode: {e}"))?
+            .to_rgba8();
+        let (out_w, out_h) = out.dimensions();
+        for ly in 0..layer_img.height() {
+            let dy = layer.top + ly;
+            if dy >= out_h {
+                break;
+            }
+            for lx in 0..layer_img.width() {
+                let dx = layer.left + lx;
+                if dx >= out_w {
+                    break;
+                }
+                let src = layer_img.get_pixel(lx, ly);
+                let dst = out.get_pixel_mut(dx, dy);
+                // "over" alpha blend.
+                let a = src.0[3] as f32 / 255.0;
+                let inv = 1.0 - a;
+                for c in 0..3 {
+                    dst.0[c] = (src.0[c] as f32 * a + dst.0[c] as f32 * inv).clamp(0.0, 255.0) as u8;
+                }
+                dst.0[3] = (src.0[3] as f32 + dst.0[3] as f32 * inv).clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    Ok(DynamicImage::ImageRgba8(out))
 }
 
 fn apply_rotate(img: DynamicImage, degrees: i32) -> DynamicImage {

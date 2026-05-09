@@ -48,6 +48,7 @@ host_dns_resolve6
 host_dns_resolve_cname
 host_dns_resolve_mx
 host_dns_resolve_ns
+host_dns_resolve_soa
 host_dns_resolve_txt
 host_dns_reverse
 host_emit_row
@@ -58,6 +59,7 @@ host_fs_opendir_sync
 host_fs_read_chunk
 host_fs_read_file_sync
 host_fs_readdir_sync
+host_fs_readlink_sync
 host_fs_realpath_sync
 host_fs_rename_sync
 host_fs_size

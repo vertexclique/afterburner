@@ -610,11 +610,94 @@ __register_module('stream', function(module, exports, require) {
         })());
         return node;
     };
-    Writable.toWeb = function(_nodeWritable) {
-        throw new Error('Writable.toWeb: not implemented');
+    /// `Writable.toWeb(node)` — wrap a Node Writable so it behaves
+    /// like a WHATWG WritableStream. The web stream's `write(chunk)`
+    /// pushes into the node stream and resolves on `'drain'` /
+    /// completion; `close()` calls `node.end()`; `abort()` calls
+    /// `node.destroy(reason)`.
+    Writable.toWeb = function(nodeWritable) {
+        if (typeof WritableStream !== 'function') {
+            throw new Error('Writable.toWeb: WritableStream global unavailable');
+        }
+        return new WritableStream({
+            write: function(chunk) {
+                return new Promise(function(resolve, reject) {
+                    var ok = nodeWritable.write(chunk, function(err) {
+                        if (err) reject(err);
+                    });
+                    if (ok) {
+                        Promise.resolve().then(resolve);
+                    } else {
+                        nodeWritable.once('drain', resolve);
+                        nodeWritable.once('error', reject);
+                    }
+                });
+            },
+            close: function() {
+                return new Promise(function(resolve, reject) {
+                    nodeWritable.end(function() { resolve(); });
+                    nodeWritable.once('error', reject);
+                });
+            },
+            abort: function(reason) {
+                return new Promise(function(resolve) {
+                    try { nodeWritable.destroy(reason); } catch (_) {}
+                    Promise.resolve().then(resolve);
+                });
+            },
+        });
     };
-    Writable.fromWeb = function(_webWritable) {
-        throw new Error('Writable.fromWeb: not implemented');
+
+    /// `Writable.fromWeb(web)` — wrap a WHATWG WritableStream as a
+    /// Node Writable. Each `_write` call grabs a writer and forwards
+    /// the chunk; `_final` closes; `_destroy` aborts.
+    Writable.fromWeb = function(webWritable) {
+        // Lock the writer once at construction so the same handle is
+        // reused across writes — getWriter() throws on double-lock.
+        var writer = webWritable.getWriter();
+        var node = new Writable({
+            write: function(chunk, enc, cb) {
+                try {
+                    // Coerce strings so the WritableStream sees a
+                    // Uint8Array regardless of the Node-side encoding.
+                    var data;
+                    if (typeof chunk === 'string') {
+                        data = new TextEncoder().encode(chunk);
+                    } else if (chunk && chunk.buffer && chunk.byteLength != null) {
+                        data = chunk;
+                    } else {
+                        data = new Uint8Array(chunk);
+                    }
+                    var p = writer.write(data);
+                    if (p && typeof p.then === 'function') {
+                        p.then(function() { cb(); }, cb);
+                    } else {
+                        cb();
+                    }
+                } catch (e) { cb(e); }
+            },
+            final: function(cb) {
+                try {
+                    var p = writer.close();
+                    if (p && typeof p.then === 'function') {
+                        p.then(function() { cb(); }, cb);
+                    } else {
+                        cb();
+                    }
+                } catch (e) { cb(e); }
+            },
+            destroy: function(err, cb) {
+                try {
+                    var p = writer.abort(err);
+                    if (p && typeof p.then === 'function') {
+                        p.then(function() { cb(err); }, function() { cb(err); });
+                    } else {
+                        cb(err);
+                    }
+                } catch (_) { cb(err); }
+            },
+        });
+        return node;
     };
 
     /// stream.duplexPair — Node 22+. Returns `[a, b]` two Duplex

@@ -1097,6 +1097,7 @@ fn install_http_dns<'js>(globals: &Object<'js>) {
     bind_dns_str!("__host_dns_resolve_txt", host_dns_resolve_txt);
     bind_dns_str!("__host_dns_resolve_cname", host_dns_resolve_cname);
     bind_dns_str!("__host_dns_resolve_ns", host_dns_resolve_ns);
+    bind_dns_str!("__host_dns_resolve_soa", host_dns_resolve_soa);
     bind_dns_str!("__host_dns_reverse", host_dns_reverse);
 }
 

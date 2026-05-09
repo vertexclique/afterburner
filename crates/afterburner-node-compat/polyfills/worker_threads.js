@@ -276,18 +276,12 @@ __register_module('worker_threads', function(module, exports, require) {
     exports.isMainThread = IS_MAIN;
     exports.threadId = THREAD_ID;
 
-    // Stubs for the deferred APIs — throw clearly rather than silently
-    // returning undefined.
-    exports.MessageChannel = function() {
-        throw new Error(
-            'worker_threads: MessageChannel is not implemented in burn yet'
-        );
-    };
-    exports.MessagePort = function() {
-        throw new Error(
-            'worker_threads: standalone MessagePort is not implemented in burn yet'
-        );
-    };
+    // Re-export the global MessageChannel + MessagePort. They live
+    // on `globalThis` for parity with browser semantics; `node:worker_threads`
+    // exposes the same constructors so library code that pulls them
+    // from this module gets the live class instead of a throwing stub.
+    exports.MessageChannel = globalThis.MessageChannel;
+    exports.MessagePort = globalThis.MessagePort;
     var _untransferable = new WeakSet();
     exports.markAsUntransferable = function(value) {
         try { _untransferable.add(value); } catch (_) {}
@@ -295,10 +289,12 @@ __register_module('worker_threads', function(module, exports, require) {
     exports.isMarkedAsUntransferable = function(value) {
         try { return _untransferable.has(value); } catch (_) { return false; }
     };
-    exports.moveMessagePortToContext = function() {
-        throw new Error(
-            'worker_threads: moveMessagePortToContext is not implemented in burn'
-        );
+    /// Single-context runtime — there is one realm per shard, so
+    /// "moving" a port between contexts is the identity operation.
+    /// Keeping the same MessagePort handle is spec-equivalent to a
+    /// successful move in a multi-realm engine.
+    exports.moveMessagePortToContext = function(port, _ctx) {
+        return port;
     };
     exports.receiveMessageOnPort = function() {
         return undefined;

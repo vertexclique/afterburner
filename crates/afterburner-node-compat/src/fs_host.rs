@@ -134,6 +134,50 @@ pub fn realpath_sync(path: &str, m: &Manifold) -> Result<String> {
     Ok(canon.to_string_lossy().into_owned())
 }
 
+/// Read the target of a symbolic link. Returns the literal stored
+/// target (relative or absolute, as on disk) — does not canonicalise.
+/// Backs `fs.readlinkSync` / `fs.readlink` / `fs.promises.readlink`.
+///
+/// The default `validate_read` canonicalises through symlinks, which
+/// would resolve the link before we ever called `read_link` on it.
+/// For symlink ops we validate the *parent* directory instead — the
+/// symlink itself is allowed to point anywhere; the manifold only
+/// gates which directories the caller can list.
+pub fn readlink_sync(path: &str, m: &Manifold) -> Result<String> {
+    use std::path::PathBuf;
+    let requested = PathBuf::from(path);
+    let absolute = if requested.is_absolute() {
+        requested
+    } else {
+        std::env::current_dir()
+            .map(|c| c.join(&requested))
+            .map_err(|e| AfterburnerError::Host(format!("fs.readlink: cwd: {e}")))?
+    };
+    // Canonicalise the parent so the manifold check sees the real
+    // directory, not any sym-traversal trickery in the prefix.
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| AfterburnerError::Host(format!("fs.readlink({path}): no parent")))?;
+    let parent_canon = std::fs::canonicalize(parent)
+        .map_err(|e| AfterburnerError::Host(format!("fs.readlink({path}): parent: {e}")))?;
+    // Run the parent through the same root-allow-list check as a read
+    // so `Manifold::fs = ReadOnly([..])` still gates link inspection.
+    let _ = validate_read(
+        parent_canon.to_str().ok_or_else(|| {
+            AfterburnerError::Host(format!("fs.readlink({path}): parent path utf8"))
+        })?,
+        &m.fs,
+    )?;
+    let final_path = parent_canon.join(
+        absolute
+            .file_name()
+            .ok_or_else(|| AfterburnerError::Host(format!("fs.readlink({path}): no filename")))?,
+    );
+    let target = std::fs::read_link(&final_path)
+        .map_err(|e| AfterburnerError::Host(format!("fs.readlink({path}): {e}")))?;
+    Ok(target.to_string_lossy().into_owned())
+}
+
 /// Recursively copy `src` to `dst`. Files are written byte-for-byte;
 /// directories are created on demand; nested entries recursed.
 /// `force` overwrites existing destination files (matches Node's

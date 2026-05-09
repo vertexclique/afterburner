@@ -58,6 +58,14 @@ unsafe extern "C" {
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
+    /// Read the target of a symbolic link. Returns the stored target
+    /// path string; does not canonicalise. Backs `fs.readlinkSync`.
+    pub fn host_fs_readlink_sync(
+        path_ptr: *const u8,
+        path_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
     pub fn host_fs_cp(
         src_ptr: *const u8,
         src_len: u32,
@@ -262,6 +270,16 @@ unsafe extern "C" {
         out_cap: u32,
     ) -> i32;
     pub fn host_dns_resolve_ns(
+        name_ptr: *const u8,
+        name_len: u32,
+        servers_ptr: *const u8,
+        servers_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    /// SOA record lookup. Output is JSON
+    /// `{"nsname","hostmaster","serial","refresh","retry","expire","minttl"}`.
+    pub fn host_dns_resolve_soa(
         name_ptr: *const u8,
         name_len: u32,
         servers_ptr: *const u8,

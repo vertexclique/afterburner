@@ -122,6 +122,19 @@ pub fn install<'js>(globals: &Object<'js>) {
     );
 
     let _ = globals.set(
+        "__host_fs_readlink_sync",
+        Func::from(|path: String| -> String {
+            let pb = path.as_bytes();
+            match call_read(|out, cap| unsafe {
+                host_fs_readlink_sync(pb.as_ptr(), pb.len() as u32, out, cap)
+            }) {
+                Ok(s) => s,
+                Err(e) => format!("__HOST_ERR__:{e}"),
+            }
+        }),
+    );
+
+    let _ = globals.set(
         "__host_fs_cp",
         Func::from(|src: String, dst: String, force: Option<bool>| -> String {
             let sb = src.as_bytes();

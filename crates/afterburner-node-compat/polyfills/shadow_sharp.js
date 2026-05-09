@@ -197,19 +197,106 @@ __register_module('sharp', function(module, exports, require) {
         }
     };
 
-    // --- not-supported stubs (fluent so chains don't crash) -------
+    // --- pixel-pipeline ops registered as fluent stages -----------
+    //
+    // Each op pushes into `this._ops` so the host's image pipeline
+    // processes them in order. The host crate (crates/afterburner-
+    // node-compat/src/shadows/sharp.rs) reads the op tags below and
+    // dispatches to the appropriate `image` / `fast_image_resize`
+    // pipeline stage.
 
-    function notImplemented(name) {
-        throw new Error(
-            'sharp.' + name + ' is not implemented in the burn shadow yet'
-        );
-    }
-    Sharp.prototype.composite = function() { return notImplemented('composite'); };
-    Sharp.prototype.modulate = function() { return notImplemented('modulate'); };
-    Sharp.prototype.tint = function() { return notImplemented('tint'); };
-    Sharp.prototype.sharpen = function() { return notImplemented('sharpen'); };
-    Sharp.prototype.normalize = function() { return notImplemented('normalize'); };
-    Sharp.prototype.threshold = function() { return notImplemented('threshold'); };
+    Sharp.prototype.tint = function(rgb) {
+        // Accept `{ r, g, b }`, `[r, g, b]`, or a hex string.
+        var r, g, b;
+        if (typeof rgb === 'string') {
+            var hex = rgb.replace(/^#/, '');
+            if (hex.length === 3) {
+                r = parseInt(hex[0] + hex[0], 16);
+                g = parseInt(hex[1] + hex[1], 16);
+                b = parseInt(hex[2] + hex[2], 16);
+            } else if (hex.length === 6) {
+                r = parseInt(hex.slice(0, 2), 16);
+                g = parseInt(hex.slice(2, 4), 16);
+                b = parseInt(hex.slice(4, 6), 16);
+            }
+        } else if (Array.isArray(rgb)) {
+            r = rgb[0]; g = rgb[1]; b = rgb[2];
+        } else if (rgb && typeof rgb === 'object') {
+            r = rgb.r; g = rgb.g; b = rgb.b;
+        }
+        return pushOp(this, {
+            op: 'tint',
+            r: (r | 0) & 0xFF, g: (g | 0) & 0xFF, b: (b | 0) & 0xFF,
+        });
+    };
+
+    Sharp.prototype.modulate = function(opts) {
+        // Per sharp's spec: brightness 1.0 = unchanged, saturation
+        // 1.0 = unchanged, hue 0 = unchanged (degrees, can be
+        // negative).
+        opts = opts || {};
+        return pushOp(this, {
+            op: 'modulate',
+            brightness: typeof opts.brightness === 'number' ? opts.brightness : 1,
+            saturation: typeof opts.saturation === 'number' ? opts.saturation : 1,
+            hue:        typeof opts.hue === 'number' ? opts.hue : 0,
+        });
+    };
+
+    Sharp.prototype.sharpen = function(sigma, flat, jagged) {
+        // sharp(sigma=1.0) is the canonical "unsharp mask" call. We
+        // accept either a single number or the legacy {sigma, m1, m2}
+        // shape; the host applies an unsharp-mask convolution.
+        var s = 1, f = 1, j = 2;
+        if (typeof sigma === 'number') s = sigma;
+        else if (sigma && typeof sigma === 'object') {
+            if (typeof sigma.sigma === 'number') s = sigma.sigma;
+            if (typeof sigma.m1 === 'number') f = sigma.m1;
+            if (typeof sigma.m2 === 'number') j = sigma.m2;
+        }
+        if (typeof flat === 'number') f = flat;
+        if (typeof jagged === 'number') j = jagged;
+        return pushOp(this, { op: 'sharpen', sigma: s, flat: f, jagged: j });
+    };
+
+    Sharp.prototype.normalize = function(_opts) {
+        // Histogram stretch — host walks per-channel min/max and
+        // stretches to [0,255].
+        return pushOp(this, { op: 'normalize' });
+    };
+    Sharp.prototype.normalise = Sharp.prototype.normalize;
+
+    Sharp.prototype.threshold = function(level, opts) {
+        // Per sharp: pixels with luminance ≥ level go white; below
+        // go black. Default level=128. `grayscale: false` keeps the
+        // RGB channels; default true converts to single-channel.
+        opts = opts || {};
+        return pushOp(this, {
+            op: 'threshold',
+            level: typeof level === 'number' ? (level | 0) : 128,
+            grayscale: opts.grayscale !== false,
+        });
+    };
+
+    Sharp.prototype.composite = function(layers) {
+        // sharp.composite(layers) — array of `{input, top, left, blend}`.
+        // Host reads each layer, decodes input bytes, alpha-blends at
+        // (left, top). Defaults: top/left = 0, blend = 'over'.
+        if (!Array.isArray(layers)) {
+            throw new TypeError('sharp.composite: layers must be an array');
+        }
+        var serialized = layers.map(function(layer) {
+            var src = makeSource(layer.input);
+            return {
+                source_b64: src.bytes_b64,
+                top: (layer.top | 0) || 0,
+                left: (layer.left | 0) || 0,
+                blend: layer.blend || 'over',
+                gravity: layer.gravity || null,
+            };
+        });
+        return pushOp(this, { op: 'composite', layers: serialized });
+    };
 
     // --- terminal ops ----------------------------------------------
 

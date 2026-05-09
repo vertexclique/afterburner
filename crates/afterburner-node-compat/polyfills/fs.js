@@ -189,7 +189,7 @@ __register_module('fs', function(module, exports, require) {
         }
     };
 
-    // readlinkSync — no host bridge, so fail with ENOSYS so callers
+    // readlinkSync — symlink target via the fs host bridge.
     // can fall through (most archive / module-resolution code probes
     // and degrades gracefully when readlink fails).
     exports.readlinkSync = function(path) {
@@ -197,7 +197,7 @@ __register_module('fs', function(module, exports, require) {
         if (typeof fn === 'function') {
             return checkHostError(fn(String(path)), 'readlinkSync');
         }
-        var e = new Error("readlinkSync is not implemented");
+        var e = new Error('fs.readlinkSync: host fn unavailable');
         e.code = 'ENOSYS';
         throw e;
     };

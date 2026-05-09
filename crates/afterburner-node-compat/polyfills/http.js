@@ -613,19 +613,184 @@ function __plenum_install_http(moduleName) {
         // come from the `_make*` factories. The classes exist for
         // `instanceof` checks and for npm consumers that read
         // `http.IncomingMessage.prototype`.
-        exports.Server = function Server() {
-            throw new Error('new http.Server() is not implemented; use http.createServer()');
+        /// `new http.Server([options][, requestListener])` — direct
+        /// construction. Equivalent to `http.createServer(options, listener)`
+        /// in shape; library code that does `class S extends http.Server`
+        /// + `super()` lands here.
+        exports.Server = function Server(options, requestListener) {
+            if (!(this instanceof exports.Server)) {
+                return new exports.Server(options, requestListener);
+            }
+            if (typeof options === 'function') {
+                requestListener = options;
+                options = undefined;
+            }
+            EventEmitter.call(this);
+            this._options = options || {};
+            this._listening = false;
+            this._serverId = undefined;
+            this.timeout = (this._options.timeout | 0) || 0;
+            this.keepAliveTimeout = 5000;
+            this.headersTimeout = 60000;
+            this.requestTimeout = 0;
+            if (typeof requestListener === 'function') {
+                this.on('request', requestListener);
+            }
         };
-        exports.IncomingMessage = function IncomingMessage() {
-            throw new Error('new http.IncomingMessage() is not implemented');
+        exports.Server.prototype = Object.create(EventEmitter.prototype);
+        exports.Server.prototype.constructor = exports.Server;
+        exports.Server.prototype.listen = function() {
+            // Forward through to the createServer pipeline by
+            // constructing a sibling and re-emitting events back. This
+            // is the cleanest way to keep both the direct-construct
+            // and createServer paths going through the same daemon
+            // listener bookkeeping.
+            var inner = exports.createServer();
+            var self = this;
+            inner.on('request', function(req, res) { self.emit('request', req, res); });
+            inner.on('listening', function() { self._listening = true; self.emit('listening'); });
+            inner.on('close',     function() { self._listening = false; self.emit('close'); });
+            inner.on('error',     function(e) { self.emit('error', e); });
+            this._inner = inner;
+            inner.listen.apply(inner, arguments);
+            return this;
+        };
+        exports.Server.prototype.close = function(cb) {
+            if (this._inner) return this._inner.close(cb);
+            if (typeof cb === 'function') Promise.resolve().then(cb);
+        };
+        exports.Server.prototype.address = function() {
+            return this._inner && this._inner.address ? this._inner.address() : null;
+        };
+        exports.Server.prototype.setTimeout = function(ms, cb) {
+            this.timeout = ms | 0;
+            if (typeof cb === 'function') this.on('timeout', cb);
+            return this;
+        };
+
+        /// `new http.IncomingMessage(socket)` — direct construction.
+        /// Real Node uses this for testing + subclassing; we produce
+        /// a fresh request shape backed by the same factory the
+        /// daemon dispatcher uses.
+        exports.IncomingMessage = function IncomingMessage(socket) {
+            if (!(this instanceof exports.IncomingMessage)) {
+                return new exports.IncomingMessage(socket);
+            }
+            EventEmitter.call(this);
+            this.socket = socket || null;
+            this.connection = socket || null;
+            this.httpVersion = '1.1';
+            this.httpVersionMajor = 1;
+            this.httpVersionMinor = 1;
+            this.complete = false;
+            this.headers = {};
+            this.rawHeaders = [];
+            this.trailers = {};
+            this.rawTrailers = [];
+            this.aborted = false;
+            this.method = 'GET';
+            this.url = '/';
+            this.statusCode = null;
+            this.statusMessage = null;
         };
         exports.IncomingMessage.prototype = Object.create(EventEmitter.prototype);
         exports.IncomingMessage.prototype.constructor = exports.IncomingMessage;
-        exports.ServerResponse = function ServerResponse() {
-            throw new Error('new http.ServerResponse() is not implemented');
+        exports.IncomingMessage.prototype.setTimeout = function(_ms, cb) {
+            if (typeof cb === 'function') this.on('timeout', cb);
+            return this;
+        };
+        exports.IncomingMessage.prototype.destroy = function(err) {
+            this.aborted = true;
+            var self = this;
+            Promise.resolve().then(function() {
+                if (err) self.emit('error', err);
+                self.emit('close');
+            });
+        };
+
+        /// `new http.ServerResponse(req)` — direct construction.
+        /// Used for testing handlers in isolation. Tracks status,
+        /// headers, body chunks; `end()` resolves a `_completion`
+        /// Promise so test code can `await` the response.
+        exports.ServerResponse = function ServerResponse(req) {
+            if (!(this instanceof exports.ServerResponse)) {
+                return new exports.ServerResponse(req);
+            }
+            EventEmitter.call(this);
+            this.req = req || null;
+            this.statusCode = 200;
+            this.statusMessage = '';
+            this.sendDate = true;
+            this.finished = false;
+            this.writableEnded = false;
+            this.writableFinished = false;
+            this.headersSent = false;
+            this._headers = {};
+            this._chunks = [];
         };
         exports.ServerResponse.prototype = Object.create(EventEmitter.prototype);
         exports.ServerResponse.prototype.constructor = exports.ServerResponse;
+        exports.ServerResponse.prototype.setHeader = function(k, v) {
+            this._headers[String(k).toLowerCase()] = v;
+            return this;
+        };
+        exports.ServerResponse.prototype.getHeader = function(k) {
+            return this._headers[String(k).toLowerCase()];
+        };
+        exports.ServerResponse.prototype.getHeaders = function() {
+            return Object.assign({}, this._headers);
+        };
+        exports.ServerResponse.prototype.removeHeader = function(k) {
+            delete this._headers[String(k).toLowerCase()];
+        };
+        exports.ServerResponse.prototype.hasHeader = function(k) {
+            return Object.prototype.hasOwnProperty.call(this._headers, String(k).toLowerCase());
+        };
+        exports.ServerResponse.prototype.writeHead = function(status, statusMsg, headers) {
+            this.statusCode = status | 0;
+            if (typeof statusMsg === 'string') {
+                this.statusMessage = statusMsg;
+            } else if (statusMsg && typeof statusMsg === 'object') {
+                headers = statusMsg;
+            }
+            if (headers) {
+                var keys = Object.keys(headers);
+                for (var i = 0; i < keys.length; i++) {
+                    this.setHeader(keys[i], headers[keys[i]]);
+                }
+            }
+            this.headersSent = true;
+            return this;
+        };
+        exports.ServerResponse.prototype.write = function(chunk, _enc, cb) {
+            if (chunk != null) this._chunks.push(chunk);
+            if (typeof cb === 'function') Promise.resolve().then(cb);
+            return true;
+        };
+        exports.ServerResponse.prototype.end = function(chunk, _enc, cb) {
+            if (typeof chunk === 'function') { cb = chunk; chunk = undefined; }
+            if (chunk != null) this._chunks.push(chunk);
+            this.finished = true;
+            this.writableEnded = true;
+            this.writableFinished = true;
+            var self = this;
+            Promise.resolve().then(function() {
+                self.emit('finish');
+                self.emit('close');
+                if (typeof cb === 'function') cb();
+            });
+            return this;
+        };
+        exports.ServerResponse.prototype.addTrailers = function(headers) {
+            this._trailers = Object.assign(this._trailers || {}, headers);
+        };
+        exports.ServerResponse.prototype.setTimeout = function(_ms, cb) {
+            if (typeof cb === 'function') this.on('timeout', cb);
+            return this;
+        };
+        exports.ServerResponse.prototype.flushHeaders = function() {
+            this.headersSent = true;
+        };
 
         // `http.Agent` / `https.Agent` — minimal constructable stand-ins.
         // npm's @npmcli/agent and many keep-alive helpers do
@@ -663,13 +828,66 @@ function __plenum_install_http(moduleName) {
         }
         exports.globalAgent = globalThis.__plenum_default_agents[moduleName];
 
-        // ClientRequest — same posture as Server / IncomingMessage:
-        // exists for `instanceof` plus prototype reads, not callable.
-        function ClientRequest() {
-            throw new Error('new http.ClientRequest() is not implemented; use http.request()');
+        /// `new http.ClientRequest(options[, callback])` — direct
+        /// construction routes through `http.request` so all the
+        /// same daemon plumbing applies. Returns the live request
+        /// object (extends EventEmitter); `.end()` flushes the body.
+        function ClientRequest(options, callback) {
+            if (!(this instanceof ClientRequest)) {
+                return new ClientRequest(options, callback);
+            }
+            EventEmitter.call(this);
+            // Defer to http.request which already speaks the daemon
+            // protocol. We forward all events back so listeners on
+            // the bare `new ClientRequest(...)` see them.
+            var inner = exports.request(options, callback);
+            var self = this;
+            ['response','abort','close','connect','continue','error','finish',
+             'information','socket','timeout','upgrade'].forEach(function(ev) {
+                inner.on(ev, function() {
+                    var args = Array.prototype.slice.call(arguments);
+                    args.unshift(ev);
+                    self.emit.apply(self, args);
+                });
+            });
+            this._inner = inner;
+            this.aborted = false;
+            this.finished = false;
+            this.path = (options && options.path) || '/';
+            this.method = (options && options.method) || 'GET';
         }
         ClientRequest.prototype = Object.create(EventEmitter.prototype);
         ClientRequest.prototype.constructor = ClientRequest;
+        ClientRequest.prototype.write = function(chunk, enc, cb) {
+            return this._inner.write(chunk, enc, cb);
+        };
+        ClientRequest.prototype.end = function(chunk, enc, cb) {
+            this.finished = true;
+            return this._inner.end(chunk, enc, cb);
+        };
+        ClientRequest.prototype.abort = function() {
+            this.aborted = true;
+            if (typeof this._inner.abort === 'function') this._inner.abort();
+            else if (typeof this._inner.destroy === 'function') this._inner.destroy();
+        };
+        ClientRequest.prototype.destroy = function(err) {
+            this.aborted = true;
+            if (typeof this._inner.destroy === 'function') this._inner.destroy(err);
+        };
+        ClientRequest.prototype.setTimeout = function(ms, cb) {
+            if (typeof this._inner.setTimeout === 'function') this._inner.setTimeout(ms, cb);
+            return this;
+        };
+        ClientRequest.prototype.setHeader = function(k, v) {
+            if (typeof this._inner.setHeader === 'function') this._inner.setHeader(k, v);
+            return this;
+        };
+        ClientRequest.prototype.getHeader = function(k) {
+            return this._inner.getHeader && this._inner.getHeader(k);
+        };
+        ClientRequest.prototype.removeHeader = function(k) {
+            if (typeof this._inner.removeHeader === 'function') this._inner.removeHeader(k);
+        };
         exports.ClientRequest = ClientRequest;
 
         // OutgoingMessage — base class some libs subclass.

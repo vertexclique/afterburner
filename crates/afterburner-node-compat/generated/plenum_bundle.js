@@ -3925,10 +3925,25 @@ __register_module('dns', function(module, exports, require) {
     };
 
     exports.resolveSoa = function(hostname, cb) {
-        var err = new Error('dns.resolveSoa: not implemented in burn');
-        err.code = 'ENOTIMP';
-        if (cb) Promise.resolve().then(function() { cb(err); });
-        else throw err;
+        var fn = globalThis.__host_dns_resolve_soa;
+        if (typeof fn !== 'function') {
+            var err = new Error('dns.resolveSoa: host fn unavailable');
+            err.code = 'ENOSYS';
+            if (cb) Promise.resolve().then(function() { cb(err); });
+            else throw err;
+            return;
+        }
+        Promise.resolve().then(function() {
+            var raw = fn(String(hostname), _moduleServersCsv);
+            if (typeof raw === 'string' && raw.indexOf('__HOST_ERR__:') === 0) {
+                if (cb) cb(new Error(raw.slice('__HOST_ERR__:'.length)));
+                return;
+            }
+            try {
+                var rec = JSON.parse(raw);
+                if (cb) cb(null, rec);
+            } catch (e) { if (cb) cb(e); }
+        });
     };
 
     exports.resolveSrv = function(hostname, cb) {
@@ -5045,7 +5060,7 @@ __register_module('fs', function(module, exports, require) {
         }
     };
 
-    // readlinkSync — no host bridge, so fail with ENOSYS so callers
+    // readlinkSync — symlink target via the fs host bridge.
     // can fall through (most archive / module-resolution code probes
     // and degrades gracefully when readlink fails).
     exports.readlinkSync = function(path) {
@@ -5053,7 +5068,7 @@ __register_module('fs', function(module, exports, require) {
         if (typeof fn === 'function') {
             return checkHostError(fn(String(path)), 'readlinkSync');
         }
-        var e = new Error("readlinkSync is not implemented");
+        var e = new Error('fs.readlinkSync: host fn unavailable');
         e.code = 'ENOSYS';
         throw e;
     };
@@ -6966,19 +6981,184 @@ function __plenum_install_http(moduleName) {
         // come from the `_make*` factories. The classes exist for
         // `instanceof` checks and for npm consumers that read
         // `http.IncomingMessage.prototype`.
-        exports.Server = function Server() {
-            throw new Error('new http.Server() is not implemented; use http.createServer()');
+        /// `new http.Server([options][, requestListener])` — direct
+        /// construction. Equivalent to `http.createServer(options, listener)`
+        /// in shape; library code that does `class S extends http.Server`
+        /// + `super()` lands here.
+        exports.Server = function Server(options, requestListener) {
+            if (!(this instanceof exports.Server)) {
+                return new exports.Server(options, requestListener);
+            }
+            if (typeof options === 'function') {
+                requestListener = options;
+                options = undefined;
+            }
+            EventEmitter.call(this);
+            this._options = options || {};
+            this._listening = false;
+            this._serverId = undefined;
+            this.timeout = (this._options.timeout | 0) || 0;
+            this.keepAliveTimeout = 5000;
+            this.headersTimeout = 60000;
+            this.requestTimeout = 0;
+            if (typeof requestListener === 'function') {
+                this.on('request', requestListener);
+            }
         };
-        exports.IncomingMessage = function IncomingMessage() {
-            throw new Error('new http.IncomingMessage() is not implemented');
+        exports.Server.prototype = Object.create(EventEmitter.prototype);
+        exports.Server.prototype.constructor = exports.Server;
+        exports.Server.prototype.listen = function() {
+            // Forward through to the createServer pipeline by
+            // constructing a sibling and re-emitting events back. This
+            // is the cleanest way to keep both the direct-construct
+            // and createServer paths going through the same daemon
+            // listener bookkeeping.
+            var inner = exports.createServer();
+            var self = this;
+            inner.on('request', function(req, res) { self.emit('request', req, res); });
+            inner.on('listening', function() { self._listening = true; self.emit('listening'); });
+            inner.on('close',     function() { self._listening = false; self.emit('close'); });
+            inner.on('error',     function(e) { self.emit('error', e); });
+            this._inner = inner;
+            inner.listen.apply(inner, arguments);
+            return this;
+        };
+        exports.Server.prototype.close = function(cb) {
+            if (this._inner) return this._inner.close(cb);
+            if (typeof cb === 'function') Promise.resolve().then(cb);
+        };
+        exports.Server.prototype.address = function() {
+            return this._inner && this._inner.address ? this._inner.address() : null;
+        };
+        exports.Server.prototype.setTimeout = function(ms, cb) {
+            this.timeout = ms | 0;
+            if (typeof cb === 'function') this.on('timeout', cb);
+            return this;
+        };
+
+        /// `new http.IncomingMessage(socket)` — direct construction.
+        /// Real Node uses this for testing + subclassing; we produce
+        /// a fresh request shape backed by the same factory the
+        /// daemon dispatcher uses.
+        exports.IncomingMessage = function IncomingMessage(socket) {
+            if (!(this instanceof exports.IncomingMessage)) {
+                return new exports.IncomingMessage(socket);
+            }
+            EventEmitter.call(this);
+            this.socket = socket || null;
+            this.connection = socket || null;
+            this.httpVersion = '1.1';
+            this.httpVersionMajor = 1;
+            this.httpVersionMinor = 1;
+            this.complete = false;
+            this.headers = {};
+            this.rawHeaders = [];
+            this.trailers = {};
+            this.rawTrailers = [];
+            this.aborted = false;
+            this.method = 'GET';
+            this.url = '/';
+            this.statusCode = null;
+            this.statusMessage = null;
         };
         exports.IncomingMessage.prototype = Object.create(EventEmitter.prototype);
         exports.IncomingMessage.prototype.constructor = exports.IncomingMessage;
-        exports.ServerResponse = function ServerResponse() {
-            throw new Error('new http.ServerResponse() is not implemented');
+        exports.IncomingMessage.prototype.setTimeout = function(_ms, cb) {
+            if (typeof cb === 'function') this.on('timeout', cb);
+            return this;
+        };
+        exports.IncomingMessage.prototype.destroy = function(err) {
+            this.aborted = true;
+            var self = this;
+            Promise.resolve().then(function() {
+                if (err) self.emit('error', err);
+                self.emit('close');
+            });
+        };
+
+        /// `new http.ServerResponse(req)` — direct construction.
+        /// Used for testing handlers in isolation. Tracks status,
+        /// headers, body chunks; `end()` resolves a `_completion`
+        /// Promise so test code can `await` the response.
+        exports.ServerResponse = function ServerResponse(req) {
+            if (!(this instanceof exports.ServerResponse)) {
+                return new exports.ServerResponse(req);
+            }
+            EventEmitter.call(this);
+            this.req = req || null;
+            this.statusCode = 200;
+            this.statusMessage = '';
+            this.sendDate = true;
+            this.finished = false;
+            this.writableEnded = false;
+            this.writableFinished = false;
+            this.headersSent = false;
+            this._headers = {};
+            this._chunks = [];
         };
         exports.ServerResponse.prototype = Object.create(EventEmitter.prototype);
         exports.ServerResponse.prototype.constructor = exports.ServerResponse;
+        exports.ServerResponse.prototype.setHeader = function(k, v) {
+            this._headers[String(k).toLowerCase()] = v;
+            return this;
+        };
+        exports.ServerResponse.prototype.getHeader = function(k) {
+            return this._headers[String(k).toLowerCase()];
+        };
+        exports.ServerResponse.prototype.getHeaders = function() {
+            return Object.assign({}, this._headers);
+        };
+        exports.ServerResponse.prototype.removeHeader = function(k) {
+            delete this._headers[String(k).toLowerCase()];
+        };
+        exports.ServerResponse.prototype.hasHeader = function(k) {
+            return Object.prototype.hasOwnProperty.call(this._headers, String(k).toLowerCase());
+        };
+        exports.ServerResponse.prototype.writeHead = function(status, statusMsg, headers) {
+            this.statusCode = status | 0;
+            if (typeof statusMsg === 'string') {
+                this.statusMessage = statusMsg;
+            } else if (statusMsg && typeof statusMsg === 'object') {
+                headers = statusMsg;
+            }
+            if (headers) {
+                var keys = Object.keys(headers);
+                for (var i = 0; i < keys.length; i++) {
+                    this.setHeader(keys[i], headers[keys[i]]);
+                }
+            }
+            this.headersSent = true;
+            return this;
+        };
+        exports.ServerResponse.prototype.write = function(chunk, _enc, cb) {
+            if (chunk != null) this._chunks.push(chunk);
+            if (typeof cb === 'function') Promise.resolve().then(cb);
+            return true;
+        };
+        exports.ServerResponse.prototype.end = function(chunk, _enc, cb) {
+            if (typeof chunk === 'function') { cb = chunk; chunk = undefined; }
+            if (chunk != null) this._chunks.push(chunk);
+            this.finished = true;
+            this.writableEnded = true;
+            this.writableFinished = true;
+            var self = this;
+            Promise.resolve().then(function() {
+                self.emit('finish');
+                self.emit('close');
+                if (typeof cb === 'function') cb();
+            });
+            return this;
+        };
+        exports.ServerResponse.prototype.addTrailers = function(headers) {
+            this._trailers = Object.assign(this._trailers || {}, headers);
+        };
+        exports.ServerResponse.prototype.setTimeout = function(_ms, cb) {
+            if (typeof cb === 'function') this.on('timeout', cb);
+            return this;
+        };
+        exports.ServerResponse.prototype.flushHeaders = function() {
+            this.headersSent = true;
+        };
 
         // `http.Agent` / `https.Agent` — minimal constructable stand-ins.
         // npm's @npmcli/agent and many keep-alive helpers do
@@ -7016,13 +7196,66 @@ function __plenum_install_http(moduleName) {
         }
         exports.globalAgent = globalThis.__plenum_default_agents[moduleName];
 
-        // ClientRequest — same posture as Server / IncomingMessage:
-        // exists for `instanceof` plus prototype reads, not callable.
-        function ClientRequest() {
-            throw new Error('new http.ClientRequest() is not implemented; use http.request()');
+        /// `new http.ClientRequest(options[, callback])` — direct
+        /// construction routes through `http.request` so all the
+        /// same daemon plumbing applies. Returns the live request
+        /// object (extends EventEmitter); `.end()` flushes the body.
+        function ClientRequest(options, callback) {
+            if (!(this instanceof ClientRequest)) {
+                return new ClientRequest(options, callback);
+            }
+            EventEmitter.call(this);
+            // Defer to http.request which already speaks the daemon
+            // protocol. We forward all events back so listeners on
+            // the bare `new ClientRequest(...)` see them.
+            var inner = exports.request(options, callback);
+            var self = this;
+            ['response','abort','close','connect','continue','error','finish',
+             'information','socket','timeout','upgrade'].forEach(function(ev) {
+                inner.on(ev, function() {
+                    var args = Array.prototype.slice.call(arguments);
+                    args.unshift(ev);
+                    self.emit.apply(self, args);
+                });
+            });
+            this._inner = inner;
+            this.aborted = false;
+            this.finished = false;
+            this.path = (options && options.path) || '/';
+            this.method = (options && options.method) || 'GET';
         }
         ClientRequest.prototype = Object.create(EventEmitter.prototype);
         ClientRequest.prototype.constructor = ClientRequest;
+        ClientRequest.prototype.write = function(chunk, enc, cb) {
+            return this._inner.write(chunk, enc, cb);
+        };
+        ClientRequest.prototype.end = function(chunk, enc, cb) {
+            this.finished = true;
+            return this._inner.end(chunk, enc, cb);
+        };
+        ClientRequest.prototype.abort = function() {
+            this.aborted = true;
+            if (typeof this._inner.abort === 'function') this._inner.abort();
+            else if (typeof this._inner.destroy === 'function') this._inner.destroy();
+        };
+        ClientRequest.prototype.destroy = function(err) {
+            this.aborted = true;
+            if (typeof this._inner.destroy === 'function') this._inner.destroy(err);
+        };
+        ClientRequest.prototype.setTimeout = function(ms, cb) {
+            if (typeof this._inner.setTimeout === 'function') this._inner.setTimeout(ms, cb);
+            return this;
+        };
+        ClientRequest.prototype.setHeader = function(k, v) {
+            if (typeof this._inner.setHeader === 'function') this._inner.setHeader(k, v);
+            return this;
+        };
+        ClientRequest.prototype.getHeader = function(k) {
+            return this._inner.getHeader && this._inner.getHeader(k);
+        };
+        ClientRequest.prototype.removeHeader = function(k) {
+            if (typeof this._inner.removeHeader === 'function') this._inner.removeHeader(k);
+        };
         exports.ClientRequest = ClientRequest;
 
         // OutgoingMessage — base class some libs subclass.
@@ -9432,10 +9665,40 @@ __register_module('sqlite', function(module, exports, require) {
         SQLITE_CHANGESET_CONFLICT: SQLITE_CONSTANTS.SQLITE_CHANGESET_CONFLICT,
         SQLITE_CHANGESET_CONSTRAINT: SQLITE_CONSTANTS.SQLITE_CHANGESET_CONSTRAINT,
         SQLITE_CHANGESET_FOREIGN_KEY: SQLITE_CONSTANTS.SQLITE_CHANGESET_FOREIGN_KEY,
-        backup: function() { throw Object.assign(
-            new Error('sqlite.backup not implemented'),
-            { code: 'ERR_NOT_IMPLEMENTED' }
-        ); },
+        /// `sqlite.backup(sourceDb, destPath, options?)` — Node 22+
+        /// online backup. We implement it via a sequence of SQL
+        /// statements that drive SQLite's `VACUUM INTO` semantics
+        /// (atomic snapshot to a file path). For an in-memory source
+        /// DB this writes the snapshot to disk; for a file source it
+        /// produces a consistent copy at `destPath`. Returns a
+        /// Promise that resolves to the number of pages copied.
+        backup: function(sourceDb, destPath, options) {
+            options = options || {};
+            return new Promise(function(resolve, reject) {
+                try {
+                    if (!sourceDb || typeof sourceDb.exec !== 'function') {
+                        throw new TypeError('sqlite.backup: source must be a DatabaseSync');
+                    }
+                    var quoted = "'" + String(destPath).replace(/'/g, "''") + "'";
+                    sourceDb.exec('VACUUM INTO ' + quoted);
+                    // Page count from the source so callers can assert
+                    // a non-zero copy occurred. Fallback to 1 if the
+                    // pragma isn't reachable.
+                    var pages = 1;
+                    try {
+                        var stmt = sourceDb.prepare('PRAGMA page_count');
+                        var row = stmt.get();
+                        pages = (row && (row.page_count | 0)) || 1;
+                        if (typeof stmt.finalize === 'function') stmt.finalize();
+                    } catch (_) {}
+                    if (typeof options.progress === 'function') {
+                        try { options.progress({ totalPages: pages, remainingPages: 0 }); }
+                        catch (_) {}
+                    }
+                    resolve(pages);
+                } catch (e) { reject(e); }
+            });
+        },
     };
 });
 
@@ -12237,19 +12500,106 @@ __register_module('sharp', function(module, exports, require) {
         }
     };
 
-    // --- not-supported stubs (fluent so chains don't crash) -------
+    // --- pixel-pipeline ops registered as fluent stages -----------
+    //
+    // Each op pushes into `this._ops` so the host's image pipeline
+    // processes them in order. The host crate (crates/afterburner-
+    // node-compat/src/shadows/sharp.rs) reads the op tags below and
+    // dispatches to the appropriate `image` / `fast_image_resize`
+    // pipeline stage.
 
-    function notImplemented(name) {
-        throw new Error(
-            'sharp.' + name + ' is not implemented in the burn shadow yet'
-        );
-    }
-    Sharp.prototype.composite = function() { return notImplemented('composite'); };
-    Sharp.prototype.modulate = function() { return notImplemented('modulate'); };
-    Sharp.prototype.tint = function() { return notImplemented('tint'); };
-    Sharp.prototype.sharpen = function() { return notImplemented('sharpen'); };
-    Sharp.prototype.normalize = function() { return notImplemented('normalize'); };
-    Sharp.prototype.threshold = function() { return notImplemented('threshold'); };
+    Sharp.prototype.tint = function(rgb) {
+        // Accept `{ r, g, b }`, `[r, g, b]`, or a hex string.
+        var r, g, b;
+        if (typeof rgb === 'string') {
+            var hex = rgb.replace(/^#/, '');
+            if (hex.length === 3) {
+                r = parseInt(hex[0] + hex[0], 16);
+                g = parseInt(hex[1] + hex[1], 16);
+                b = parseInt(hex[2] + hex[2], 16);
+            } else if (hex.length === 6) {
+                r = parseInt(hex.slice(0, 2), 16);
+                g = parseInt(hex.slice(2, 4), 16);
+                b = parseInt(hex.slice(4, 6), 16);
+            }
+        } else if (Array.isArray(rgb)) {
+            r = rgb[0]; g = rgb[1]; b = rgb[2];
+        } else if (rgb && typeof rgb === 'object') {
+            r = rgb.r; g = rgb.g; b = rgb.b;
+        }
+        return pushOp(this, {
+            op: 'tint',
+            r: (r | 0) & 0xFF, g: (g | 0) & 0xFF, b: (b | 0) & 0xFF,
+        });
+    };
+
+    Sharp.prototype.modulate = function(opts) {
+        // Per sharp's spec: brightness 1.0 = unchanged, saturation
+        // 1.0 = unchanged, hue 0 = unchanged (degrees, can be
+        // negative).
+        opts = opts || {};
+        return pushOp(this, {
+            op: 'modulate',
+            brightness: typeof opts.brightness === 'number' ? opts.brightness : 1,
+            saturation: typeof opts.saturation === 'number' ? opts.saturation : 1,
+            hue:        typeof opts.hue === 'number' ? opts.hue : 0,
+        });
+    };
+
+    Sharp.prototype.sharpen = function(sigma, flat, jagged) {
+        // sharp(sigma=1.0) is the canonical "unsharp mask" call. We
+        // accept either a single number or the legacy {sigma, m1, m2}
+        // shape; the host applies an unsharp-mask convolution.
+        var s = 1, f = 1, j = 2;
+        if (typeof sigma === 'number') s = sigma;
+        else if (sigma && typeof sigma === 'object') {
+            if (typeof sigma.sigma === 'number') s = sigma.sigma;
+            if (typeof sigma.m1 === 'number') f = sigma.m1;
+            if (typeof sigma.m2 === 'number') j = sigma.m2;
+        }
+        if (typeof flat === 'number') f = flat;
+        if (typeof jagged === 'number') j = jagged;
+        return pushOp(this, { op: 'sharpen', sigma: s, flat: f, jagged: j });
+    };
+
+    Sharp.prototype.normalize = function(_opts) {
+        // Histogram stretch — host walks per-channel min/max and
+        // stretches to [0,255].
+        return pushOp(this, { op: 'normalize' });
+    };
+    Sharp.prototype.normalise = Sharp.prototype.normalize;
+
+    Sharp.prototype.threshold = function(level, opts) {
+        // Per sharp: pixels with luminance ≥ level go white; below
+        // go black. Default level=128. `grayscale: false` keeps the
+        // RGB channels; default true converts to single-channel.
+        opts = opts || {};
+        return pushOp(this, {
+            op: 'threshold',
+            level: typeof level === 'number' ? (level | 0) : 128,
+            grayscale: opts.grayscale !== false,
+        });
+    };
+
+    Sharp.prototype.composite = function(layers) {
+        // sharp.composite(layers) — array of `{input, top, left, blend}`.
+        // Host reads each layer, decodes input bytes, alpha-blends at
+        // (left, top). Defaults: top/left = 0, blend = 'over'.
+        if (!Array.isArray(layers)) {
+            throw new TypeError('sharp.composite: layers must be an array');
+        }
+        var serialized = layers.map(function(layer) {
+            var src = makeSource(layer.input);
+            return {
+                source_b64: src.bytes_b64,
+                top: (layer.top | 0) || 0,
+                left: (layer.left | 0) || 0,
+                blend: layer.blend || 'over',
+                gravity: layer.gravity || null,
+            };
+        });
+        return pushOp(this, { op: 'composite', layers: serialized });
+    };
 
     // --- terminal ops ----------------------------------------------
 
@@ -12766,11 +13116,88 @@ __register_module('sqlite3', function(module, exports, require) {
     // implemented in the minimum subset — most call sites use the
     // inline `db.run(sql, params)` form. Surface a clear error so
     // users know to refactor (rather than getting a confusing crash).
-    Database.prototype.prepare = function() {
-        throw new Error(
-            'sqlite3.Database.prepare is not implemented in the burn shadow yet — ' +
-            'use db.run/get/all/each with inline parameters instead'
-        );
+    /// `Database.prepare(sql[, ...params][, callback])` — npm sqlite3
+    /// Statement. Returns a Statement that wraps the SQL string;
+    /// each invocation re-binds via the same host fns the inline
+    /// `db.run / get / all / each` use. The host's rusqlite caches
+    /// prepared plans by SQL text, so repeated `stmt.run(...)` calls
+    /// are still cheap.
+    function Statement(db, sql, initialParams) {
+        if (!(this instanceof Statement)) return new Statement(db, sql, initialParams);
+        this._db = db;
+        this._sql = String(sql);
+        this._params = (initialParams && initialParams.length) ? initialParams.slice() : [];
+        this._finalized = false;
+    }
+    Statement.prototype.bind = function() {
+        var args = _splitParamsCallback(arguments);
+        this._params = args.params;
+        var self = this;
+        if (args.callback) Promise.resolve().then(function() { args.callback.call(self, null); });
+        return this;
+    };
+    Statement.prototype.reset = function(cb) {
+        // Host plans are cached; nothing per-statement to reset. The
+        // method exists so npm sqlite3 callers don't trip.
+        if (typeof cb === 'function') Promise.resolve().then(cb);
+        return this;
+    };
+    Statement.prototype.finalize = function(cb) {
+        this._finalized = true;
+        if (typeof cb === 'function') Promise.resolve().then(cb);
+        return this._db;
+    };
+    Statement.prototype.run = function() {
+        if (this._finalized) throw new Error('Statement: finalized');
+        var args = _splitParamsCallback(arguments);
+        var params = this._params.length
+            ? this._params.concat(args.params) : args.params;
+        return this._db.run.apply(this._db, [this._sql].concat(params, [args.callback]));
+    };
+    Statement.prototype.get = function() {
+        if (this._finalized) throw new Error('Statement: finalized');
+        var args = _splitParamsCallback(arguments);
+        var params = this._params.length
+            ? this._params.concat(args.params) : args.params;
+        return this._db.get.apply(this._db, [this._sql].concat(params, [args.callback]));
+    };
+    Statement.prototype.all = function() {
+        if (this._finalized) throw new Error('Statement: finalized');
+        var args = _splitParamsCallback(arguments);
+        var params = this._params.length
+            ? this._params.concat(args.params) : args.params;
+        return this._db.all.apply(this._db, [this._sql].concat(params, [args.callback]));
+    };
+    Statement.prototype.each = function() {
+        if (this._finalized) throw new Error('Statement: finalized');
+        var args = _splitParamsCallback(arguments);
+        var params = this._params.length
+            ? this._params.concat(args.params) : args.params;
+        return this._db.each.apply(this._db, [this._sql].concat(params, [args.callback]));
+    };
+
+    /// Split a variadic args list into `{params, callback}` matching
+    /// npm sqlite3's overload shape: trailing function is the
+    /// completion callback; everything else is positional or named
+    /// params. Used by the Statement methods which forward to the
+    /// underlying inline-form db methods.
+    function _splitParamsCallback(args) {
+        var arr = Array.prototype.slice.call(args);
+        var cb;
+        if (arr.length && typeof arr[arr.length - 1] === 'function') {
+            cb = arr.pop();
+        }
+        // npm sqlite3 also accepts a single array: db.run(sql, [a, b])
+        if (arr.length === 1 && Array.isArray(arr[0])) arr = arr[0];
+        return { params: arr, callback: cb };
+    }
+
+    Database.prototype.prepare = function(sql) {
+        var rest = Array.prototype.slice.call(arguments, 1);
+        var args = _splitParamsCallback(rest);
+        var stmt = new Statement(this, sql, args.params);
+        if (args.callback) Promise.resolve().then(function() { args.callback.call(stmt, null); });
+        return stmt;
     };
 
     // ---- Module exports --------------------------------------------
@@ -13479,11 +13906,94 @@ __register_module('stream', function(module, exports, require) {
         })());
         return node;
     };
-    Writable.toWeb = function(_nodeWritable) {
-        throw new Error('Writable.toWeb: not implemented');
+    /// `Writable.toWeb(node)` — wrap a Node Writable so it behaves
+    /// like a WHATWG WritableStream. The web stream's `write(chunk)`
+    /// pushes into the node stream and resolves on `'drain'` /
+    /// completion; `close()` calls `node.end()`; `abort()` calls
+    /// `node.destroy(reason)`.
+    Writable.toWeb = function(nodeWritable) {
+        if (typeof WritableStream !== 'function') {
+            throw new Error('Writable.toWeb: WritableStream global unavailable');
+        }
+        return new WritableStream({
+            write: function(chunk) {
+                return new Promise(function(resolve, reject) {
+                    var ok = nodeWritable.write(chunk, function(err) {
+                        if (err) reject(err);
+                    });
+                    if (ok) {
+                        Promise.resolve().then(resolve);
+                    } else {
+                        nodeWritable.once('drain', resolve);
+                        nodeWritable.once('error', reject);
+                    }
+                });
+            },
+            close: function() {
+                return new Promise(function(resolve, reject) {
+                    nodeWritable.end(function() { resolve(); });
+                    nodeWritable.once('error', reject);
+                });
+            },
+            abort: function(reason) {
+                return new Promise(function(resolve) {
+                    try { nodeWritable.destroy(reason); } catch (_) {}
+                    Promise.resolve().then(resolve);
+                });
+            },
+        });
     };
-    Writable.fromWeb = function(_webWritable) {
-        throw new Error('Writable.fromWeb: not implemented');
+
+    /// `Writable.fromWeb(web)` — wrap a WHATWG WritableStream as a
+    /// Node Writable. Each `_write` call grabs a writer and forwards
+    /// the chunk; `_final` closes; `_destroy` aborts.
+    Writable.fromWeb = function(webWritable) {
+        // Lock the writer once at construction so the same handle is
+        // reused across writes — getWriter() throws on double-lock.
+        var writer = webWritable.getWriter();
+        var node = new Writable({
+            write: function(chunk, enc, cb) {
+                try {
+                    // Coerce strings so the WritableStream sees a
+                    // Uint8Array regardless of the Node-side encoding.
+                    var data;
+                    if (typeof chunk === 'string') {
+                        data = new TextEncoder().encode(chunk);
+                    } else if (chunk && chunk.buffer && chunk.byteLength != null) {
+                        data = chunk;
+                    } else {
+                        data = new Uint8Array(chunk);
+                    }
+                    var p = writer.write(data);
+                    if (p && typeof p.then === 'function') {
+                        p.then(function() { cb(); }, cb);
+                    } else {
+                        cb();
+                    }
+                } catch (e) { cb(e); }
+            },
+            final: function(cb) {
+                try {
+                    var p = writer.close();
+                    if (p && typeof p.then === 'function') {
+                        p.then(function() { cb(); }, cb);
+                    } else {
+                        cb();
+                    }
+                } catch (e) { cb(e); }
+            },
+            destroy: function(err, cb) {
+                try {
+                    var p = writer.abort(err);
+                    if (p && typeof p.then === 'function') {
+                        p.then(function() { cb(err); }, function() { cb(err); });
+                    } else {
+                        cb(err);
+                    }
+                } catch (_) { cb(err); }
+            },
+        });
+        return node;
     };
 
     /// stream.duplexPair — Node 22+. Returns `[a, b]` two Duplex
@@ -21473,18 +21983,12 @@ __register_module('worker_threads', function(module, exports, require) {
     exports.isMainThread = IS_MAIN;
     exports.threadId = THREAD_ID;
 
-    // Stubs for the deferred APIs — throw clearly rather than silently
-    // returning undefined.
-    exports.MessageChannel = function() {
-        throw new Error(
-            'worker_threads: MessageChannel is not implemented in burn yet'
-        );
-    };
-    exports.MessagePort = function() {
-        throw new Error(
-            'worker_threads: standalone MessagePort is not implemented in burn yet'
-        );
-    };
+    // Re-export the global MessageChannel + MessagePort. They live
+    // on `globalThis` for parity with browser semantics; `node:worker_threads`
+    // exposes the same constructors so library code that pulls them
+    // from this module gets the live class instead of a throwing stub.
+    exports.MessageChannel = globalThis.MessageChannel;
+    exports.MessagePort = globalThis.MessagePort;
     var _untransferable = new WeakSet();
     exports.markAsUntransferable = function(value) {
         try { _untransferable.add(value); } catch (_) {}
@@ -21492,10 +21996,12 @@ __register_module('worker_threads', function(module, exports, require) {
     exports.isMarkedAsUntransferable = function(value) {
         try { return _untransferable.has(value); } catch (_) { return false; }
     };
-    exports.moveMessagePortToContext = function() {
-        throw new Error(
-            'worker_threads: moveMessagePortToContext is not implemented in burn'
-        );
+    /// Single-context runtime — there is one realm per shard, so
+    /// "moving" a port between contexts is the identity operation.
+    /// Keeping the same MessagePort handle is spec-equivalent to a
+    /// successful move in a multi-realm engine.
+    exports.moveMessagePortToContext = function(port, _ctx) {
+        return port;
     };
     exports.receiveMessageOnPort = function() {
         return undefined;

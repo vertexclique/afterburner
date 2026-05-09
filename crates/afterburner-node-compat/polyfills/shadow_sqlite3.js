@@ -385,11 +385,88 @@ __register_module('sqlite3', function(module, exports, require) {
     // implemented in the minimum subset — most call sites use the
     // inline `db.run(sql, params)` form. Surface a clear error so
     // users know to refactor (rather than getting a confusing crash).
-    Database.prototype.prepare = function() {
-        throw new Error(
-            'sqlite3.Database.prepare is not implemented in the burn shadow yet — ' +
-            'use db.run/get/all/each with inline parameters instead'
-        );
+    /// `Database.prepare(sql[, ...params][, callback])` — npm sqlite3
+    /// Statement. Returns a Statement that wraps the SQL string;
+    /// each invocation re-binds via the same host fns the inline
+    /// `db.run / get / all / each` use. The host's rusqlite caches
+    /// prepared plans by SQL text, so repeated `stmt.run(...)` calls
+    /// are still cheap.
+    function Statement(db, sql, initialParams) {
+        if (!(this instanceof Statement)) return new Statement(db, sql, initialParams);
+        this._db = db;
+        this._sql = String(sql);
+        this._params = (initialParams && initialParams.length) ? initialParams.slice() : [];
+        this._finalized = false;
+    }
+    Statement.prototype.bind = function() {
+        var args = _splitParamsCallback(arguments);
+        this._params = args.params;
+        var self = this;
+        if (args.callback) Promise.resolve().then(function() { args.callback.call(self, null); });
+        return this;
+    };
+    Statement.prototype.reset = function(cb) {
+        // Host plans are cached; nothing per-statement to reset. The
+        // method exists so npm sqlite3 callers don't trip.
+        if (typeof cb === 'function') Promise.resolve().then(cb);
+        return this;
+    };
+    Statement.prototype.finalize = function(cb) {
+        this._finalized = true;
+        if (typeof cb === 'function') Promise.resolve().then(cb);
+        return this._db;
+    };
+    Statement.prototype.run = function() {
+        if (this._finalized) throw new Error('Statement: finalized');
+        var args = _splitParamsCallback(arguments);
+        var params = this._params.length
+            ? this._params.concat(args.params) : args.params;
+        return this._db.run.apply(this._db, [this._sql].concat(params, [args.callback]));
+    };
+    Statement.prototype.get = function() {
+        if (this._finalized) throw new Error('Statement: finalized');
+        var args = _splitParamsCallback(arguments);
+        var params = this._params.length
+            ? this._params.concat(args.params) : args.params;
+        return this._db.get.apply(this._db, [this._sql].concat(params, [args.callback]));
+    };
+    Statement.prototype.all = function() {
+        if (this._finalized) throw new Error('Statement: finalized');
+        var args = _splitParamsCallback(arguments);
+        var params = this._params.length
+            ? this._params.concat(args.params) : args.params;
+        return this._db.all.apply(this._db, [this._sql].concat(params, [args.callback]));
+    };
+    Statement.prototype.each = function() {
+        if (this._finalized) throw new Error('Statement: finalized');
+        var args = _splitParamsCallback(arguments);
+        var params = this._params.length
+            ? this._params.concat(args.params) : args.params;
+        return this._db.each.apply(this._db, [this._sql].concat(params, [args.callback]));
+    };
+
+    /// Split a variadic args list into `{params, callback}` matching
+    /// npm sqlite3's overload shape: trailing function is the
+    /// completion callback; everything else is positional or named
+    /// params. Used by the Statement methods which forward to the
+    /// underlying inline-form db methods.
+    function _splitParamsCallback(args) {
+        var arr = Array.prototype.slice.call(args);
+        var cb;
+        if (arr.length && typeof arr[arr.length - 1] === 'function') {
+            cb = arr.pop();
+        }
+        // npm sqlite3 also accepts a single array: db.run(sql, [a, b])
+        if (arr.length === 1 && Array.isArray(arr[0])) arr = arr[0];
+        return { params: arr, callback: cb };
+    }
+
+    Database.prototype.prepare = function(sql) {
+        var rest = Array.prototype.slice.call(arguments, 1);
+        var args = _splitParamsCallback(rest);
+        var stmt = new Statement(this, sql, args.params);
+        if (args.callback) Promise.resolve().then(function() { args.callback.call(stmt, null); });
+        return stmt;
     };
 
     // ---- Module exports --------------------------------------------
