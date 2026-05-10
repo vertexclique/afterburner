@@ -109,6 +109,13 @@ pub struct HostState {
     /// fire-and-forget scripts still work.
     #[cfg(feature = "daemon")]
     pub daemon_http_outbound: Option<Arc<crate::daemon_http_outbound::DaemonHttpOutbound>>,
+    /// Optional inspector / Chrome DevTools Protocol coordinator.
+    /// Set when the JS side calls `inspector.open(port)` (axum-backed
+    /// HTTP+WebSocket listener); `None` everywhere else so the
+    /// in-process `Session.post` path stays usable without paying for
+    /// a listener.
+    #[cfg(feature = "daemon")]
+    pub daemon_inspector: Option<Arc<crate::daemon_inspector::DaemonInspector>>,
     /// Per-thrust SQLite shadow registry. Each opened
     /// `new sqlite3.Database(...)` runs in its own worker thread
     /// owned by this store; the field is just the lookup table that
@@ -198,6 +205,8 @@ impl HostState {
             daemon_dgram: None,
             #[cfg(feature = "daemon")]
             daemon_http_outbound: None,
+            #[cfg(feature = "daemon")]
+            daemon_inspector: None,
             #[cfg(feature = "shadow-sqlite3")]
             sqlite3_shadow: Arc::new(
                 afterburner_node_compat::shadows::sqlite3::SqliteShadow::new(),

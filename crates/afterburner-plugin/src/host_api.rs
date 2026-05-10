@@ -706,6 +706,40 @@ unsafe extern "C" {
         data_ptr: *const u8,
         data_len: u32,
     ) -> i32;
+    /// Like [`host_worker_spawn`] but additionally inherits the JSON
+    /// `{key:val,...}` env map into the spawned child's environment.
+    /// Used by `cluster` to flag forked workers with
+    /// `BURN_CLUSTER_REUSEPORT=1` so their daemon listens with
+    /// `SO_REUSEPORT`.
+    pub fn host_worker_spawn_env(
+        path_ptr: *const u8,
+        path_len: u32,
+        data_ptr: *const u8,
+        data_len: u32,
+        env_ptr: *const u8,
+        env_len: u32,
+    ) -> i32;
+    /// OS pid of a previously-spawned worker. Returns 0 for unknown
+    /// ids or before the kill handle is populated. Surfaced by
+    /// `cluster` so `Worker.process.pid` reports a real OS pid.
+    pub fn host_worker_pid(worker_id: i32) -> i32;
+
+    // ---- inspector / Chrome DevTools Protocol -----------------
+    //
+    // `host_inspector_open(port)` boots an axum HTTP+WebSocket
+    // listener; the bound port (>=1) is returned, or a negative
+    // error code on failure. `host_inspector_send` fans a CDP
+    // notification / response to a specific session (or every
+    // session when `session_id == 0`). The reverse direction (WS
+    // frames coming in) flows through the daemon-event dispatcher
+    // as `kind: "inspector-cmd"` envelopes.
+    pub fn host_inspector_open(port: i32) -> i32;
+    pub fn host_inspector_close() -> i32;
+    pub fn host_inspector_send(
+        session_id: i32,
+        payload_ptr: *const u8,
+        payload_len: u32,
+    ) -> i32;
     pub fn host_worker_post_message(
         worker_id: i32,
         payload_ptr: *const u8,

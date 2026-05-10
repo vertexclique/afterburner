@@ -358,6 +358,24 @@ impl DaemonWorkers {
         worker_data_json: &str,
         last_error: &mut String,
     ) -> i32 {
+        self.spawn_worker_with_env(script_path, worker_data_json, "", last_error)
+    }
+
+    /// Same as [`Self::spawn_worker`] but additionally injects the
+    /// JSON-encoded `{key:val,...}` env map into the spawned child's
+    /// environment. Reserved env vars used by burn itself
+    /// (`BURN_WORKER_DEPTH`, `BURN_QUIET`) are filtered out — caller-
+    /// supplied values for those would break the depth-cap and
+    /// quiet-mode guarantees. Used by the `cluster` polyfill to set
+    /// `BURN_CLUSTER_REUSEPORT=1` on every forked worker so its
+    /// daemon listeners bind via `SO_REUSEPORT`.
+    pub fn spawn_worker_with_env(
+        &self,
+        script_path: &str,
+        worker_data_json: &str,
+        env_json: &str,
+        last_error: &mut String,
+    ) -> i32 {
         let parent = match &self.role {
             Role::Parent(p) => p,
             Role::Child(_) => {
@@ -405,6 +423,9 @@ impl DaemonWorkers {
         cmd.arg(canonical.as_os_str());
         cmd.env(WORKER_DEPTH_ENV, (depth + 1).to_string());
         cmd.env("BURN_QUIET", "1");
+        if !env_json.is_empty() {
+            apply_env_overrides(&mut cmd, env_json);
+        }
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::inherit());
@@ -897,4 +918,48 @@ fn current_worker_depth() -> u32 {
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(0)
+}
+
+/// Merge the JSON env map into `cmd`. Reserved keys are skipped:
+/// `BURN_WORKER_DEPTH` (depth-cap defense) and `BURN_QUIET`
+/// (silent-mode contract) — letting JS override these would break
+/// the security envelope.
+fn apply_env_overrides(cmd: &mut Command, env_json: &str) {
+    const RESERVED: &[&str] = &[WORKER_DEPTH_ENV, "BURN_QUIET"];
+    let v: serde_json::Value = match serde_json::from_str(env_json) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let map = match v.as_object() {
+        Some(m) => m,
+        None => return,
+    };
+    for (k, val) in map {
+        if RESERVED.iter().any(|r| r.eq_ignore_ascii_case(k)) {
+            continue;
+        }
+        let s = match val {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::Null => continue,
+            _ => continue,
+        };
+        cmd.env(k, s);
+    }
+}
+
+impl DaemonWorkers {
+    /// OS pid of a spawned worker, or `0` if the id is unknown
+    /// or the kill handle hasn't been populated yet.
+    pub fn worker_pid(&self, worker_id: WorkerId) -> i32 {
+        match &self.role {
+            Role::Parent(p) => p
+                .active
+                .get(&worker_id)
+                .map(|h| h.kill.pid.load(Ordering::Acquire))
+                .unwrap_or(0),
+            Role::Child(_) => 0,
+        }
+    }
 }

@@ -68,6 +68,105 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_shadow_sqlite3(linker)?;
     wrap_shadow_sharp(linker)?;
     wrap_wasm_loader(linker)?;
+    wrap_inspector(linker)?;
+    Ok(())
+}
+
+// ---- inspector / Chrome DevTools Protocol --------------------------
+//
+// Three host imports back the `inspector` polyfill's WebSocket bridge:
+//
+// * `host_inspector_open(port)` → bound port (≥1) | error
+// * `host_inspector_close()` → 0 | error
+// * `host_inspector_send(session_id, payload)` → 0 | error
+//
+// The plugin's daemon-event loop also pulls events via
+// [`crate::daemon_inspector::DaemonInspector::try_recv_event`] and
+// hands them to the JS-side `__ab_inspector_dispatch` hook.
+
+#[cfg(not(feature = "daemon"))]
+fn wrap_inspector(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    linker
+        .func_wrap(NS, "host_inspector_open", |_caller: Caller<'_, HostState>, _port: i32| -> i32 { -1 })
+        .map_err(link_err)?;
+    linker
+        .func_wrap(NS, "host_inspector_close", |_caller: Caller<'_, HostState>| -> i32 { -1 })
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_inspector_send",
+            |_caller: Caller<'_, HostState>, _sid: i32, _ptr: i32, _len: i32| -> i32 { -1 },
+        )
+        .map_err(link_err)?;
+    Ok(())
+}
+
+#[cfg(feature = "daemon")]
+fn wrap_inspector(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    linker
+        .func_wrap(
+            NS,
+            "host_inspector_open",
+            |mut caller: Caller<'_, HostState>, port: i32| -> i32 {
+                if !(0..=65535).contains(&port) {
+                    caller.data_mut().last_error =
+                        format!("inspector.open: invalid port {port}");
+                    return crate::daemon_inspector::ERR_BIND;
+                }
+                let inspector = match caller.data().daemon_inspector.clone() {
+                    Some(i) => i,
+                    None => {
+                        // No coordinator wired in this Store. Surface
+                        // a typed error so the JS side keeps the
+                        // in-process Session.post path working without
+                        // pretending the listener bound.
+                        caller.data_mut().last_error =
+                            "inspector requires daemon mode; run via `burn foo.js` CLI".into();
+                        return crate::daemon_inspector::ERR_NO_RUNTIME;
+                    }
+                };
+                inspector.open(port as u16)
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_inspector_close",
+            |caller: Caller<'_, HostState>| -> i32 {
+                if let Some(i) = caller.data().daemon_inspector.clone() {
+                    i.close()
+                } else {
+                    crate::daemon_inspector::ERR_NOT_OPEN
+                }
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_inspector_send",
+            |mut caller: Caller<'_, HostState>,
+             session_id: i32,
+             payload_ptr: i32,
+             payload_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return -1;
+                };
+                let Some(payload) = read_str(&memory, &caller, payload_ptr, payload_len) else {
+                    return -1;
+                };
+                if let Some(i) = caller.data().daemon_inspector.clone() {
+                    i.send(session_id, payload);
+                    0
+                } else {
+                    -1
+                }
+            },
+        )
+        .map_err(link_err)?;
     Ok(())
 }
 
@@ -3456,6 +3555,61 @@ fn wrap_workers(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
                     caller.data_mut().last_error = last_error;
                 }
                 result
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_worker_spawn_env",
+            |mut caller: Caller<'_, HostState>,
+             path_ptr: i32,
+             path_len: i32,
+             data_ptr: i32,
+             data_len: i32,
+             env_ptr: i32,
+             env_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return werr::E_OTHER;
+                };
+                let Some(path) = read_str(&memory, &caller, path_ptr, path_len) else {
+                    record(&mut caller, "worker_spawn_env: invalid path");
+                    return werr::E_OTHER;
+                };
+                let Some(data) = read_str(&memory, &caller, data_ptr, data_len) else {
+                    record(&mut caller, "worker_spawn_env: invalid worker_data");
+                    return werr::E_OTHER;
+                };
+                let env = read_str(&memory, &caller, env_ptr, env_len).unwrap_or_default();
+                let Some(workers) = caller.data().daemon_workers.clone() else {
+                    record(
+                        &mut caller,
+                        "worker_threads requires daemon mode; run via `burn foo.js`",
+                    );
+                    return werr::E_NO_DAEMON;
+                };
+                let mut last_error = String::new();
+                let result =
+                    workers.spawn_worker_with_env(&path, &data, &env, &mut last_error);
+                if !last_error.is_empty() {
+                    caller.data_mut().last_error = last_error;
+                }
+                result
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_worker_pid",
+            |caller: Caller<'_, HostState>, worker_id: i32| -> i32 {
+                let Some(workers) = caller.data().daemon_workers.clone() else {
+                    return 0;
+                };
+                workers.worker_pid(worker_id)
             },
         )
         .map_err(link_err)?;

@@ -2527,13 +2527,88 @@
             },
             isLockFree: function(_size) { return true; },
             wait: function(_view, _idx, _value, _timeout) {
-                throw new TypeError('Atomics.wait: only supported on shared memory (burn is single-threaded)');
+                // Sync wait would block the event loop, which without
+                // engine-level support is a deadlock in our single-
+                // threaded realm. Atomics.waitAsync is the supported
+                // primitive — see below.
+                throw new TypeError(
+                    'Atomics.wait: not supported in burn — use Atomics.waitAsync'
+                );
             },
-            notify: function(_view, _idx, _count) { return 0; },
-            waitAsync: function(_view, _idx, _value, _timeout) {
-                return { async: true, value: Promise.resolve('not-equal') };
+            notify: function(view, idx, count) {
+                if (count === undefined || count === null) count = Infinity;
+                var key = _atomicsKey(view, idx);
+                var queue = _atomicsWaiters[key];
+                if (!queue || queue.length === 0) return 0;
+                var n = 0;
+                while (n < count && queue.length > 0) {
+                    var w = queue.shift();
+                    if (w._timer) {
+                        try { clearTimeout(w._timer); } catch (_) {}
+                    }
+                    if (!w._settled) {
+                        w._settled = true;
+                        w._resolve('ok');
+                    }
+                    n++;
+                }
+                if (queue.length === 0) delete _atomicsWaiters[key];
+                return n;
+            },
+            waitAsync: function(view, idx, value, timeout) {
+                // Spec: if the slot already differs from `value`, return
+                // synchronously with `not-equal`. Only enqueue the
+                // waiter when the slot still matches.
+                var actual = _ta(view)[idx];
+                if (actual !== value) {
+                    return { async: false, value: 'not-equal' };
+                }
+                var key = _atomicsKey(view, idx);
+                var waiter = { _settled: false, _resolve: null, _timer: null };
+                var p = new Promise(function(resolve) { waiter._resolve = resolve; });
+                if (!_atomicsWaiters[key]) _atomicsWaiters[key] = [];
+                _atomicsWaiters[key].push(waiter);
+                if (typeof timeout === 'number' && timeout >= 0 && isFinite(timeout)) {
+                    waiter._timer = setTimeout(function() {
+                        if (waiter._settled) return;
+                        var queue = _atomicsWaiters[key];
+                        if (queue) {
+                            var i = queue.indexOf(waiter);
+                            if (i >= 0) queue.splice(i, 1);
+                            if (queue.length === 0) delete _atomicsWaiters[key];
+                        }
+                        waiter._settled = true;
+                        waiter._resolve('timed-out');
+                    }, timeout);
+                }
+                return { async: true, value: p };
             },
         };
+
+        // Per-(buffer, byte-offset) waiter queue. Keyed by the
+        // underlying ArrayBuffer's identity (via WeakMap-assigned id)
+        // joined with the byte offset of the view slot. Multiple
+        // typed-array views over the same buffer with the same idx
+        // map to the same key so a `notify(view2, idx)` wakes a
+        // `waitAsync(view1, idx)` provided their offsets coincide
+        // — that's exactly Atomics' wire contract.
+        var _atomicsWaiters = Object.create(null);
+        var _atomicsBufId = new WeakMap();
+        var _atomicsNextBufId = 1;
+        function _atomicsKey(view, idx) {
+            var buf = view.buffer;
+            var bufId = _atomicsBufId.get(buf);
+            if (bufId === undefined) {
+                bufId = _atomicsNextBufId++;
+                _atomicsBufId.set(buf, bufId);
+            }
+            // Byte-offset normalises across views of different
+            // element widths (Int32Array, BigInt64Array) so callers
+            // synchronising via different views over the same buffer
+            // see each other's waiters.
+            var byteIdx = (view.byteOffset | 0) + (idx | 0) * view.BYTES_PER_ELEMENT;
+            return bufId + ':' + byteIdx;
+        }
     }
 
     // ---- Uint8Array base64 / hex (Stage 3 / Node 22+) -------------

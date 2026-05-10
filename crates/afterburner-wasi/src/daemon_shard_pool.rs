@@ -581,6 +581,13 @@ fn shard_main_inner(args: ShardThreadArgs) {
     let http_outbound = crate::daemon_http_outbound::DaemonHttpOutbound::new(tokio_handle.clone());
     daemon.install_http_outbound(Arc::clone(&http_outbound));
 
+    // Inspector / Chrome DevTools Protocol coordinator. Cheap to
+    // construct (no listener until `inspector.open(port)`); installed
+    // unconditionally so the JS side's `__host_inspector_open` host
+    // import lights up the moment user code enables the inspector.
+    let inspector = crate::daemon_inspector::DaemonInspector::new(tokio_handle.clone());
+    daemon.install_inspector(Arc::clone(&inspector));
+
     // Step 3: run init from precompiled bytecode. The shared
     // `daemon_http` is in shared-listeners mode so this shard's
     // `app.listen(port)` either binds the real socket (first shard)
@@ -771,6 +778,27 @@ fn shard_event_loop(
                 shard_idx, daemon, envelope, "dgram", stdout_hw, stderr_hw,
             );
             let _ = flush_streams(daemon, stdout_hw, stderr_hw);
+        }
+
+        // ---- inspector / CDP events ----
+        for _ in 0..256 {
+            let Some(evt) = daemon.try_recv_inspector_event() else {
+                break;
+            };
+            did_work = true;
+            if let Some(envelope) =
+                crate::daemon_envelopes::inspector_event_to_envelope(&evt)
+            {
+                dispatch_with_panic_isolation(
+                    shard_idx,
+                    daemon,
+                    envelope,
+                    "inspector",
+                    stdout_hw,
+                    stderr_hw,
+                );
+                let _ = flush_streams(daemon, stdout_hw, stderr_hw);
+            }
         }
 
         if !did_work {

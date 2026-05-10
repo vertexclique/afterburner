@@ -7,9 +7,13 @@
 
 pub mod columnar;
 #[cfg(feature = "daemon")]
+pub mod daemon_cluster;
+#[cfg(feature = "daemon")]
 pub mod daemon_dgram;
 pub mod daemon_envelopes;
 pub mod daemon_http;
+#[cfg(feature = "daemon")]
+pub mod daemon_inspector;
 #[cfg(feature = "http3")]
 pub mod daemon_http3;
 #[cfg(feature = "daemon")]

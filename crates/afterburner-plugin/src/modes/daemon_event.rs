@@ -154,6 +154,17 @@ const DISPATCH_SOURCE: &str = r#"
         // The CLI's child event loop also sees this on the Rust side
         // and exits gracefully; the JS-side dispatch is best-effort
         // for user-facing 'close' listeners.
+    } else if (kind === 'inspector-cmd') {
+        // CDP frame from a connected WebSocket session.
+        // Format: { kind, session_id, id, method, params }
+        const dispatch = globalThis.__ab_inspector_dispatch;
+        if (typeof dispatch === 'function') {
+            try {
+                dispatch(ev.session_id | 0, ev.id | 0, ev.method || '', ev.params || {});
+            } catch (e) {
+                try { console.error('inspector dispatch:', (e && e.stack) || e); } catch (_) {}
+            }
+        }
     } else if (kind === 'net-connect') {
         // outbound TCP connect succeeded.
         const table = globalThis.__ab_net_handlers || {};

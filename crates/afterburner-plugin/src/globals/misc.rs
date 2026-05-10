@@ -446,6 +446,51 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
         }),
     );
     let _ = globals.set(
+        "__host_worker_spawn_env",
+        Func::from(|path: String, worker_data: String, env_json: String| -> f64 {
+            let pb = path.as_bytes();
+            let db = worker_data.as_bytes();
+            let eb = env_json.as_bytes();
+            unsafe {
+                host_worker_spawn_env(
+                    pb.as_ptr(),
+                    pb.len() as u32,
+                    db.as_ptr(),
+                    db.len() as u32,
+                    eb.as_ptr(),
+                    eb.len() as u32,
+                ) as f64
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_worker_pid",
+        Func::from(|worker_id: f64| -> f64 {
+            unsafe { host_worker_pid(worker_id as i32) as f64 }
+        }),
+    );
+
+    // ---- inspector / Chrome DevTools Protocol ---------------
+    let _ = globals.set(
+        "__host_inspector_open",
+        Func::from(|port: f64| -> f64 {
+            unsafe { host_inspector_open(port as i32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_inspector_close",
+        Func::from(|| -> f64 { unsafe { host_inspector_close() as f64 } }),
+    );
+    let _ = globals.set(
+        "__host_inspector_send",
+        Func::from(|session_id: f64, payload: String| -> f64 {
+            let pb = payload.as_bytes();
+            unsafe {
+                host_inspector_send(session_id as i32, pb.as_ptr(), pb.len() as u32) as f64
+            }
+        }),
+    );
+    let _ = globals.set(
         "__host_worker_post_message",
         Func::from(|worker_id: f64, payload: String| -> f64 {
             let pb = payload.as_bytes();

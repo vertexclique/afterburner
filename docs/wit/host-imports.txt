@@ -80,6 +80,9 @@ host_http_listen
 host_http_reply
 host_http_request
 host_http_request_async
+host_inspector_close
+host_inspector_open
+host_inspector_send
 host_last_error
 host_net_close_server
 host_net_connect
@@ -148,7 +151,9 @@ host_worker_post_error_to_parent
 host_worker_post_message
 host_worker_post_online_to_parent
 host_worker_post_to_parent
+host_worker_pid
 host_worker_spawn
+host_worker_spawn_env
 host_worker_terminate
 host_worker_thread_id
 host_zlib_deflate_sync

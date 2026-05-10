@@ -98,12 +98,13 @@ anyhow = "1"
 # pulled by `afterburner-wasi/daemon` (off by default) and the `burn`
 # CLI — library consumers who don't run `http.createServer().listen()`
 # don't pay the compile-time or binary-size cost.
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "macros", "signal", "sync"] }
 hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
 http-body-util = "0.1"
 bytes = "1"
+futures-util = "0.3"
 
 # B7 tls — `tls.connect` / `tls.createServer`, gated the same way as
 # the daemon HTTP plumbing above. `webpki-roots` ships the Mozilla

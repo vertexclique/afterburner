@@ -391,6 +391,22 @@ impl DaemonRuntime {
         self.store.data().daemon_dgram.as_ref()?.try_recv_event()
     }
 
+    /// Install the inspector / Chrome DevTools Protocol coordinator
+    /// on this daemon's Store. The CLI's daemon path wires this; the
+    /// JS side then unblocks `inspector.open(port)` calls that need
+    /// the host listener.
+    #[cfg(feature = "daemon")]
+    pub fn install_inspector(&mut self, coord: Arc<crate::daemon_inspector::DaemonInspector>) {
+        self.store.data_mut().daemon_inspector = Some(coord);
+    }
+
+    #[cfg(feature = "daemon")]
+    pub fn try_recv_inspector_event(
+        &self,
+    ) -> Option<crate::daemon_inspector::InspectorEvent> {
+        self.store.data().daemon_inspector.as_ref()?.try_recv_event()
+    }
+
     /// Install the outbound HTTP coordinator on this daemon's Store.
     /// Same lifecycle as the other `install_*` methods — parent +
     /// worker call this before `run_init` so user code that calls

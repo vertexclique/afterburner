@@ -210,6 +210,44 @@ __register_module('vm', function(module, exports, require) {
         get: function() { return this._dependencySpecifiers.slice(); },
     });
 
+    /// Build a live-binding namespace proxy whose property reads
+    /// forward to `dep._namespace` at access time. With cyclic graphs
+    /// the dep's namespace fills in as evaluation walks the SCC, so
+    /// late-bound reads (inside function bodies that fire after the
+    /// cycle finishes evaluating) see the post-evaluate values.
+    /// Plain (non-Module) deps fall back to snapshot semantics —
+    /// nothing to track over time.
+    function _liveNamespace(dep) {
+        if (!(dep instanceof ABSTRACT_MODULE_BASE)) {
+            return dep;
+        }
+        return new Proxy(Object.create(null), {
+            get: function(_target, key) {
+                var ns = dep._namespace;
+                if (ns == null) return undefined;
+                return ns[key];
+            },
+            has: function(_target, key) {
+                var ns = dep._namespace;
+                return !!ns && (key in ns);
+            },
+            ownKeys: function() {
+                var ns = dep._namespace;
+                return ns ? Object.keys(ns) : [];
+            },
+            getOwnPropertyDescriptor: function(_t, key) {
+                var ns = dep._namespace;
+                if (!ns || !(key in ns)) return undefined;
+                return {
+                    enumerable: true,
+                    configurable: true,
+                    writable: false,
+                    value: ns[key],
+                };
+            },
+        });
+    }
+
     SourceTextModule.prototype.link = function(linker) {
         var self = this;
         if (typeof linker !== 'function') {
@@ -219,12 +257,34 @@ __register_module('vm', function(module, exports, require) {
             return Promise.reject(new Error(
                 'Module status is ' + self._status + ', expected unlinked'));
         }
+        return self._linkInternal(linker, /*visited=*/ Object.create(null));
+    };
+
+    /// Worker that walks the dependency graph with cycle detection.
+    /// `visited` is a per-link-call identity map — keyed by module
+    /// identifier — that records every module we've already entered.
+    /// When the linker resolves a spec to a module already in
+    /// `visited`, we skip the recursive `link()` call (the back-edge
+    /// is satisfied) and stash a live-binding namespace proxy so
+    /// post-evaluate reads still see the populated exports.
+    SourceTextModule.prototype._linkInternal = function(linker, visited) {
+        var self = this;
+        if (visited[self.identifier]) {
+            // Already entered through another path — the caller's
+            // ancestor will finish linking us.
+            return Promise.resolve();
+        }
+        visited[self.identifier] = true;
         self._status = 'linking';
+        // Pre-allocate the namespace placeholder so live-binding
+        // proxies built for back-edges have a stable target. The
+        // exports populate during evaluate().
+        if (self._namespace == null) self._namespace = Object.create(null);
+
         var specs = self._dependencySpecifiers.slice();
         var i = 0;
         function next() {
             if (i >= specs.length) {
-                self._namespace = Object.create(null);
                 self._status = 'linked';
                 return undefined;
             }
@@ -235,17 +295,13 @@ __register_module('vm', function(module, exports, require) {
                         throw new Error('linker returned null for ' + spec);
                     }
                     self._deps[spec] = dep;
-                    // If the resolved dep is itself a Module, link it
-                    // recursively when not already linked.
-                    if (dep instanceof ABSTRACT_MODULE_BASE && dep._status === 'unlinked') {
-                        return Promise.resolve(dep.link(linker)).then(function() {
-                            self._depNamespaces[spec] = dep.namespace || dep;
-                            return next();
-                        });
+                    self._depNamespaces[spec] = _liveNamespace(dep);
+                    if (dep instanceof ABSTRACT_MODULE_BASE
+                        && dep._status === 'unlinked'
+                        && !visited[dep.identifier]) {
+                        return Promise.resolve(dep._linkInternal(linker, visited))
+                            .then(next);
                     }
-                    self._depNamespaces[spec] = (dep instanceof ABSTRACT_MODULE_BASE)
-                        ? dep.namespace
-                        : dep;
                     return next();
                 });
         }
@@ -253,17 +309,37 @@ __register_module('vm', function(module, exports, require) {
     };
 
     SourceTextModule.prototype.evaluate = function(_options) {
+        return this._evaluateInternal(/*visited=*/ Object.create(null));
+    };
+
+    /// Cycle-aware evaluator. `visited` is shared across recursive
+    /// `evaluate` walks so a back-edge (B depends on A while A is
+    /// `'evaluating'`) doesn't re-enter A's body. Cyclic deps see
+    /// each other through the live-binding proxy installed at link
+    /// time: their namespace property reads forward to whichever
+    /// module finishes its body first.
+    SourceTextModule.prototype._evaluateInternal = function(visited) {
         var self = this;
         if (self._status === 'evaluated') return Promise.resolve(undefined);
+        if (self._status === 'evaluating') {
+            // Back-edge in a cycle. The ancestor's evaluate() will
+            // complete our population once its own body returns.
+            return Promise.resolve(undefined);
+        }
         if (self._status !== 'linked') {
             return Promise.reject(new Error(
                 'Module status is ' + self._status + ', expected linked'));
         }
+        if (visited[self.identifier]) {
+            // Already in the recursion frame — same condition as the
+            // 'evaluating' check above but re-stated for graphs that
+            // mix link/evaluate calls non-monotonically.
+            return Promise.resolve(undefined);
+        }
+        visited[self.identifier] = true;
         self._status = 'evaluating';
         return new Promise(function(resolve, reject) {
             try {
-                // First, eagerly evaluate dependent SourceTextModules so
-                // their namespaces are populated before our body runs.
                 var depKeys = Object.keys(self._deps);
                 var i = 0;
                 function evalNext() {
@@ -271,20 +347,13 @@ __register_module('vm', function(module, exports, require) {
                     var dep = self._deps[depKeys[i++]];
                     if (dep instanceof ABSTRACT_MODULE_BASE
                         && dep._status === 'linked') {
-                        return dep.evaluate().then(function() {
-                            // Refresh the namespace after evaluate.
-                            self._depNamespaces[depKeys[i - 1]] = dep.namespace;
-                            return evalNext();
-                        });
-                    }
-                    if (dep instanceof ABSTRACT_MODULE_BASE) {
-                        self._depNamespaces[depKeys[i - 1]] = dep.namespace;
+                        return dep._evaluateInternal(visited).then(evalNext);
                     }
                     return evalNext();
                 }
                 function runBody() {
                     var body = _rewriteRequiresToDepMap(self._cjsBody);
-                    var moduleObj = { exports: Object.create(null) };
+                    var moduleObj = { exports: self._namespace || Object.create(null) };
                     var fn = new Function(
                         '__ab_stm_dep', 'module', 'exports', '__filename', '__dirname',
                         body
@@ -293,7 +362,13 @@ __register_module('vm', function(module, exports, require) {
                        '/__vm_module__/' + self.identifier + '.mjs',
                        '/__vm_module__');
                     var actualExports = moduleObj.exports;
-                    var ns = Object.create(null);
+                    // Reuse the namespace placeholder allocated at
+                    // link time so any live-binding Proxy already
+                    // pointing at it continues to resolve. The
+                    // namespace isn't frozen — cyclic deps may finish
+                    // populating their own exports after this body
+                    // returns.
+                    var ns = self._namespace;
                     if (actualExports && typeof actualExports === 'object') {
                         var keys = Object.keys(actualExports);
                         for (var j = 0; j < keys.length; j++) {
@@ -305,8 +380,6 @@ __register_module('vm', function(module, exports, require) {
                     } else if (actualExports !== undefined) {
                         ns['default'] = actualExports;
                     }
-                    Object.freeze(ns);
-                    self._namespace = ns;
                     self._status = 'evaluated';
                     resolve(undefined);
                 }

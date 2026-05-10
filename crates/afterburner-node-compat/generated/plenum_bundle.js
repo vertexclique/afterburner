@@ -912,22 +912,156 @@ __register_module('assert', function(module, exports, require) {
 // ---- async_hooks.js ----
 // async_hooks — Node 20's async-tracking + AsyncLocalStorage API.
 //
-// Burn's sandbox has no async stack to trace, but `AsyncLocalStorage`
-// is the API the vast majority of users actually reach for (request
-// context propagation, fastify / pino / pg style). We back it with
-// a synchronous storage stack — `getStore()` returns the value at
-// the top of that stack, `run(value, callback)` pushes/pops around
-// the callback. Without an event loop, "running async" collapses to
-// "running synchronously," which preserves the contract.
+// Real hook firing: `createHook({init, before, after, destroy,
+// promiseResolve}).enable()` causes every subsequent async resource
+// (timer, microtask, AsyncResource subclass, then/finally/catch
+// handler) to fire the registered callbacks at the matching point
+// in its lifecycle.
+//
+// Wire-up:
+//
+// * **AsyncResource** — `new AsyncResource(type)` fires `init`;
+//   `runInAsyncScope(fn, this, ...args)` pushes the asyncId,
+//   fires `before`, runs `fn`, fires `after`, pops.
+//   `emitDestroy()` fires `destroy`.
+// * **Promise.prototype.then/catch/finally** — wrapped at module
+//   load to register a synthetic `PROMISE` resource for each
+//   handler. The handler runs inside `runInAsyncScope`. `then`
+//   also fires `promiseResolve` when the producing promise
+//   settles.
+// * **AsyncLocalStorage** — store stack snapshots at the point
+//   where a handler is queued, restored at run time. With Promise
+//   hooks live, this propagates through `await` boundaries
+//   without a per-call user wrapper.
+//
+// `executionAsyncId()` / `triggerAsyncId()` reflect the live
+// asyncId stack so logging libraries can correlate work units.
 
 __register_module('async_hooks', function(module, exports, require) {
 
-    // ---- AsyncLocalStorage ----------------------------------------
+    // ---- async-id stack + hook registry --------------------------
+
+    var _asyncIdCounter = 1;
+    function nextAsyncId() { return ++_asyncIdCounter; }
+
+    // Stack frames are [{asyncId, triggerAsyncId}, ...]. Top is the
+    // currently-executing scope. Bottom is the synthetic root.
+    var _stack = [{ asyncId: 1, triggerAsyncId: 0 }];
+
+    function _peek() { return _stack[_stack.length - 1]; }
+    function _push(asyncId, triggerAsyncId) {
+        _stack.push({ asyncId: asyncId, triggerAsyncId: triggerAsyncId });
+    }
+    function _pop() {
+        if (_stack.length > 1) _stack.pop();
+    }
+
+    // Active hooks. Each entry: { init, before, after, destroy, promiseResolve, enabled }.
+    var _hooks = [];
+    var _hooksDirty = false;
+    // We re-read enabled hooks lazily so adding/removing during a
+    // fire iteration doesn't reorder the active set mid-iteration.
+    var _activeCache = [];
+    function _activeHooks() {
+        if (_hooksDirty) {
+            _activeCache = _hooks.filter(function(h) { return h.enabled; });
+            _hooksDirty = false;
+        }
+        return _activeCache;
+    }
+
+    function _fire(name, asyncId, type, triggerAsyncId, resource) {
+        var arr = _activeHooks();
+        for (var i = 0; i < arr.length; i++) {
+            var fn = arr[i][name];
+            if (typeof fn !== 'function') continue;
+            try {
+                if (name === 'init') fn(asyncId, type, triggerAsyncId, resource);
+                else if (name === 'promiseResolve') fn(asyncId);
+                else fn(asyncId);
+            } catch (e) {
+                // Match Node: hook errors are reported on stderr but
+                // do not abort the program. Avoiding throw here also
+                // protects users that emit destroy from a destructor
+                // (where throwing would leak resources).
+                try { console.error('async_hooks ' + name + ' callback error:', (e && e.stack) || e); }
+                catch (_) {}
+            }
+        }
+    }
+
+    // ---- AsyncResource -------------------------------------------
+
+    function AsyncResource(type, options) {
+        if (!(this instanceof AsyncResource)) return new AsyncResource(type, options);
+        var trigger;
+        if (typeof options === 'number') {
+            trigger = options | 0;
+        } else if (options && typeof options.triggerAsyncId === 'number') {
+            trigger = options.triggerAsyncId | 0;
+        } else {
+            trigger = _peek().asyncId;
+        }
+        this._type = type || 'AsyncResource';
+        this._triggerAsyncId = trigger;
+        this._asyncId = nextAsyncId();
+        this._destroyed = false;
+        _fire('init', this._asyncId, this._type, this._triggerAsyncId, this);
+    }
+    AsyncResource.prototype.runInAsyncScope = function(fn, thisArg /*, ...args */) {
+        var args = Array.prototype.slice.call(arguments, 2);
+        _push(this._asyncId, this._triggerAsyncId);
+        _fire('before', this._asyncId);
+        try {
+            return fn.apply(thisArg, args);
+        } finally {
+            _fire('after', this._asyncId);
+            _pop();
+        }
+    };
+    AsyncResource.prototype.bind = function(fn, thisArg) {
+        var self = this;
+        var bound = function() {
+            var args = Array.prototype.slice.call(arguments);
+            return self.runInAsyncScope(fn, thisArg || this, args.length === 0 ? undefined : args);
+        };
+        // Accept the alternate Node-22 calling convention: bind() also
+        // returns a function whose direct call applies the args.
+        var direct = function() {
+            return self.runInAsyncScope.apply(self,
+                [fn, thisArg || this].concat(Array.prototype.slice.call(arguments)));
+        };
+        // Use `direct` so `(asyncRes.bind(fn))(a, b)` runs `fn(a, b)`
+        // under the resource's scope — this is the documented shape.
+        return direct;
+        // (The unused `bound` keeps closure shape for any future
+        // pickle/tooling that expects two refs; not exposed.)
+    };
+    AsyncResource.prototype.asyncId = function() { return this._asyncId; };
+    AsyncResource.prototype.triggerAsyncId = function() { return this._triggerAsyncId; };
+    AsyncResource.prototype.emitDestroy = function() {
+        if (!this._destroyed) {
+            this._destroyed = true;
+            _fire('destroy', this._asyncId);
+        }
+        return this;
+    };
+    AsyncResource.bind = function(fn, type, thisArg) {
+        var r = new AsyncResource(type || 'AsyncResource');
+        return r.bind(fn, thisArg);
+    };
+
+    // ---- AsyncLocalStorage --------------------------------------
+    //
+    // Store stack tracks the live "current store" per ALS instance.
+    // Promise / timer / AsyncResource handlers capture the per-ALS
+    // top-of-stack at queue time and restore on run, so the store
+    // visible inside an `await` matches the store visible at the
+    // statement that produced the awaited promise.
 
     function AsyncLocalStorage() {
-        // Stack of stores currently in scope. The top of the stack
-        // is what `getStore()` reports.
         this._stack = [];
+        this._enabled = true;
     }
     AsyncLocalStorage.prototype.run = function(store, callback) {
         if (typeof callback !== 'function') {
@@ -935,8 +1069,7 @@ __register_module('async_hooks', function(module, exports, require) {
         }
         this._stack.push(store);
         try {
-            var args = Array.prototype.slice.call(arguments, 2);
-            return callback.apply(null, args);
+            return callback.apply(null, Array.prototype.slice.call(arguments, 2));
         } finally {
             this._stack.pop();
         }
@@ -945,8 +1078,6 @@ __register_module('async_hooks', function(module, exports, require) {
         if (typeof callback !== 'function') {
             throw new TypeError('AsyncLocalStorage.exit: callback must be a function');
         }
-        // Spec: temporarily disable the store for the duration of
-        // the callback. We push `undefined` and restore.
         this._stack.push(undefined);
         try {
             return callback.apply(null, Array.prototype.slice.call(arguments, 1));
@@ -955,82 +1086,250 @@ __register_module('async_hooks', function(module, exports, require) {
         }
     };
     AsyncLocalStorage.prototype.getStore = function() {
-        return this._stack.length === 0
-            ? undefined
-            : this._stack[this._stack.length - 1];
+        if (!this._enabled) return undefined;
+        return this._stack.length === 0 ? undefined : this._stack[this._stack.length - 1];
     };
     AsyncLocalStorage.prototype.enterWith = function(store) {
-        // Spec: replace the current store. With no async stack
-        // tracking we just rewrite the top entry.
         if (this._stack.length === 0) this._stack.push(store);
         else this._stack[this._stack.length - 1] = store;
     };
     AsyncLocalStorage.prototype.disable = function() {
         this._stack = [];
+        this._enabled = false;
     };
+    // Snapshot the entire ALS-store world so async boundaries can
+    // restore each registered ALS to what it was at queue time.
+    function _snapshotALS() {
+        var snap = [];
+        for (var i = 0; i < _alsRegistry.length; i++) {
+            var als = _alsRegistry[i];
+            var top = als._stack.length === 0 ? undefined : als._stack[als._stack.length - 1];
+            snap.push({ als: als, value: top });
+        }
+        return snap;
+    }
+    function _enterSnapshot(snap) {
+        for (var i = 0; i < snap.length; i++) {
+            snap[i].als._stack.push(snap[i].value);
+        }
+    }
+    function _exitSnapshot(snap) {
+        for (var i = 0; i < snap.length; i++) {
+            snap[i].als._stack.pop();
+        }
+    }
+    var _alsRegistry = [];
+    var _OrigALS = AsyncLocalStorage;
+    AsyncLocalStorage = function() {
+        var inst = new _OrigALS();
+        _alsRegistry.push(inst);
+        return inst;
+    };
+    AsyncLocalStorage.prototype = _OrigALS.prototype;
     AsyncLocalStorage.bind = function(fn) {
-        // Captures the current store snapshot at bind time. Sandbox
-        // is sync — store snapshot equals "the current state", so
-        // bind is identity.
-        return fn;
+        var snap = _snapshotALS();
+        return function() {
+            _enterSnapshot(snap);
+            try { return fn.apply(this, arguments); }
+            finally { _exitSnapshot(snap); }
+        };
     };
     AsyncLocalStorage.snapshot = function() {
-        // Returns a thunk that runs `cb` under the current snapshot.
-        // Sync sandbox → just runs `cb`.
+        var snap = _snapshotALS();
         return function(cb) {
-            return cb.apply(null, Array.prototype.slice.call(arguments, 1));
+            var args = Array.prototype.slice.call(arguments, 1);
+            _enterSnapshot(snap);
+            try { return cb.apply(null, args); }
+            finally { _exitSnapshot(snap); }
         };
     };
 
-    // ---- AsyncResource --------------------------------------------
-    //
-    // Used by Node's worker pools, db drivers, etc. to track async
-    // boundaries. Sandbox has none, so the resource is essentially
-    // a no-op wrapper that exposes a `runInAsyncScope` for compat.
-
-    function AsyncResource(type, options) {
-        this._type = type;
-        this._triggerAsyncId = (options && options.triggerAsyncId) | 0;
-        this._asyncId = nextAsyncId();
-    }
-    AsyncResource.prototype.runInAsyncScope = function(fn, thisArg /*, ...args */) {
-        var args = Array.prototype.slice.call(arguments, 2);
-        return fn.apply(thisArg, args);
-    };
-    AsyncResource.prototype.bind = function(fn) {
-        return fn;
-    };
-    AsyncResource.prototype.asyncId = function() { return this._asyncId; };
-    AsyncResource.prototype.triggerAsyncId = function() { return this._triggerAsyncId; };
-    AsyncResource.prototype.emitDestroy = function() { return this; };
-    AsyncResource.bind = function(fn) { return fn; };
-
-    var _asyncIdCounter = 1;
-    function nextAsyncId() { return ++_asyncIdCounter; }
-
-    // ---- async hook lifecycle (no-op) -----------------------------
-    //
-    // We accept hook callbacks but never fire them — there's no async
-    // stack to observe. Code that calls `.enable()` / `.disable()`
-    // for context propagation often pairs it with AsyncLocalStorage
-    // anyway; this surface keeps pino/winston-style logging from
-    // crashing.
+    // ---- createHook ---------------------------------------------
 
     function createHook(callbacks) {
-        var enabled = false;
-        return {
-            enable: function() { enabled = true; return this; },
-            disable: function() { enabled = false; return this; },
+        callbacks = callbacks || {};
+        var entry = {
+            init: typeof callbacks.init === 'function' ? callbacks.init : null,
+            before: typeof callbacks.before === 'function' ? callbacks.before : null,
+            after: typeof callbacks.after === 'function' ? callbacks.after : null,
+            destroy: typeof callbacks.destroy === 'function' ? callbacks.destroy : null,
+            promiseResolve: typeof callbacks.promiseResolve === 'function'
+                ? callbacks.promiseResolve : null,
+            enabled: false,
         };
-        // `callbacks` (init/before/after/destroy/promiseResolve)
-        // are accepted but never invoked.
+        _hooks.push(entry);
+        return {
+            enable: function() {
+                entry.enabled = true;
+                _hooksDirty = true;
+                return this;
+            },
+            disable: function() {
+                entry.enabled = false;
+                _hooksDirty = true;
+                return this;
+            },
+        };
     }
 
-    function executionAsyncId() { return _asyncIdCounter; }
-    function triggerAsyncId() { return _asyncIdCounter; }
+    function executionAsyncId() { return _peek().asyncId; }
+    function triggerAsyncId() { return _peek().triggerAsyncId; }
     function executionAsyncResource() { return Object.create(null); }
 
-    // ---- exports --------------------------------------------------
+    // ---- Promise hooks ------------------------------------------
+    //
+    // Patch Promise.prototype.{then,catch,finally} so each handler
+    // runs inside an AsyncResource('PROMISE'). The init hook fires
+    // when the user attaches the handler; before/after fire around
+    // the handler's invocation; promiseResolve fires when the
+    // producing promise settles. Destroy fires after the handler
+    // completes (Node fires it lazily; we fire eagerly because
+    // microtask cleanup is bounded).
+    //
+    // The patch is one-shot — applied at module load — so all
+    // promises minted in this realm carry the wrapped handlers.
+    // Native promises produced by host code (e.g. fetch's body
+    // reader) inherit the same prototype, so they also get tracked.
+
+    var _origThen = Promise.prototype.then;
+    var _origCatch = Promise.prototype.catch;
+    var _origFinally = Promise.prototype.finally;
+
+    function _wrapHandler(fn, type) {
+        if (typeof fn !== 'function') return fn;
+        var resource = new AsyncResource(type || 'PROMISE');
+        var alsSnap = _snapshotALS();
+        var wrapped = function(value) {
+            _enterSnapshot(alsSnap);
+            try {
+                return resource.runInAsyncScope(fn, undefined, value);
+            } finally {
+                _exitSnapshot(alsSnap);
+                resource.emitDestroy();
+            }
+        };
+        wrapped._ah_resource = resource;
+        return wrapped;
+    }
+
+    Promise.prototype.then = function(onFulfilled, onRejected) {
+        var wrappedF = _wrapHandler(onFulfilled, 'PROMISE');
+        var wrappedR = _wrapHandler(onRejected, 'PROMISE');
+        var p = _origThen.call(this, wrappedF, wrappedR);
+        // Fire promiseResolve when this producing promise settles.
+        // We chain a sentinel handler that doesn't add semantic
+        // surface but observes settlement.
+        var producerId = (wrappedF && wrappedF._ah_resource && wrappedF._ah_resource._asyncId)
+            || (wrappedR && wrappedR._ah_resource && wrappedR._ah_resource._asyncId);
+        if (producerId !== undefined) {
+            _origThen.call(this, function() { _fire('promiseResolve', producerId); },
+                function() { _fire('promiseResolve', producerId); });
+        }
+        return p;
+    };
+
+    Promise.prototype.catch = function(onRejected) {
+        return this.then(undefined, onRejected);
+    };
+
+    Promise.prototype.finally = function(onFinally) {
+        if (typeof onFinally !== 'function') {
+            return _origFinally.call(this, onFinally);
+        }
+        var wrapped = _wrapHandler(onFinally, 'PROMISE');
+        return _origFinally.call(this, wrapped);
+    };
+
+    // ---- Timer hooks --------------------------------------------
+    //
+    // Wrap the global setTimeout/setInterval/setImmediate so the
+    // callback runs inside an AsyncResource('Timeout'/'Immediate').
+    // The host's timer plumbing isn't aware of asyncId, but the
+    // surface the user observes (executionAsyncId during the
+    // callback) reflects the right id.
+
+    var _origSetTimeout = globalThis.setTimeout;
+    var _origSetInterval = globalThis.setInterval;
+    var _origSetImmediate = globalThis.setImmediate;
+
+    if (typeof _origSetTimeout === 'function') {
+        globalThis.setTimeout = function(fn /*, ms, ...args */) {
+            if (typeof fn !== 'function') return _origSetTimeout.apply(this, arguments);
+            var rest = Array.prototype.slice.call(arguments, 1);
+            var resource = new AsyncResource('Timeout');
+            var alsSnap = _snapshotALS();
+            var wrapped = function() {
+                _enterSnapshot(alsSnap);
+                try {
+                    return resource.runInAsyncScope.apply(resource,
+                        [fn, undefined].concat(Array.prototype.slice.call(arguments)));
+                } finally {
+                    _exitSnapshot(alsSnap);
+                    resource.emitDestroy();
+                }
+            };
+            return _origSetTimeout.apply(this, [wrapped].concat(rest));
+        };
+    }
+    if (typeof _origSetInterval === 'function') {
+        globalThis.setInterval = function(fn /*, ms, ...args */) {
+            if (typeof fn !== 'function') return _origSetInterval.apply(this, arguments);
+            var rest = Array.prototype.slice.call(arguments, 1);
+            var resource = new AsyncResource('Timeout');
+            var alsSnap = _snapshotALS();
+            var wrapped = function() {
+                _enterSnapshot(alsSnap);
+                try {
+                    return resource.runInAsyncScope.apply(resource,
+                        [fn, undefined].concat(Array.prototype.slice.call(arguments)));
+                } finally {
+                    _exitSnapshot(alsSnap);
+                }
+            };
+            return _origSetInterval.apply(this, [wrapped].concat(rest));
+        };
+    }
+    if (typeof _origSetImmediate === 'function') {
+        globalThis.setImmediate = function(fn /*, ...args */) {
+            if (typeof fn !== 'function') return _origSetImmediate.apply(this, arguments);
+            var rest = Array.prototype.slice.call(arguments, 1);
+            var resource = new AsyncResource('Immediate');
+            var alsSnap = _snapshotALS();
+            var wrapped = function() {
+                _enterSnapshot(alsSnap);
+                try {
+                    return resource.runInAsyncScope.apply(resource,
+                        [fn, undefined].concat(Array.prototype.slice.call(arguments)));
+                } finally {
+                    _exitSnapshot(alsSnap);
+                    resource.emitDestroy();
+                }
+            };
+            return _origSetImmediate.apply(this, [wrapped].concat(rest));
+        };
+    }
+
+    // ---- queueMicrotask hook ------------------------------------
+    var _origQueueMicrotask = globalThis.queueMicrotask;
+    if (typeof _origQueueMicrotask === 'function') {
+        globalThis.queueMicrotask = function(fn) {
+            if (typeof fn !== 'function') return _origQueueMicrotask.call(this, fn);
+            var resource = new AsyncResource('Microtask');
+            var alsSnap = _snapshotALS();
+            var wrapped = function() {
+                _enterSnapshot(alsSnap);
+                try {
+                    return resource.runInAsyncScope(fn);
+                } finally {
+                    _exitSnapshot(alsSnap);
+                    resource.emitDestroy();
+                }
+            };
+            return _origQueueMicrotask.call(this, wrapped);
+        };
+    }
+
+    // ---- exports -------------------------------------------------
 
     exports.AsyncLocalStorage = AsyncLocalStorage;
     exports.AsyncResource = AsyncResource;
@@ -1842,17 +2141,26 @@ __register_module('child_process', function(module, exports, require) {
 });
 
 // ---- cluster.js ----
-// cluster — Node 20's primary/worker multi-process clustering.
+// cluster — Node 20+ primary/worker multi-process clustering.
 //
-// Burn's sandbox doesn't fork the main process; instead, the
-// `worker_threads` shadow (`burn run --internal-worker`) covers the
-// "isolated parallelism" use case. We expose `cluster` as a thin
-// wrapper that delegates `cluster.fork()` to `new Worker(...)` so
-// existing cluster-using code (Express load balancers, pino-cluster)
-// keeps running. Each `Worker` here is a `worker_threads.Worker`,
-// not a separate OS process; for most middleware this is a fine
-// substitution since the contract — multiple isolated JS contexts
-// processing requests — is preserved.
+// Real subprocess workers via `worker_threads`. Each `cluster.fork()`
+// in the primary spawns a fresh `burn` subprocess that re-evaluates
+// `process.argv[1]`. The forked subprocess sets `cluster.isWorker`
+// truthy so the user's `if (cluster.isPrimary) { fork(); } else { app.listen(); }`
+// shape Just Works.
+//
+// Per-CPU accept-balance: every worker sets `BURN_CLUSTER_REUSEPORT=1`
+// in its own env (propagated by the primary at fork time via
+// `__host_worker_spawn_env`), which flips the daemon's TCP/UDP bind
+// path to `SO_REUSEPORT` (Linux/macOS/BSD) or `SO_REUSEADDR`
+// (Windows). The kernel then 4-tuple-hashes incoming connections
+// across the listening sockets — that's exactly what Node's default
+// `SCHED_RR` strategy is at the OS level on the same platforms.
+//
+// `Worker.process.pid` reports the OS pid via `__host_worker_pid`.
+// IPC (`worker.send` / `cluster.worker.send`) routes through the
+// existing parentPort message channel — JSON frames over the
+// length-prefixed pipes set up by `worker_threads`.
 
 __register_module('cluster', function(module, exports, require) {
     var EventEmitter = require('events').EventEmitter;
@@ -1865,53 +2173,172 @@ __register_module('cluster', function(module, exports, require) {
     var primary = new EventEmitter();
     primary.workers = _workers;
 
+    function _hostWorkerPid(id) {
+        if (typeof globalThis.__host_worker_pid === 'function') {
+            try { return globalThis.__host_worker_pid(id) | 0; } catch (_) { return 0; }
+        }
+        return 0;
+    }
+
+    function _spawnWorker(scriptPath, workerData, envOverrides) {
+        var dataJson = JSON.stringify(workerData || {});
+        var envJson = JSON.stringify(envOverrides || {});
+        var rc;
+        if (typeof globalThis.__host_worker_spawn_env === 'function') {
+            rc = globalThis.__host_worker_spawn_env(scriptPath, dataJson, envJson);
+        } else if (typeof globalThis.__host_worker_spawn === 'function') {
+            // Plugin pre-dates the env extension. Fall through to the
+            // legacy spawn path; SO_REUSEPORT won't be active for the
+            // child, so multi-worker `app.listen(port)` will EADDRINUSE.
+            rc = globalThis.__host_worker_spawn(scriptPath, dataJson);
+        } else {
+            throw new Error('cluster requires daemon mode; run via `burn foo.js` CLI');
+        }
+        if (rc < 0) {
+            throw new Error('cluster.fork: spawn failed (rc=' + rc + ')');
+        }
+        return rc | 0;
+    }
+
     function fork(env) {
         if (!_isPrimary) {
             throw new Error('cluster.fork: can only be called from the primary');
         }
         if (!process.argv[1]) {
             throw new Error(
-                'cluster.fork: no entry script — `cluster` needs `process.argv[1]` ' +
-                'to point at a JS file the workers can re-run'
+                'cluster.fork: no entry script — `cluster` needs `process.argv[1]`'
             );
         }
+
         var id = _nextId++;
-        var w = new workerThreads.Worker(process.argv[1], {
-            workerData: { __ab_cluster_id: id },
-            env: Object.assign({}, process.env, env || {}),
+        var clusterEnv = { __ab_cluster_id: id };
+        // SO_REUSEPORT gating in the spawned subprocess's daemon.
+        // The merged env wins over any user override since
+        // accept-balance is the entire point of cluster mode.
+        var subEnv = Object.assign({}, env || {}, {
+            BURN_CLUSTER_REUSEPORT: '1',
+            NODE_UNIQUE_ID: String(id),
         });
-        var workerWrapper = {
-            id: id,
-            process: { pid: id }, // approximation — no real OS pid for thread workers
-            isDead: function() { return _workers[id] === undefined; },
-            isConnected: function() { return _workers[id] !== undefined; },
-            kill: function(signal) { w.terminate(); _ = signal; },
-            disconnect: function() { w.terminate(); },
-            send: function(msg) { w.postMessage(msg); return true; },
-            on: function(event, listener) { w.on(event, listener); return this; },
-            once: function(event, listener) { w.once(event, listener); return this; },
-            removeListener: function(event, listener) { w.removeListener(event, listener); return this; },
-            _worker: w,
+
+        var threadId = _spawnWorker(process.argv[1], clusterEnv, subEnv);
+        var pid = _hostWorkerPid(threadId);
+
+        var workerWrapper = new EventEmitter();
+        workerWrapper.id = id;
+        workerWrapper.threadId = threadId;
+        workerWrapper.process = {
+            pid: pid || threadId,
+            kill: function(sig) {
+                _hostTerminate(threadId, true);
+                _ = sig;
+            },
         };
-        var _;
-        w.on('exit', function(code) {
-            delete _workers[id];
-            try { primary.emit('exit', workerWrapper, code, null); } catch (_) {}
-        });
-        w.on('message', function(msg) {
-            try { primary.emit('message', workerWrapper, msg); } catch (_) {}
-        });
+        workerWrapper.exitedAfterDisconnect = false;
+        workerWrapper.state = 'online';
+        workerWrapper.isDead = function() { return _workers[id] === undefined; };
+        workerWrapper.isConnected = function() { return _workers[id] !== undefined && workerWrapper.state !== 'disconnected'; };
+        workerWrapper.kill = function(signal) {
+            workerWrapper.exitedAfterDisconnect = true;
+            _hostTerminate(threadId, true);
+            _ = signal;
+        };
+        workerWrapper.disconnect = function() {
+            workerWrapper.exitedAfterDisconnect = true;
+            workerWrapper.state = 'disconnected';
+            try { workerWrapper.emit('disconnect'); } catch (_) {}
+            try { primary.emit('disconnect', workerWrapper); } catch (_) {}
+            _hostTerminate(threadId, false);
+            return workerWrapper;
+        };
+        workerWrapper.send = function(message, _handle, _opts, cb) {
+            var rc = _hostPostMessage(threadId, JSON.stringify({
+                __ab_cluster_msg: true,
+                payload: message,
+            }));
+            if (typeof cb === 'function') {
+                Promise.resolve().then(function() { cb(rc < 0 ? new Error('send rc=' + rc) : null); });
+            }
+            return rc >= 0;
+        };
+
+        // Wire daemon-event routing via the existing worker_threads
+        // dispatcher. The host pumps `worker-message` / `worker-online`
+        // / `worker-error` / `worker-exit` envelopes through
+        // globalThis.__ab_worker_handlers[threadId]; we install a
+        // facade there that fans out to the cluster wrapper.
+        globalThis.__ab_worker_handlers[threadId] = {
+            _dispatchOnline: function() {
+                workerWrapper.state = 'online';
+                try { workerWrapper.emit('online'); } catch (_) {}
+                try { primary.emit('online', workerWrapper); } catch (_) {}
+            },
+            _dispatchMessage: function(payloadJson) {
+                var value;
+                try { value = JSON.parse(payloadJson); } catch (_) { return; }
+                if (value && value.__ab_cluster_listening) {
+                    workerWrapper.state = 'listening';
+                    try { workerWrapper.emit('listening', value.address || {}); } catch (_) {}
+                    try { primary.emit('listening', workerWrapper, value.address || {}); } catch (_) {}
+                    return;
+                }
+                if (value && value.__ab_cluster_msg) {
+                    try { workerWrapper.emit('message', value.payload); } catch (_) {}
+                    try { primary.emit('message', workerWrapper, value.payload); } catch (_) {}
+                    return;
+                }
+                // Plain message (worker called parentPort.postMessage
+                // outside the cluster envelope) — surface it on both
+                // emitters so library code that mixes worker_threads
+                // and cluster idioms isn't surprised.
+                try { workerWrapper.emit('message', value); } catch (_) {}
+                try { primary.emit('message', workerWrapper, value); } catch (_) {}
+            },
+            _dispatchError: function(message, stack) {
+                var err = new Error(message || 'worker error');
+                if (stack) err.stack = stack;
+                try { workerWrapper.emit('error', err); } catch (_) {}
+                try { primary.emit('error', workerWrapper, err); } catch (_) {}
+            },
+            _dispatchExit: function(code) {
+                workerWrapper.state = 'dead';
+                delete _workers[id];
+                delete globalThis.__ab_worker_handlers[threadId];
+                try { workerWrapper.emit('exit', code | 0, null); } catch (_) {}
+                try { primary.emit('exit', workerWrapper, code | 0, null); } catch (_) {}
+            },
+            // Compat with worker_threads.Worker shape so any code that
+            // walks __ab_worker_handlers won't fail.
+            threadId: threadId,
+        };
+
         _workers[id] = workerWrapper;
+        var _;
         try { primary.emit('fork', workerWrapper); } catch (_) {}
-        try { primary.emit('online', workerWrapper); } catch (_) {}
+        // 'online' is dispatched when the worker child posts its
+        // online frame after top-level evaluation finishes. Until
+        // then state stays 'online' (matches Node — the wrapper
+        // is online from the parent's POV the moment fork returns).
         return workerWrapper;
     }
 
+    function _hostTerminate(threadId, force) {
+        if (typeof globalThis.__host_worker_terminate === 'function') {
+            try {
+                return globalThis.__host_worker_terminate(threadId, force ? 1 : 0) | 0;
+            } catch (_) { return -1; }
+        }
+        return -1;
+    }
+    function _hostPostMessage(threadId, json) {
+        if (typeof globalThis.__host_worker_post_message === 'function') {
+            try {
+                return globalThis.__host_worker_post_message(threadId, json) | 0;
+            } catch (_) { return -1; }
+        }
+        return -1;
+    }
+
     function setupPrimary(opts) {
-        // Spec: schedules an exec / args / silent setting. We accept
-        // and remember the values for surface compat; the actual
-        // worker entry comes from process.argv[1] (the same script
-        // re-running with a cluster id in workerData).
         primary.settings = Object.assign(primary.settings || {}, opts || {});
     }
 
@@ -1920,10 +2347,20 @@ __register_module('cluster', function(module, exports, require) {
     primary.setupMaster = setupPrimary; // legacy alias
     primary.disconnect = function(cb) {
         var ids = Object.keys(_workers);
-        ids.forEach(function(id) { _workers[id].disconnect(); });
-        if (typeof cb === 'function') {
-            Promise.resolve().then(cb);
+        var pending = ids.length;
+        if (pending === 0) {
+            if (typeof cb === 'function') Promise.resolve().then(cb);
+            return;
         }
+        ids.forEach(function(id) {
+            var w = _workers[id];
+            if (!w) { pending--; return; }
+            w.once('exit', function() {
+                pending--;
+                if (pending === 0 && typeof cb === 'function') cb();
+            });
+            w.disconnect();
+        });
     };
     primary.settings = {};
 
@@ -1938,39 +2375,104 @@ __register_module('cluster', function(module, exports, require) {
         get: function() { return !_isPrimary; },
     });
 
-    // When running inside a worker, expose the worker-side surface.
+    // ---- Worker-side surface ------------------------------------
+    //
+    // When running inside a forked worker, the same `cluster` import
+    // exposes `cluster.worker` — the handle used by user code to
+    // talk back to the primary, signal 'listening' once a server
+    // binds, and observe shutdown signals.
+
     if (!_isPrimary) {
         var wd = workerThreads.workerData || {};
-        primary.worker = {
-            id: wd.__ab_cluster_id || 0,
-            process: { pid: wd.__ab_cluster_id || 0 },
-            isDead: function() { return false; },
-            isConnected: function() { return true; },
-            send: function(msg) {
-                if (workerThreads.parentPort) {
-                    workerThreads.parentPort.postMessage(msg);
-                    return true;
-                }
-                return false;
-            },
-            disconnect: function() {
-                if (workerThreads.parentPort) workerThreads.parentPort.close();
-            },
-            kill: function() {
-                if (workerThreads.parentPort) workerThreads.parentPort.close();
-            },
-            on: function(event, listener) {
-                if (event === 'message' && workerThreads.parentPort) {
-                    workerThreads.parentPort.on('message', listener);
-                }
-                return this;
-            },
+        var workerObj = new EventEmitter();
+        workerObj.id = wd.__ab_cluster_id || 0;
+        workerObj.process = {
+            pid: typeof process !== 'undefined' && process.pid ? process.pid : 0,
         };
+        workerObj.exitedAfterDisconnect = false;
+        workerObj.state = 'online';
+        workerObj.isDead = function() { return false; };
+        workerObj.isConnected = function() { return !workerObj._closed; };
+        workerObj.send = function(message, _handle, _opts, cb) {
+            if (workerThreads.parentPort) {
+                try {
+                    workerThreads.parentPort.postMessage({
+                        __ab_cluster_msg: true,
+                        payload: message,
+                    });
+                    if (typeof cb === 'function') Promise.resolve().then(function() { cb(null); });
+                    return true;
+                } catch (e) {
+                    if (typeof cb === 'function') Promise.resolve().then(function() { cb(e); });
+                    return false;
+                }
+            }
+            return false;
+        };
+        workerObj.disconnect = function() {
+            workerObj._closed = true;
+            workerObj.exitedAfterDisconnect = true;
+            try { workerObj.emit('disconnect'); } catch (_) {}
+            if (workerThreads.parentPort) {
+                try { workerThreads.parentPort.close(); } catch (_) {}
+            }
+        };
+        workerObj.kill = workerObj.disconnect;
+
+        // Forward parentPort 'message' frames here so user code that
+        // listens on `cluster.worker.on('message', ...)` sees them.
+        if (workerThreads.parentPort) {
+            workerThreads.parentPort.on('message', function(msg) {
+                if (msg && msg.__ab_cluster_msg) {
+                    try { workerObj.emit('message', msg.payload); } catch (_) {}
+                } else {
+                    try { workerObj.emit('message', msg); } catch (_) {}
+                }
+            });
+            // When the primary calls `worker.disconnect()`, the host
+            // delivers a `worker-terminate-requested` envelope which
+            // surfaces here as parentPort 'close'. Cluster contract:
+            // emit 'disconnect' on cluster.worker, run any user
+            // shutdown callbacks via the same event, then exit. The
+            // worker's HTTP listeners would otherwise keep the process
+            // alive (`daemon.has_refs() == true`), so we force-exit.
+            workerThreads.parentPort.on('close', function() {
+                workerObj._closed = true;
+                workerObj.exitedAfterDisconnect = true;
+                try { workerObj.emit('disconnect'); } catch (_) {}
+                // Microtask gap so user-installed 'disconnect' handlers
+                // observe synchronous side-effects before we tear the
+                // process down.
+                Promise.resolve().then(function() {
+                    try { process.exit(0); } catch (_) {}
+                });
+            });
+        }
+
+        primary.worker = workerObj;
     }
 
-    primary.schedulingPolicy = 1; // SCHED_RR — symbolic
-    primary.SCHED_NONE = 0;
-    primary.SCHED_RR = 1;
+    // ---- 'listening' signalling --------------------------------
+    //
+    // The primary fires 'listening' when a worker calls
+    // `server.listen(...)`. The worker side calls
+    // `cluster._signalListening(addr)` from inside http.Server's
+    // listen path; we hop the address up to the primary via the
+    // existing parentPort message channel.
+    primary._signalListening = function(addr) {
+        if (_isPrimary) return;
+        if (!workerThreads.parentPort) return;
+        try {
+            workerThreads.parentPort.postMessage({
+                __ab_cluster_listening: true,
+                address: addr || {},
+            });
+        } catch (_) {}
+    };
+
+    primary.schedulingPolicy = 1; // SCHED_RR — symbolic; the actual
+    primary.SCHED_NONE = 0;       // accept-balance is SO_REUSEPORT
+    primary.SCHED_RR = 1;         // at the kernel level.
 
     module.exports = primary;
 });
@@ -6737,6 +7239,25 @@ function __plenum_install_http(moduleName) {
                     queueMicrotask(function() { cb(); });
                 }
                 server.emit('listening');
+
+                // Cluster-worker hook: forward the listening address to
+                // the primary so `cluster.on('listening', ...)` fires
+                // on the primary side. No-op in non-cluster mode and
+                // in the primary itself.
+                try {
+                    var _cluster = globalThis.__ab_require_cached_cluster;
+                    if (typeof _cluster === 'undefined') {
+                        _cluster = require('cluster');
+                        globalThis.__ab_require_cached_cluster = _cluster;
+                    }
+                    if (_cluster && _cluster.isWorker && typeof _cluster._signalListening === 'function') {
+                        _cluster._signalListening({
+                            address: '127.0.0.1',
+                            port: port,
+                            family: 'IPv4',
+                        });
+                    }
+                } catch (_) {}
                 return server;
             };
 
@@ -7886,16 +8407,35 @@ __register_module('http2', function(module, exports, require) {
 });
 
 // ---- inspector.js ----
-// inspector — Node 20's V8 inspector protocol bridge.
+// inspector — Chrome DevTools Protocol bridge.
 //
-// The DevTools / Chrome Inspector protocol requires a long-lived
-// channel that responds to a JSON-RPC stream of CDP messages. Burn
-// has no live inspector and no debugger UI. We expose the API so
-// instrumentation code that calls `inspector.open()` /
-// `inspector.url()` doesn't crash on import; methods that would
-// genuinely require a debugger session (the `Session` class's
-// `post()` actually doing something) accept commands but reply with
-// "no debugger attached" errors.
+// Two surfaces: an in-process `Session` (`session.post(method, params)`)
+// that routes CDP commands through a local dispatcher with no external
+// debugger required, and `inspector.open(port)` which boots a real
+// HTTP+WebSocket listener on the host (axum-backed) so external tools
+// like Chrome DevTools / VS Code can connect over `ws://`. Both share
+// the same dispatcher table — a method handled by the in-process
+// session is also reachable from a WebSocket client.
+//
+// CDP coverage in this build:
+//
+// | Domain     | Methods                                           |
+// |------------|---------------------------------------------------|
+// | Runtime    | enable, disable, evaluate, runScript,             |
+// |            | compileScript, releaseObject, getProperties,      |
+// |            | runIfWaitingForDebugger                           |
+// | Debugger   | enable, disable, scriptSource, setBreakpointsActive,|
+// |            | resume, getScriptSource                           |
+// | HeapProfiler | enable, disable, takeHeapSnapshot,             |
+// |            | collectGarbage                                    |
+// | Profiler   | enable, disable, start, stop, setSamplingInterval |
+// | Inspector  | enable                                            |
+// | Page       | enable                                            |
+//
+// Engine-ceiling: full breakpoint stepping requires a QuickJS debug
+// hook the upstream engine doesn't expose. `Debugger.setBreakpointByUrl`
+// returns `ERR_INSPECTOR_NOT_SUPPORTED_ON_BURN` so callers fail fast
+// rather than silently never hitting a breakpoint.
 
 __register_module('inspector', function(module, exports, require) {
     var EventEmitter = require('events').EventEmitter;
@@ -7903,27 +8443,420 @@ __register_module('inspector', function(module, exports, require) {
     var _opened = false;
     var _port = 9229;
     var _host = '127.0.0.1';
+    var _wsPath = null;
+    var _scriptIdCounter = 1;
+    var _scriptsById = Object.create(null);
+    var _scriptsByUrl = Object.create(null);
+    var _executionContextId = 1;
+    var _profilerActive = false;
+    var _profilerSamples = null;
+    var _profilerStartedAt = 0;
+    var _profilerSamplingIntervalUs = 1000;
 
-    function open(port, host /*, wait */) {
-        _opened = true;
-        if (typeof port === 'number') _port = port;
-        if (typeof host === 'string') _host = host;
-    }
-    function close() { _opened = false; }
-    function url() {
-        if (!_opened) return undefined;
-        return 'ws://' + _host + ':' + _port + '/burn-noop';
-    }
-    function waitForDebugger() {
-        // Real Node blocks until a debugger attaches. We never get
-        // a debugger; return immediately so callers don't deadlock.
+    // ---- Real CDP method table ----------------------------------
+
+    var methods = Object.create(null);
+
+    function registerMethod(name, handler) {
+        methods[name] = handler;
     }
 
-    // ---- Session class --------------------------------------------
+    // ---- Runtime ------------------------------------------------
+
+    registerMethod('Runtime.enable', function(_params, _ctx) {
+        _ctx.notify('Runtime.executionContextCreated', {
+            context: {
+                id: _executionContextId,
+                origin: '',
+                name: 'burn',
+                uniqueId: 'burn-' + _executionContextId,
+                auxData: {
+                    isDefault: true,
+                    type: 'default',
+                    frameId: 'burn-frame',
+                },
+            },
+        });
+        return {};
+    });
+
+    registerMethod('Runtime.disable', function() { return {}; });
+
+    registerMethod('Runtime.runIfWaitingForDebugger', function() { return {}; });
+
+    registerMethod('Runtime.evaluate', function(params, _ctx) {
+        var expr = (params && params.expression) || '';
+        return _evalAndPackage(expr, params || {});
+    });
+
+    registerMethod('Runtime.runScript', function(params, _ctx) {
+        var src = '';
+        if (params && params.scriptId && _scriptsById[params.scriptId]) {
+            src = _scriptsById[params.scriptId].source;
+        }
+        return _evalAndPackage(src, params || {});
+    });
+
+    registerMethod('Runtime.compileScript', function(params, _ctx) {
+        var src = (params && params.expression) || '';
+        var url = (params && params.sourceURL) || '';
+        var sid = String(_scriptIdCounter++);
+        var entry = { source: src, url: url };
+        _scriptsById[sid] = entry;
+        if (url) _scriptsByUrl[url] = sid;
+        // Pre-flight: try parse via Function() so we surface compile
+        // errors right here rather than later at runScript time.
+        try {
+            new Function(src);
+        } catch (e) {
+            return {
+                exceptionDetails: _wrapException(e),
+            };
+        }
+        return { scriptId: sid };
+    });
+
+    registerMethod('Runtime.releaseObject', function() { return {}; });
+    registerMethod('Runtime.releaseObjectGroup', function() { return {}; });
+
+    registerMethod('Runtime.getProperties', function(params, _ctx) {
+        var oid = (params && params.objectId) || '';
+        var ref = _objectTable[oid];
+        if (!ref) return { result: [] };
+        var props = [];
+        try {
+            var keys = Object.getOwnPropertyNames(ref);
+            for (var i = 0; i < keys.length && i < 256; i++) {
+                var k = keys[i];
+                var d = Object.getOwnPropertyDescriptor(ref, k) || {};
+                props.push({
+                    name: k,
+                    configurable: !!d.configurable,
+                    enumerable: !!d.enumerable,
+                    writable: !!d.writable,
+                    value: d.value === undefined ? undefined : _packValue(d.value),
+                });
+            }
+        } catch (_) {}
+        return { result: props };
+    });
+
+    // ---- Debugger -----------------------------------------------
+
+    registerMethod('Debugger.enable', function(_params, _ctx) {
+        // Replay scriptParsed for everything compiled so far so the
+        // attaching client sees the existing world.
+        var ids = Object.keys(_scriptsById);
+        for (var i = 0; i < ids.length; i++) {
+            var s = _scriptsById[ids[i]];
+            _ctx.notify('Debugger.scriptParsed', {
+                scriptId: ids[i],
+                url: s.url || '',
+                startLine: 0,
+                startColumn: 0,
+                endLine: 0,
+                endColumn: s.source ? s.source.length : 0,
+                executionContextId: _executionContextId,
+                hash: '',
+                isLiveEdit: false,
+                sourceMapURL: '',
+                hasSourceURL: !!s.url,
+                isModule: false,
+                length: s.source ? s.source.length : 0,
+            });
+        }
+        return { debuggerId: 'burn-debugger' };
+    });
+    registerMethod('Debugger.disable', function() { return {}; });
+    registerMethod('Debugger.setBreakpointsActive', function() { return {}; });
+    registerMethod('Debugger.setSkipAllPauses', function() { return {}; });
+    registerMethod('Debugger.setPauseOnExceptions', function() { return {}; });
+    registerMethod('Debugger.resume', function() { return {}; });
+    registerMethod('Debugger.getScriptSource', function(params) {
+        var sid = (params && params.scriptId) || '';
+        var entry = _scriptsById[sid];
+        if (!entry) {
+            var err = new Error('Debugger.getScriptSource: unknown scriptId ' + sid);
+            err.code = 'ERR_INSPECTOR_COMMAND_FAILED';
+            throw err;
+        }
+        return { scriptSource: entry.source || '' };
+    });
+    registerMethod('Debugger.setBreakpointByUrl', function() {
+        var err = new Error(
+            'Debugger.setBreakpointByUrl: burn QuickJS does not expose the '
+            + 'engine-level breakpoint hook required for stepping'
+        );
+        err.code = 'ERR_INSPECTOR_NOT_SUPPORTED_ON_BURN';
+        throw err;
+    });
+
+    // ---- HeapProfiler -------------------------------------------
+
+    registerMethod('HeapProfiler.enable', function() { return {}; });
+    registerMethod('HeapProfiler.disable', function() { return {}; });
+    registerMethod('HeapProfiler.collectGarbage', function() {
+        // QuickJS GC is automatic; expose what we can.
+        if (typeof globalThis.gc === 'function') {
+            try { globalThis.gc(); } catch (_) {}
+        }
+        return {};
+    });
+
+    registerMethod('HeapProfiler.takeHeapSnapshot', function(_params, _ctx) {
+        var v8 = require('v8');
+        var stream = v8.getHeapSnapshot();
+        var chunks = [];
+        // The current getHeapSnapshot impl emits one big chunk
+        // synchronously via setImmediate. Drain into a buffer; the
+        // `addHeapSnapshotChunk` event is the CDP-wire shape.
+        return new Promise(function(resolve) {
+            stream.on('data', function(buf) {
+                chunks.push(buf.toString('utf8'));
+            });
+            stream.on('end', function() {
+                var full = chunks.join('');
+                // CDP clients expect the snapshot in fixed-size chunks
+                // delivered as `HeapProfiler.addHeapSnapshotChunk`
+                // notifications, with the final return value being
+                // `{}`. We use 64 KiB pages — small enough that
+                // DevTools' progress UI updates smoothly, large
+                // enough to keep the count of frames bounded.
+                var pageSize = 64 * 1024;
+                for (var i = 0; i < full.length; i += pageSize) {
+                    _ctx.notify('HeapProfiler.addHeapSnapshotChunk', {
+                        chunk: full.slice(i, Math.min(full.length, i + pageSize)),
+                    });
+                }
+                _ctx.notify('HeapProfiler.reportHeapSnapshotProgress', {
+                    done: full.length,
+                    total: full.length,
+                    finished: true,
+                });
+                resolve({});
+            });
+        });
+    });
+
+    // ---- Profiler -----------------------------------------------
+
+    registerMethod('Profiler.enable', function() { return {}; });
+    registerMethod('Profiler.disable', function() { return {}; });
+
+    registerMethod('Profiler.setSamplingInterval', function(params) {
+        var us = (params && params.interval) || 1000;
+        _profilerSamplingIntervalUs = us;
+        return {};
+    });
+
+    registerMethod('Profiler.start', function() {
+        _profilerActive = true;
+        _profilerSamples = [];
+        _profilerStartedAt = (Date.now() * 1000) | 0;
+        // Sample the call stack on each Promise microtask drain. We
+        // can't pre-empt sync code from JS, so on a busy synchronous
+        // loop the sample count stays low — that's intrinsic to a
+        // userland-hosted profiler. The frames recovered from
+        // `Error.stack` are the CDP-wire `CallFrame` payload.
+        _profilerSampleScheduler();
+        return {};
+    });
+
+    registerMethod('Profiler.stop', function() {
+        _profilerActive = false;
+        var endedAt = (Date.now() * 1000) | 0;
+        var samples = _profilerSamples || [];
+        _profilerSamples = null;
+        // Build a CDP `Profile` value. Nodes are the unique frames
+        // observed; samples is the index per tick; timeDeltas is
+        // microseconds since the previous sample. Root node id 1.
+        var nodes = [{
+            id: 1,
+            callFrame: { functionName: '(root)', scriptId: '0', url: '', lineNumber: -1, columnNumber: -1 },
+            hitCount: 0,
+            children: [],
+        }];
+        var nodeIndex = Object.create(null);
+        nodeIndex['(root)|0'] = 1;
+        var nextNodeId = 2;
+        var sampleIds = [];
+        var timeDeltas = [];
+        var prevTs = _profilerStartedAt;
+        for (var i = 0; i < samples.length; i++) {
+            var frame = samples[i].frame || '(anonymous)';
+            var key = frame + '|' + i;
+            var id = nodeIndex[frame] || (nodeIndex[frame] = nextNodeId++);
+            if (!nodes[id - 1]) {
+                nodes.push({
+                    id: id,
+                    callFrame: { functionName: frame, scriptId: '0', url: '', lineNumber: -1, columnNumber: -1 },
+                    hitCount: 0,
+                    children: [],
+                });
+            }
+            nodes[id - 1].hitCount++;
+            sampleIds.push(id);
+            var ts = samples[i].ts;
+            timeDeltas.push(Math.max(0, ts - prevTs));
+            prevTs = ts;
+        }
+        return {
+            profile: {
+                nodes: nodes,
+                samples: sampleIds,
+                timeDeltas: timeDeltas,
+                startTime: _profilerStartedAt,
+                endTime: endedAt,
+            },
+        };
+    });
+
+    function _profilerSampleScheduler() {
+        if (!_profilerActive) return;
+        Promise.resolve().then(function() {
+            if (!_profilerActive) return;
+            var stack;
+            try {
+                throw new Error('__profile_sample__');
+            } catch (e) {
+                stack = e.stack || '';
+            }
+            // First non-internal frame name.
+            var frame = '(anonymous)';
+            var lines = (stack || '').split('\n');
+            for (var i = 1; i < lines.length; i++) {
+                var line = lines[i].trim();
+                if (line && line.indexOf('__profile_sample__') < 0
+                    && line.indexOf('_profilerSampleScheduler') < 0) {
+                    var m = line.match(/at\s+([^\s(]+)/);
+                    if (m && m[1] && m[1] !== 'Promise.then') {
+                        frame = m[1];
+                        break;
+                    }
+                }
+            }
+            _profilerSamples.push({ frame: frame, ts: (Date.now() * 1000) | 0 });
+            // Re-arm. The scheduler runs at microtask cadence; tighter
+            // than `setInterval` and bounded only by the loop's pulse.
+            _profilerSampleScheduler();
+        });
+    }
+
+    // ---- Inspector / Page ---------------------------------------
+
+    registerMethod('Inspector.enable', function() { return {}; });
+    registerMethod('Page.enable', function() { return {}; });
+    registerMethod('Network.enable', function() { return {}; });
+
+    // ---- Object table -------------------------------------------
+    //
+    // Eval results that aren't primitives get a synthetic ID so a
+    // subsequent `Runtime.getProperties({objectId})` can introspect
+    // them. Bounded to 1024 live entries — older ones recycle.
+
+    var _objectTable = Object.create(null);
+    var _objectTableIds = [];
+    var _objectIdCounter = 1;
+    var _OBJECT_TABLE_CAP = 1024;
+
+    function _registerObject(value) {
+        var id = '{"injectedScriptId":1,"id":' + (_objectIdCounter++) + '}';
+        _objectTable[id] = value;
+        _objectTableIds.push(id);
+        if (_objectTableIds.length > _OBJECT_TABLE_CAP) {
+            var stale = _objectTableIds.shift();
+            delete _objectTable[stale];
+        }
+        return id;
+    }
+
+    function _typeOf(v) {
+        if (v === null) return 'object';
+        if (Array.isArray(v)) return 'object';
+        return typeof v;
+    }
+
+    function _subtypeOf(v) {
+        if (v === null) return 'null';
+        if (Array.isArray(v)) return 'array';
+        if (v instanceof Error) return 'error';
+        if (v instanceof RegExp) return 'regexp';
+        if (v instanceof Date) return 'date';
+        if (v instanceof Map) return 'map';
+        if (v instanceof Set) return 'set';
+        if (v instanceof Promise) return 'promise';
+        return undefined;
+    }
+
+    function _packValue(v) {
+        var ty = _typeOf(v);
+        var sub = _subtypeOf(v);
+        if (ty === 'undefined') return { type: 'undefined' };
+        if (v === null) return { type: 'object', subtype: 'null', value: null };
+        if (ty === 'boolean' || ty === 'number' || ty === 'string') {
+            return { type: ty, value: v };
+        }
+        if (ty === 'bigint') return { type: 'bigint', unserializableValue: String(v) + 'n' };
+        if (ty === 'symbol') return { type: 'symbol', description: String(v) };
+        if (ty === 'function') {
+            return {
+                type: 'function',
+                className: 'Function',
+                description: (function() {
+                    try { return v.toString().slice(0, 200); } catch (_) { return 'function'; }
+                })(),
+                objectId: _registerObject(v),
+            };
+        }
+        // Object / array / error / etc.
+        var desc = '';
+        try { desc = String(v); } catch (_) { desc = 'Object'; }
+        return {
+            type: 'object',
+            subtype: sub,
+            className: (v && v.constructor && v.constructor.name) || 'Object',
+            description: desc,
+            objectId: _registerObject(v),
+        };
+    }
+
+    function _wrapException(e) {
+        return {
+            exceptionId: 0,
+            text: 'Uncaught',
+            lineNumber: 0,
+            columnNumber: 0,
+            scriptId: '0',
+            exception: _packValue(e && e.message ? new Error(e.message) : e),
+        };
+    }
+
+    function _evalAndPackage(expr, params) {
+        var result;
+        var exception = null;
+        try {
+            // (0, eval) is the canonical idiom for indirect global eval.
+            result = (0, eval)(expr);
+            // If returnByValue is requested, send the literal value.
+            if (params && params.returnByValue) {
+                try {
+                    JSON.stringify(result);
+                    return { result: { type: _typeOf(result), value: result } };
+                } catch (_) { /* fall through to packed form */ }
+            }
+        } catch (e) {
+            exception = _wrapException(e);
+        }
+        if (exception) return { exceptionDetails: exception, result: { type: 'object', subtype: 'error' } };
+        return { result: _packValue(result) };
+    }
+
+    // ---- Session class ------------------------------------------
 
     function Session() {
         EventEmitter.call(this);
         this._connected = false;
+        this._pendingId = 1;
     }
     Session.prototype = Object.create(EventEmitter.prototype);
     Session.prototype.constructor = Session;
@@ -7932,27 +8865,172 @@ __register_module('inspector', function(module, exports, require) {
         this._connected = true;
         return this;
     };
-    Session.prototype.connectToMainThread = function() {
-        return this.connect();
-    };
+    Session.prototype.connectToMainThread = function() { return this.connect(); };
     Session.prototype.disconnect = function() {
         this._connected = false;
         return this;
     };
+
     Session.prototype.post = function(method, params, callback) {
         if (typeof params === 'function') { callback = params; params = undefined; }
-        var err = new Error(
-            "inspector.Session.post('" + method + "'): no debugger attached " +
-            'in the burn sandbox; use the host-side wasmtime debugger if you ' +
-            'need stepping.'
-        );
-        err.code = 'ERR_INSPECTOR_NOT_CONNECTED';
-        if (typeof callback === 'function') {
-            Promise.resolve().then(function() { callback(err); });
+        if (!this._connected) {
+            var err = new Error("Session is not connected (call .connect() first)");
+            err.code = 'ERR_INSPECTOR_NOT_CONNECTED';
+            if (typeof callback === 'function') {
+                Promise.resolve().then(function() { callback(err); });
+                return;
+            }
+            throw err;
+        }
+        var self = this;
+        var ctx = {
+            notify: function(notifMethod, notifParams) {
+                try { self.emit(notifMethod, { method: notifMethod, params: notifParams }); }
+                catch (_) {}
+                try { self.emit('inspectorNotification', { method: notifMethod, params: notifParams }); }
+                catch (_) {}
+            },
+        };
+        var handler = methods[method];
+        if (!handler) {
+            var nerr = new Error("Inspector method '" + method + "' is not implemented");
+            nerr.code = 'ERR_INSPECTOR_COMMAND_UNKNOWN';
+            if (typeof callback === 'function') {
+                Promise.resolve().then(function() { callback(nerr); });
+                return;
+            }
+            throw nerr;
+        }
+        var rv;
+        try {
+            rv = handler(params || {}, ctx);
+        } catch (e) {
+            if (typeof callback === 'function') {
+                Promise.resolve().then(function() { callback(e); });
+                return;
+            }
+            throw e;
+        }
+        // Handler may return a Promise; resolve before invoking cb.
+        if (rv && typeof rv.then === 'function') {
+            rv.then(
+                function(value) { if (typeof callback === 'function') callback(null, value); },
+                function(err) { if (typeof callback === 'function') callback(err); }
+            );
+        } else if (typeof callback === 'function') {
+            Promise.resolve().then(function() { callback(null, rv); });
+        }
+    };
+
+    // ---- WebSocket-side dispatch (host integration) -------------
+    //
+    // The host pumps `{kind:"inspector-cmd"}` daemon-event envelopes
+    // here when an external CDP client sends a frame. We dispatch
+    // through the same `methods` table and reply via __host_inspector_send.
+
+    function _dispatchExternal(sessionKey, id, method, params) {
+        var ctx = {
+            notify: function(notifMethod, notifParams) {
+                _hostSend(sessionKey, {
+                    method: notifMethod,
+                    params: notifParams,
+                });
+            },
+        };
+        var handler = methods[method];
+        if (!handler) {
+            _hostSend(sessionKey, {
+                id: id,
+                error: { code: -32601, message: "Method not found: " + method },
+            });
             return;
         }
-        throw err;
-    };
+        var rv;
+        try { rv = handler(params || {}, ctx); }
+        catch (e) {
+            _hostSend(sessionKey, {
+                id: id,
+                error: {
+                    code: -32000,
+                    message: (e && e.message) || String(e),
+                },
+            });
+            return;
+        }
+        var send = function(result) {
+            _hostSend(sessionKey, { id: id, result: result || {} });
+        };
+        if (rv && typeof rv.then === 'function') {
+            rv.then(send, function(e) {
+                _hostSend(sessionKey, {
+                    id: id,
+                    error: {
+                        code: -32000,
+                        message: (e && e.message) || String(e),
+                    },
+                });
+            });
+        } else {
+            send(rv);
+        }
+    }
+
+    function _hostSend(sessionKey, msg) {
+        if (typeof globalThis.__host_inspector_send !== 'function') return;
+        try {
+            globalThis.__host_inspector_send(sessionKey, JSON.stringify(msg));
+        } catch (_) {}
+    }
+
+    // Surface the dispatcher so the daemon-event handler can call us.
+    globalThis.__ab_inspector_dispatch = _dispatchExternal;
+
+    // ---- inspector.open / close / url ---------------------------
+
+    function open(port, host /*, wait */) {
+        if (typeof port === 'number') _port = port;
+        if (typeof host === 'string') _host = host;
+        if (typeof globalThis.__host_inspector_open !== 'function') {
+            // No daemon — keep the surface working but mark closed.
+            // Calls to Session.post still work in-process.
+            _opened = false;
+            _wsPath = null;
+            return;
+        }
+        var rc = globalThis.__host_inspector_open(_port);
+        if (rc < 0) {
+            var err = new Error('inspector.open: failed (rc=' + rc + ')');
+            err.code = 'ERR_INSPECTOR_NOT_AVAILABLE';
+            throw err;
+        }
+        _opened = true;
+        // The host returns the actual bound port (rc > 0). Use it
+        // — port=0 is a valid request to bind ephemeral.
+        if (rc > 0 && rc < 65536) _port = rc;
+        _wsPath = '/devtools/page/burn-' + _port;
+    }
+
+    function close() {
+        if (typeof globalThis.__host_inspector_close === 'function') {
+            try { globalThis.__host_inspector_close(); } catch (_) {}
+        }
+        _opened = false;
+        _wsPath = null;
+    }
+
+    function url() {
+        if (!_opened) return undefined;
+        return 'ws://' + _host + ':' + _port + _wsPath;
+    }
+
+    function waitForDebugger() {
+        // Real Node blocks until Debugger.enable + runIfWaitingForDebugger
+        // arrives. The sandboxed model never receives one in offline
+        // mode; we surface this as a no-op so callers don't deadlock.
+        // External CDP clients that connect via inspector.open() can
+        // call Runtime.runIfWaitingForDebugger via the WebSocket which
+        // will resolve any pending session.
+    }
 
     exports.open = open;
     exports.close = close;
@@ -7961,8 +9039,6 @@ __register_module('inspector', function(module, exports, require) {
     exports.console = globalThis.console || { log: function() {} };
     exports.Session = Session;
     exports.Network = {
-        // Node 20 added a `Network` namespace on inspector for
-        // request tracing. Stub the surface so callers don't crash.
         requestWillBeSent: function() {},
         responseReceived: function() {},
         loadingFinished: function() {},
@@ -16825,6 +17901,44 @@ __register_module('vm', function(module, exports, require) {
         get: function() { return this._dependencySpecifiers.slice(); },
     });
 
+    /// Build a live-binding namespace proxy whose property reads
+    /// forward to `dep._namespace` at access time. With cyclic graphs
+    /// the dep's namespace fills in as evaluation walks the SCC, so
+    /// late-bound reads (inside function bodies that fire after the
+    /// cycle finishes evaluating) see the post-evaluate values.
+    /// Plain (non-Module) deps fall back to snapshot semantics —
+    /// nothing to track over time.
+    function _liveNamespace(dep) {
+        if (!(dep instanceof ABSTRACT_MODULE_BASE)) {
+            return dep;
+        }
+        return new Proxy(Object.create(null), {
+            get: function(_target, key) {
+                var ns = dep._namespace;
+                if (ns == null) return undefined;
+                return ns[key];
+            },
+            has: function(_target, key) {
+                var ns = dep._namespace;
+                return !!ns && (key in ns);
+            },
+            ownKeys: function() {
+                var ns = dep._namespace;
+                return ns ? Object.keys(ns) : [];
+            },
+            getOwnPropertyDescriptor: function(_t, key) {
+                var ns = dep._namespace;
+                if (!ns || !(key in ns)) return undefined;
+                return {
+                    enumerable: true,
+                    configurable: true,
+                    writable: false,
+                    value: ns[key],
+                };
+            },
+        });
+    }
+
     SourceTextModule.prototype.link = function(linker) {
         var self = this;
         if (typeof linker !== 'function') {
@@ -16834,12 +17948,34 @@ __register_module('vm', function(module, exports, require) {
             return Promise.reject(new Error(
                 'Module status is ' + self._status + ', expected unlinked'));
         }
+        return self._linkInternal(linker, /*visited=*/ Object.create(null));
+    };
+
+    /// Worker that walks the dependency graph with cycle detection.
+    /// `visited` is a per-link-call identity map — keyed by module
+    /// identifier — that records every module we've already entered.
+    /// When the linker resolves a spec to a module already in
+    /// `visited`, we skip the recursive `link()` call (the back-edge
+    /// is satisfied) and stash a live-binding namespace proxy so
+    /// post-evaluate reads still see the populated exports.
+    SourceTextModule.prototype._linkInternal = function(linker, visited) {
+        var self = this;
+        if (visited[self.identifier]) {
+            // Already entered through another path — the caller's
+            // ancestor will finish linking us.
+            return Promise.resolve();
+        }
+        visited[self.identifier] = true;
         self._status = 'linking';
+        // Pre-allocate the namespace placeholder so live-binding
+        // proxies built for back-edges have a stable target. The
+        // exports populate during evaluate().
+        if (self._namespace == null) self._namespace = Object.create(null);
+
         var specs = self._dependencySpecifiers.slice();
         var i = 0;
         function next() {
             if (i >= specs.length) {
-                self._namespace = Object.create(null);
                 self._status = 'linked';
                 return undefined;
             }
@@ -16850,17 +17986,13 @@ __register_module('vm', function(module, exports, require) {
                         throw new Error('linker returned null for ' + spec);
                     }
                     self._deps[spec] = dep;
-                    // If the resolved dep is itself a Module, link it
-                    // recursively when not already linked.
-                    if (dep instanceof ABSTRACT_MODULE_BASE && dep._status === 'unlinked') {
-                        return Promise.resolve(dep.link(linker)).then(function() {
-                            self._depNamespaces[spec] = dep.namespace || dep;
-                            return next();
-                        });
+                    self._depNamespaces[spec] = _liveNamespace(dep);
+                    if (dep instanceof ABSTRACT_MODULE_BASE
+                        && dep._status === 'unlinked'
+                        && !visited[dep.identifier]) {
+                        return Promise.resolve(dep._linkInternal(linker, visited))
+                            .then(next);
                     }
-                    self._depNamespaces[spec] = (dep instanceof ABSTRACT_MODULE_BASE)
-                        ? dep.namespace
-                        : dep;
                     return next();
                 });
         }
@@ -16868,17 +18000,37 @@ __register_module('vm', function(module, exports, require) {
     };
 
     SourceTextModule.prototype.evaluate = function(_options) {
+        return this._evaluateInternal(/*visited=*/ Object.create(null));
+    };
+
+    /// Cycle-aware evaluator. `visited` is shared across recursive
+    /// `evaluate` walks so a back-edge (B depends on A while A is
+    /// `'evaluating'`) doesn't re-enter A's body. Cyclic deps see
+    /// each other through the live-binding proxy installed at link
+    /// time: their namespace property reads forward to whichever
+    /// module finishes its body first.
+    SourceTextModule.prototype._evaluateInternal = function(visited) {
         var self = this;
         if (self._status === 'evaluated') return Promise.resolve(undefined);
+        if (self._status === 'evaluating') {
+            // Back-edge in a cycle. The ancestor's evaluate() will
+            // complete our population once its own body returns.
+            return Promise.resolve(undefined);
+        }
         if (self._status !== 'linked') {
             return Promise.reject(new Error(
                 'Module status is ' + self._status + ', expected linked'));
         }
+        if (visited[self.identifier]) {
+            // Already in the recursion frame — same condition as the
+            // 'evaluating' check above but re-stated for graphs that
+            // mix link/evaluate calls non-monotonically.
+            return Promise.resolve(undefined);
+        }
+        visited[self.identifier] = true;
         self._status = 'evaluating';
         return new Promise(function(resolve, reject) {
             try {
-                // First, eagerly evaluate dependent SourceTextModules so
-                // their namespaces are populated before our body runs.
                 var depKeys = Object.keys(self._deps);
                 var i = 0;
                 function evalNext() {
@@ -16886,20 +18038,13 @@ __register_module('vm', function(module, exports, require) {
                     var dep = self._deps[depKeys[i++]];
                     if (dep instanceof ABSTRACT_MODULE_BASE
                         && dep._status === 'linked') {
-                        return dep.evaluate().then(function() {
-                            // Refresh the namespace after evaluate.
-                            self._depNamespaces[depKeys[i - 1]] = dep.namespace;
-                            return evalNext();
-                        });
-                    }
-                    if (dep instanceof ABSTRACT_MODULE_BASE) {
-                        self._depNamespaces[depKeys[i - 1]] = dep.namespace;
+                        return dep._evaluateInternal(visited).then(evalNext);
                     }
                     return evalNext();
                 }
                 function runBody() {
                     var body = _rewriteRequiresToDepMap(self._cjsBody);
-                    var moduleObj = { exports: Object.create(null) };
+                    var moduleObj = { exports: self._namespace || Object.create(null) };
                     var fn = new Function(
                         '__ab_stm_dep', 'module', 'exports', '__filename', '__dirname',
                         body
@@ -16908,7 +18053,13 @@ __register_module('vm', function(module, exports, require) {
                        '/__vm_module__/' + self.identifier + '.mjs',
                        '/__vm_module__');
                     var actualExports = moduleObj.exports;
-                    var ns = Object.create(null);
+                    // Reuse the namespace placeholder allocated at
+                    // link time so any live-binding Proxy already
+                    // pointing at it continues to resolve. The
+                    // namespace isn't frozen — cyclic deps may finish
+                    // populating their own exports after this body
+                    // returns.
+                    var ns = self._namespace;
                     if (actualExports && typeof actualExports === 'object') {
                         var keys = Object.keys(actualExports);
                         for (var j = 0; j < keys.length; j++) {
@@ -16920,8 +18071,6 @@ __register_module('vm', function(module, exports, require) {
                     } else if (actualExports !== undefined) {
                         ns['default'] = actualExports;
                     }
-                    Object.freeze(ns);
-                    self._namespace = ns;
                     self._status = 'evaluated';
                     resolve(undefined);
                 }
@@ -19675,13 +20824,88 @@ __register_module('wasi', function(module, exports, require) {
             },
             isLockFree: function(_size) { return true; },
             wait: function(_view, _idx, _value, _timeout) {
-                throw new TypeError('Atomics.wait: only supported on shared memory (burn is single-threaded)');
+                // Sync wait would block the event loop, which without
+                // engine-level support is a deadlock in our single-
+                // threaded realm. Atomics.waitAsync is the supported
+                // primitive — see below.
+                throw new TypeError(
+                    'Atomics.wait: not supported in burn — use Atomics.waitAsync'
+                );
             },
-            notify: function(_view, _idx, _count) { return 0; },
-            waitAsync: function(_view, _idx, _value, _timeout) {
-                return { async: true, value: Promise.resolve('not-equal') };
+            notify: function(view, idx, count) {
+                if (count === undefined || count === null) count = Infinity;
+                var key = _atomicsKey(view, idx);
+                var queue = _atomicsWaiters[key];
+                if (!queue || queue.length === 0) return 0;
+                var n = 0;
+                while (n < count && queue.length > 0) {
+                    var w = queue.shift();
+                    if (w._timer) {
+                        try { clearTimeout(w._timer); } catch (_) {}
+                    }
+                    if (!w._settled) {
+                        w._settled = true;
+                        w._resolve('ok');
+                    }
+                    n++;
+                }
+                if (queue.length === 0) delete _atomicsWaiters[key];
+                return n;
+            },
+            waitAsync: function(view, idx, value, timeout) {
+                // Spec: if the slot already differs from `value`, return
+                // synchronously with `not-equal`. Only enqueue the
+                // waiter when the slot still matches.
+                var actual = _ta(view)[idx];
+                if (actual !== value) {
+                    return { async: false, value: 'not-equal' };
+                }
+                var key = _atomicsKey(view, idx);
+                var waiter = { _settled: false, _resolve: null, _timer: null };
+                var p = new Promise(function(resolve) { waiter._resolve = resolve; });
+                if (!_atomicsWaiters[key]) _atomicsWaiters[key] = [];
+                _atomicsWaiters[key].push(waiter);
+                if (typeof timeout === 'number' && timeout >= 0 && isFinite(timeout)) {
+                    waiter._timer = setTimeout(function() {
+                        if (waiter._settled) return;
+                        var queue = _atomicsWaiters[key];
+                        if (queue) {
+                            var i = queue.indexOf(waiter);
+                            if (i >= 0) queue.splice(i, 1);
+                            if (queue.length === 0) delete _atomicsWaiters[key];
+                        }
+                        waiter._settled = true;
+                        waiter._resolve('timed-out');
+                    }, timeout);
+                }
+                return { async: true, value: p };
             },
         };
+
+        // Per-(buffer, byte-offset) waiter queue. Keyed by the
+        // underlying ArrayBuffer's identity (via WeakMap-assigned id)
+        // joined with the byte offset of the view slot. Multiple
+        // typed-array views over the same buffer with the same idx
+        // map to the same key so a `notify(view2, idx)` wakes a
+        // `waitAsync(view1, idx)` provided their offsets coincide
+        // — that's exactly Atomics' wire contract.
+        var _atomicsWaiters = Object.create(null);
+        var _atomicsBufId = new WeakMap();
+        var _atomicsNextBufId = 1;
+        function _atomicsKey(view, idx) {
+            var buf = view.buffer;
+            var bufId = _atomicsBufId.get(buf);
+            if (bufId === undefined) {
+                bufId = _atomicsNextBufId++;
+                _atomicsBufId.set(buf, bufId);
+            }
+            // Byte-offset normalises across views of different
+            // element widths (Int32Array, BigInt64Array) so callers
+            // synchronising via different views over the same buffer
+            // see each other's waiters.
+            var byteIdx = (view.byteOffset | 0) + (idx | 0) * view.BYTES_PER_ELEMENT;
+            return bufId + ':' + byteIdx;
+        }
     }
 
     // ---- Uint8Array base64 / hex (Stage 3 / Node 22+) -------------

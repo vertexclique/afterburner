@@ -369,6 +369,25 @@ function __plenum_install_http(moduleName) {
                     queueMicrotask(function() { cb(); });
                 }
                 server.emit('listening');
+
+                // Cluster-worker hook: forward the listening address to
+                // the primary so `cluster.on('listening', ...)` fires
+                // on the primary side. No-op in non-cluster mode and
+                // in the primary itself.
+                try {
+                    var _cluster = globalThis.__ab_require_cached_cluster;
+                    if (typeof _cluster === 'undefined') {
+                        _cluster = require('cluster');
+                        globalThis.__ab_require_cached_cluster = _cluster;
+                    }
+                    if (_cluster && _cluster.isWorker && typeof _cluster._signalListening === 'function') {
+                        _cluster._signalListening({
+                            address: '127.0.0.1',
+                            port: port,
+                            family: 'IPv4',
+                        });
+                    }
+                } catch (_) {}
                 return server;
             };
 

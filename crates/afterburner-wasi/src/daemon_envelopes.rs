@@ -114,6 +114,42 @@ pub fn worker_event_to_envelope(evt: &WorkerEvent) -> (serde_json::Value, Option
     }
 }
 
+/// Inspector / CDP event → JS envelope. The session lifecycle events
+/// (`SessionOpened`, `SessionClosed`) flow as `inspector-session-*`
+/// envelopes so the JS side can clean up per-session state when a
+/// WebSocket disconnects mid-stream. CDP frames themselves come in
+/// as `inspector-cmd` with `id`, `method`, `params` parsed from the
+/// JSON-RPC payload — invalid frames are dropped on the host side.
+#[cfg(feature = "daemon")]
+pub fn inspector_event_to_envelope(
+    evt: &crate::daemon_inspector::InspectorEvent,
+) -> Option<serde_json::Value> {
+    use crate::daemon_inspector::InspectorEventKind;
+    match &evt.kind {
+        InspectorEventKind::SessionOpened => Some(serde_json::json!({
+            "kind": "inspector-session-opened",
+            "session_id": evt.session_id,
+        })),
+        InspectorEventKind::SessionClosed => Some(serde_json::json!({
+            "kind": "inspector-session-closed",
+            "session_id": evt.session_id,
+        })),
+        InspectorEventKind::Message(payload) => {
+            let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+            let id = v.get("id").and_then(|x| x.as_i64()).unwrap_or(0);
+            let method = v.get("method").and_then(|x| x.as_str())?.to_string();
+            let params = v.get("params").cloned().unwrap_or(serde_json::json!({}));
+            Some(serde_json::json!({
+                "kind": "inspector-cmd",
+                "session_id": evt.session_id,
+                "id": id,
+                "method": method,
+                "params": params,
+            }))
+        }
+    }
+}
+
 /// Raw-TCP `net` event → envelope. The `Some(conn_id)` second tuple
 /// is the conn_id to mark closed after JS has seen the event (only
 /// `Close`, the terminal lifecycle event).

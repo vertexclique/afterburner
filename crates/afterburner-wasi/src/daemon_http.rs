@@ -444,17 +444,25 @@ impl DaemonHttp {
             return LISTEN_ERR_ADDR_IN_USE;
         }
 
-        // We own the claim. Bind the real socket.
-        let bind_addr = format!("127.0.0.1:{port}");
-        let std_listener = match std::net::TcpListener::bind(&bind_addr) {
+        // We own the claim. Bind the real socket. When the process is
+        // a forked cluster worker (`BURN_CLUSTER_REUSEPORT=1`) the
+        // bind goes through the SO_REUSEPORT path so sibling worker
+        // subprocesses can co-bind the same port and the kernel
+        // 4-tuple-balances accept().
+        let bind_addr: std::net::SocketAddr = match format!("127.0.0.1:{port}").parse() {
+            Ok(a) => a,
+            Err(_) => {
+                self.ports_in_use.remove(&port);
+                return LISTEN_ERR_IO;
+            }
+        };
+        let std_listener = match crate::daemon_cluster::build_tcp_listener(bind_addr) {
             Ok(l) => l,
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                // External collision (some other OS process owns the port).
-                // Release our claim so subsequent retries can try again.
+            Err(crate::daemon_cluster::ClusterBindError::AddrInUse) => {
                 self.ports_in_use.remove(&port);
                 return LISTEN_ERR_ADDR_IN_USE;
             }
-            Err(_) => {
+            Err(crate::daemon_cluster::ClusterBindError::Io(_)) => {
                 self.ports_in_use.remove(&port);
                 return LISTEN_ERR_IO;
             }

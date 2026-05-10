@@ -34,6 +34,7 @@ daemon = [
     "dep:rustls-pemfile",
     "dep:webpki-roots",
     "dep:socket2",
+    "dep:futures-util",
 ]
 # HTTP/3 — opt-in. Pulls quinn + h3 + h3-quinn (~3 MB compile cost).
 # Includes daemon by transitive necessity (HTTP/3 builds on the same
@@ -93,6 +94,7 @@ tokio-rustls = { workspace = true, optional = true }
 rustls-pemfile = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
 socket2 = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true }
 h3 = { workspace = true, optional = true }
 h3-quinn = { workspace = true, optional = true }

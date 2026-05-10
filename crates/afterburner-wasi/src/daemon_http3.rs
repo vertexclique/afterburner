@@ -94,15 +94,42 @@ pub fn bind_h3_listener(
     };
 
     let _enter = runtime.enter();
-    let endpoint = match quinn::Endpoint::server(server_config, bind_addr) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            daemon.release_h3_port(port);
-            return LISTEN_ERR_ADDR_IN_USE;
+    // When the process is a forked cluster worker, switch to a
+    // SO_REUSEPORT-bound UDP socket so sibling H3 listeners on the
+    // same port co-bind successfully.
+    let endpoint = if crate::daemon_cluster::cluster_mode_enabled() {
+        let udp = match crate::daemon_cluster::build_udp_socket(bind_addr) {
+            Ok(s) => s,
+            Err(crate::daemon_cluster::ClusterBindError::AddrInUse) => {
+                daemon.release_h3_port(port);
+                return LISTEN_ERR_ADDR_IN_USE;
+            }
+            Err(crate::daemon_cluster::ClusterBindError::Io(_)) => {
+                daemon.release_h3_port(port);
+                return LISTEN_ERR_IO;
+            }
+        };
+        let runtime_handle = quinn::default_runtime()
+            .expect("tokio runtime present");
+        let endpoint_config = quinn::EndpointConfig::default();
+        match quinn::Endpoint::new(endpoint_config, Some(server_config), udp, runtime_handle) {
+            Ok(e) => e,
+            Err(_) => {
+                daemon.release_h3_port(port);
+                return LISTEN_ERR_IO;
+            }
         }
-        Err(_) => {
-            daemon.release_h3_port(port);
-            return LISTEN_ERR_IO;
+    } else {
+        match quinn::Endpoint::server(server_config, bind_addr) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                daemon.release_h3_port(port);
+                return LISTEN_ERR_ADDR_IN_USE;
+            }
+            Err(_) => {
+                daemon.release_h3_port(port);
+                return LISTEN_ERR_IO;
+            }
         }
     };
 
