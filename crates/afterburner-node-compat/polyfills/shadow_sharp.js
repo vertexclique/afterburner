@@ -393,9 +393,18 @@ __register_module('sharp', function(module, exports, require) {
     };
 
     Sharp.prototype.stats = function() {
-        // Sharp's `.stats()` returns per-channel min/max/sum/etc.
-        // Defer until users ask — most pipelines don't need it.
-        return Promise.reject(notImplementedAsError('stats'));
+        var self = this;
+        return new Promise(function(resolve, reject) {
+            try {
+                var fn = ensureHost('__host_shadow_sharp_stats');
+                var raw = fn(JSON.stringify({
+                    kind: self._source.kind,
+                    data_b64: self._source.data_b64,
+                }));
+                if (isHostErr(raw)) { reject(hostErrToError(raw)); return; }
+                resolve(JSON.parse(raw));
+            } catch (e) { reject(e); }
+        });
     };
 
     function notImplementedAsError(name) {

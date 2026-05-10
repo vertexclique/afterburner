@@ -84,6 +84,7 @@ __register_module('tls', function(module, exports, require) {
         this._closeEmitted = false;
         this._readable = true;
         this._writable = true;
+        this._encoding = null;        // null = emit Buffer; set via setEncoding
         this._wantsDrain = false;
         this._pendingHWM = 64 * 1024;
         this.bytesRead = 0;
@@ -146,7 +147,10 @@ __register_module('tls', function(module, exports, require) {
         try { bytes = Buffer.from(payloadB64, 'base64'); }
         catch (_) { return; }
         this.bytesRead += bytes.length;
-        try { this.emit('data', bytes); } catch (_) {}
+        // Honour `setEncoding`: emit decoded string when an encoding is
+        // configured; Buffer otherwise.
+        var chunk = this._encoding ? bytes.toString(this._encoding) : bytes;
+        try { this.emit('data', chunk); } catch (_) {}
     };
 
     TLSSocket.prototype._dispatchEnd = function() {
@@ -299,8 +303,14 @@ __register_module('tls', function(module, exports, require) {
     TLSSocket.prototype.resume = function() { return this; };
     TLSSocket.prototype.ref = function() { return this; };
     TLSSocket.prototype.unref = function() { return this; };
-    TLSSocket.prototype.setEncoding = function() {
-        throw new Error('tls.TLSSocket.setEncoding is not supported in burn yet (decode bytes manually)');
+    TLSSocket.prototype.setEncoding = function(encoding) {
+        if (encoding == null) {
+            this._encoding = null;
+            return this;
+        }
+        Buffer.from('').toString(encoding);
+        this._encoding = encoding;
+        return this;
     };
 
     TLSSocket.prototype.address = function() {

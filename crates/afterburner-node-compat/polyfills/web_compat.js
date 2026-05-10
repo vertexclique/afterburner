@@ -2877,6 +2877,22 @@
         });
     }
 
+    // ---- Promise.try (Stage 3, Node 22+) ----------------------------
+    // Run a sync callback, wrap return / throw into a Promise. Lets
+    // callers fold sync-or-async producers into one Promise chain
+    // without an extra `try / catch` ceremony.
+    if (typeof Promise.try !== 'function') {
+        Object.defineProperty(Promise, 'try', {
+            value: function tryFn(fn /*, ...args */) {
+                var args = Array.prototype.slice.call(arguments, 1);
+                return new this(function(resolve) {
+                    resolve(typeof fn === 'function' ? fn.apply(undefined, args) : fn);
+                });
+            },
+            writable: true, configurable: true,
+        });
+    }
+
     // ---- Object.groupBy / Map.groupBy (ES2024) ----------------------
     if (typeof Object.groupBy !== 'function') {
         Object.defineProperty(Object, 'groupBy', {

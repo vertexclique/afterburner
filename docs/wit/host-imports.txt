@@ -111,6 +111,7 @@ host_shadow_jwt_sign
 host_shadow_jwt_verify
 host_shadow_sharp_metadata
 host_shadow_sharp_run
+host_shadow_sharp_stats
 host_shadow_sqlite3_all
 host_shadow_sqlite3_close
 host_shadow_sqlite3_exec

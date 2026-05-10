@@ -893,6 +893,18 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
             }
         }),
     );
+    let _ = globals.set(
+        "__host_shadow_sharp_stats",
+        Func::from(|json: String| -> String {
+            let jb = json.as_bytes();
+            match call_read(|out, cap| unsafe {
+                host_shadow_sharp_stats(jb.as_ptr(), jb.len() as u32, out, cap)
+            }) {
+                Ok(s) => s,
+                Err(e) => alloc::format!("__HOST_ERR__:{e}"),
+            }
+        }),
+    );
 
     // ---- WebAssembly loader bridges ---------------------------------
     //

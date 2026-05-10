@@ -81,6 +81,7 @@ __register_module('net', function(module, exports, require) {
         this._closeEmitted = false;
         this._readable = true;
         this._writable = true;
+        this._encoding = null;       // null = emit Buffer; set via setEncoding
         this._wantsDrain = false;    // true after write() returned false
         this._pendingHWM = 64 * 1024;
         this.bytesRead = 0;
@@ -127,8 +128,6 @@ __register_module('net', function(module, exports, require) {
     Socket.prototype._dispatchData = function(payloadB64) {
         if (this._destroyed || !this._readable) return;
         this._resetTimeout();
-        // Default: emit Buffer. Callers needing strings can call
-        // .setEncoding (deferred — they can also decode themselves).
         var bytes;
         try {
             bytes = Buffer.from(payloadB64, 'base64');
@@ -136,7 +135,13 @@ __register_module('net', function(module, exports, require) {
             return;
         }
         this.bytesRead += bytes.length;
-        try { this.emit('data', bytes); } catch (_) {}
+        // Honour `setEncoding`: when an encoding has been set, decode
+        // the chunk before emitting and the 'data' listener gets a
+        // string. Otherwise pass the Buffer through.
+        var chunk = this._encoding
+            ? bytes.toString(this._encoding)
+            : bytes;
+        try { this.emit('data', chunk); } catch (_) {}
     };
 
     Socket.prototype._dispatchEnd = function() {
@@ -343,10 +348,18 @@ __register_module('net', function(module, exports, require) {
     Socket.prototype.resume = function() { return this; };
     Socket.prototype.ref = function() { return this; };
     Socket.prototype.unref = function() { return this; };
-    Socket.prototype.setEncoding = function() {
-        // Deferred: callers can decode bytes themselves from the
-        // Buffer instances we emit.
-        throw new Error('net.Socket.setEncoding is not supported in burn yet (decode bytes manually)');
+    Socket.prototype.setEncoding = function(encoding) {
+        // Buffer.toString validates the encoding name; preserving null
+        // / undefined to "reset to Buffer" matches Node's contract.
+        if (encoding == null) {
+            this._encoding = null;
+            return this;
+        }
+        // Sniff support up front so the first chunk doesn't surprise
+        // user code at runtime.
+        Buffer.from('').toString(encoding);
+        this._encoding = encoding;
+        return this;
     };
 
     Object.defineProperty(Socket.prototype, 'destroyed', {

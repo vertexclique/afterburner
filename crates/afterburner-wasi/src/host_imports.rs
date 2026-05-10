@@ -4840,6 +4840,43 @@ fn wrap_shadow_sharp(linker: &mut Linker<HostState>) -> Result<(), AfterburnerEr
         )
         .map_err(link_err)?;
 
+    linker
+        .func_wrap(
+            NS,
+            "host_shadow_sharp_stats",
+            #[allow(unused_variables)]
+            |mut caller: Caller<'_, HostState>,
+             json_ptr: i32,
+             json_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(json) = read_str(&memory, &caller, json_ptr, json_len) else {
+                    return E_OTHER;
+                };
+                #[cfg(feature = "shadow-sharp")]
+                {
+                    match afterburner_node_compat::shadows::sharp::stats(&json) {
+                        Ok(s) => write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes()),
+                        Err(e) => {
+                            caller.data_mut().last_error = e;
+                            E_OTHER
+                        }
+                    }
+                }
+                #[cfg(not(feature = "shadow-sharp"))]
+                {
+                    let _ = (json, out_ptr, out_cap);
+                    caller.data_mut().last_error = "shadow-sharp feature not enabled".into();
+                    E_OTHER
+                }
+            },
+        )
+        .map_err(link_err)?;
+
     Ok(())
 }
 

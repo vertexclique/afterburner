@@ -9385,6 +9385,7 @@ __register_module('net', function(module, exports, require) {
         this._closeEmitted = false;
         this._readable = true;
         this._writable = true;
+        this._encoding = null;       // null = emit Buffer; set via setEncoding
         this._wantsDrain = false;    // true after write() returned false
         this._pendingHWM = 64 * 1024;
         this.bytesRead = 0;
@@ -9431,8 +9432,6 @@ __register_module('net', function(module, exports, require) {
     Socket.prototype._dispatchData = function(payloadB64) {
         if (this._destroyed || !this._readable) return;
         this._resetTimeout();
-        // Default: emit Buffer. Callers needing strings can call
-        // .setEncoding (deferred — they can also decode themselves).
         var bytes;
         try {
             bytes = Buffer.from(payloadB64, 'base64');
@@ -9440,7 +9439,13 @@ __register_module('net', function(module, exports, require) {
             return;
         }
         this.bytesRead += bytes.length;
-        try { this.emit('data', bytes); } catch (_) {}
+        // Honour `setEncoding`: when an encoding has been set, decode
+        // the chunk before emitting and the 'data' listener gets a
+        // string. Otherwise pass the Buffer through.
+        var chunk = this._encoding
+            ? bytes.toString(this._encoding)
+            : bytes;
+        try { this.emit('data', chunk); } catch (_) {}
     };
 
     Socket.prototype._dispatchEnd = function() {
@@ -9647,10 +9652,18 @@ __register_module('net', function(module, exports, require) {
     Socket.prototype.resume = function() { return this; };
     Socket.prototype.ref = function() { return this; };
     Socket.prototype.unref = function() { return this; };
-    Socket.prototype.setEncoding = function() {
-        // Deferred: callers can decode bytes themselves from the
-        // Buffer instances we emit.
-        throw new Error('net.Socket.setEncoding is not supported in burn yet (decode bytes manually)');
+    Socket.prototype.setEncoding = function(encoding) {
+        // Buffer.toString validates the encoding name; preserving null
+        // / undefined to "reset to Buffer" matches Node's contract.
+        if (encoding == null) {
+            this._encoding = null;
+            return this;
+        }
+        // Sniff support up front so the first chunk doesn't surprise
+        // user code at runtime.
+        Buffer.from('').toString(encoding);
+        this._encoding = encoding;
+        return this;
     };
 
     Object.defineProperty(Socket.prototype, 'destroyed', {
@@ -13780,9 +13793,18 @@ __register_module('sharp', function(module, exports, require) {
     };
 
     Sharp.prototype.stats = function() {
-        // Sharp's `.stats()` returns per-channel min/max/sum/etc.
-        // Defer until users ask — most pipelines don't need it.
-        return Promise.reject(notImplementedAsError('stats'));
+        var self = this;
+        return new Promise(function(resolve, reject) {
+            try {
+                var fn = ensureHost('__host_shadow_sharp_stats');
+                var raw = fn(JSON.stringify({
+                    kind: self._source.kind,
+                    data_b64: self._source.data_b64,
+                }));
+                if (isHostErr(raw)) { reject(hostErrToError(raw)); return; }
+                resolve(JSON.parse(raw));
+            } catch (e) { reject(e); }
+        });
     };
 
     function notImplementedAsError(name) {
@@ -15560,6 +15582,7 @@ __register_module('tls', function(module, exports, require) {
         this._closeEmitted = false;
         this._readable = true;
         this._writable = true;
+        this._encoding = null;        // null = emit Buffer; set via setEncoding
         this._wantsDrain = false;
         this._pendingHWM = 64 * 1024;
         this.bytesRead = 0;
@@ -15622,7 +15645,10 @@ __register_module('tls', function(module, exports, require) {
         try { bytes = Buffer.from(payloadB64, 'base64'); }
         catch (_) { return; }
         this.bytesRead += bytes.length;
-        try { this.emit('data', bytes); } catch (_) {}
+        // Honour `setEncoding`: emit decoded string when an encoding is
+        // configured; Buffer otherwise.
+        var chunk = this._encoding ? bytes.toString(this._encoding) : bytes;
+        try { this.emit('data', chunk); } catch (_) {}
     };
 
     TLSSocket.prototype._dispatchEnd = function() {
@@ -15775,8 +15801,14 @@ __register_module('tls', function(module, exports, require) {
     TLSSocket.prototype.resume = function() { return this; };
     TLSSocket.prototype.ref = function() { return this; };
     TLSSocket.prototype.unref = function() { return this; };
-    TLSSocket.prototype.setEncoding = function() {
-        throw new Error('tls.TLSSocket.setEncoding is not supported in burn yet (decode bytes manually)');
+    TLSSocket.prototype.setEncoding = function(encoding) {
+        if (encoding == null) {
+            this._encoding = null;
+            return this;
+        }
+        Buffer.from('').toString(encoding);
+        this._encoding = encoding;
+        return this;
     };
 
     TLSSocket.prototype.address = function() {
@@ -21179,6 +21211,22 @@ __register_module('wasi', function(module, exports, require) {
                 var resolve, reject;
                 var promise = new this(function(res, rej) { resolve = res; reject = rej; });
                 return { promise: promise, resolve: resolve, reject: reject };
+            },
+            writable: true, configurable: true,
+        });
+    }
+
+    // ---- Promise.try (Stage 3, Node 22+) ----------------------------
+    // Run a sync callback, wrap return / throw into a Promise. Lets
+    // callers fold sync-or-async producers into one Promise chain
+    // without an extra `try / catch` ceremony.
+    if (typeof Promise.try !== 'function') {
+        Object.defineProperty(Promise, 'try', {
+            value: function tryFn(fn /*, ...args */) {
+                var args = Array.prototype.slice.call(arguments, 1);
+                return new this(function(resolve) {
+                    resolve(typeof fn === 'function' ? fn.apply(undefined, args) : fn);
+                });
             },
             writable: true, configurable: true,
         });

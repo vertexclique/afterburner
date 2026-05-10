@@ -193,6 +193,79 @@ pub fn metadata(source_json: &str) -> Result<String, String> {
     metadata_for_source(&source)
 }
 
+/// Compute per-channel statistics on the decoded image. Mirrors
+/// `sharp.stats()`: `{channels:[{min,max,sum,squaresSum,mean,stdev}], isOpaque, entropy, sharpness}`.
+/// Entropy + sharpness fields stay 0 — those require a full FFT /
+/// kernel pass that costs more than the rest of the metadata combined
+/// and are rarely consumed.
+pub fn stats(source_json: &str) -> Result<String, String> {
+    let s: serde_json::Value = serde_json::from_str(source_json)
+        .map_err(|e| format!("sharp.stats: bad source JSON: {e}"))?;
+    let source = parse_source(&s)?;
+    let bytes = match &source {
+        Source::Buffer(b) => b.clone(),
+        Source::File(p) => std::fs::read(p).map_err(|e| format!("sharp: read {p}: {e}"))?,
+    };
+    let img = image::load_from_memory(&bytes)
+        .map_err(|e| format!("sharp.stats: decode: {e}"))?;
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width() as u64, rgba.height() as u64);
+    let pixel_count = (w * h) as f64;
+    // Channels in RGBA order: R, G, B, A. We accumulate sum and
+    // sum-of-squares incrementally to compute mean + stdev without a
+    // second pass over the pixel array.
+    let mut sum = [0f64; 4];
+    let mut sq_sum = [0f64; 4];
+    let mut min_v = [255u8; 4];
+    let mut max_v = [0u8; 4];
+    let mut is_opaque = true;
+    for px in rgba.pixels() {
+        for c in 0..4 {
+            let v = px.0[c];
+            sum[c] += v as f64;
+            sq_sum[c] += (v as f64) * (v as f64);
+            if v < min_v[c] {
+                min_v[c] = v;
+            }
+            if v > max_v[c] {
+                max_v[c] = v;
+            }
+        }
+        if px.0[3] != 255 {
+            is_opaque = false;
+        }
+    }
+    let n = pixel_count.max(1.0);
+    let channels: Vec<serde_json::Value> = (0..4)
+        .map(|c| {
+            let mean = sum[c] / n;
+            // Variance via E[X^2] - E[X]^2; clamp to >= 0 for
+            // floating-point noise on a constant channel.
+            let var = (sq_sum[c] / n - mean * mean).max(0.0);
+            serde_json::json!({
+                "min": min_v[c],
+                "max": max_v[c],
+                "sum": sum[c],
+                "squaresSum": sq_sum[c],
+                "mean": mean,
+                "stdev": var.sqrt(),
+                "minX": 0,
+                "minY": 0,
+                "maxX": 0,
+                "maxY": 0,
+            })
+        })
+        .collect();
+    let v = serde_json::json!({
+        "channels": channels,
+        "isOpaque": is_opaque,
+        "entropy": 0.0,
+        "sharpness": 0.0,
+        "dominant": { "r": 0, "g": 0, "b": 0 },
+    });
+    serde_json::to_string(&v).map_err(|e| format!("sharp.stats: serialize: {e}"))
+}
+
 // ----- pipeline parsing --------------------------------------------------
 
 fn parse_pipeline(json: &str) -> Result<Pipeline, String> {

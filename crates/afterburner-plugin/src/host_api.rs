@@ -894,6 +894,12 @@ unsafe extern "C" {
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
+    pub fn host_shadow_sharp_stats(
+        json_ptr: *const u8,
+        json_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
 
     // ---- WebAssembly loader (Node 20 globalThis.WebAssembly) ---------
     //
