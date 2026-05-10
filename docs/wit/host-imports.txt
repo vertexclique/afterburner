@@ -82,6 +82,7 @@ host_http_request
 host_http_request_async
 host_inspector_close
 host_inspector_open
+host_inspector_pause
 host_inspector_send
 host_last_error
 host_net_close_server
@@ -152,12 +153,18 @@ host_wasm_call_export
 host_wasm_compile
 host_wasm_drop_instance
 host_wasm_drop_module
+host_wasm_global_get
+host_wasm_global_set
 host_wasm_instantiate
+host_wasm_memory_grow
 host_wasm_memory_read
 host_wasm_memory_size
 host_wasm_memory_write
 host_wasm_module_exports
 host_wasm_module_imports
+host_wasm_table_get
+host_wasm_table_grow
+host_wasm_table_size
 host_worker_data
 host_worker_is_main_thread
 host_worker_post_error_to_parent
@@ -171,6 +178,8 @@ host_worker_terminate
 host_worker_thread_id
 host_zlib_deflate_sync
 host_zlib_gunzip_sync
+host_zlib_brotli_compress_sync
+host_zlib_brotli_decompress_sync
 host_zlib_gzip_sync
 host_zlib_inflate_sync
 host_zlib_zstd_compress_sync

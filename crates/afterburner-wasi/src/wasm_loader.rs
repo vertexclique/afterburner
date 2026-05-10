@@ -364,6 +364,164 @@ impl WasmLoader {
             })?;
         Ok(mem.data(&state.store).len() as u64)
     }
+
+    /// Grow an *exported* memory by `delta_pages` (one page = 64 KiB).
+    /// Returns the previous size in pages, or -1 on failure (e.g. the
+    /// memory's `maximum` is exceeded). Same contract as the JS
+    /// `WebAssembly.Memory.prototype.grow` spec.
+    pub fn memory_grow(&self, instance_id: InstanceId, delta_pages: u32) -> Result<i64> {
+        let inst = self.instances.get(&instance_id).ok_or_else(|| {
+            AfterburnerError::Host(format!("WebAssembly: unknown instance {instance_id}"))
+        })?;
+        let mut state = inst.store.lock();
+        let mem = inst
+            .instance
+            .get_memory(&mut state.store, "memory")
+            .ok_or_else(|| {
+                AfterburnerError::Host("WebAssembly: instance does not export `memory`".into())
+            })?;
+        match mem.grow(&mut state.store, delta_pages as u64) {
+            Ok(prev) => Ok(prev as i64),
+            Err(_) => Ok(-1),
+        }
+    }
+
+    /// Read or grow an exported *global*. `set` returns `Ok(())` on
+    /// success, an error if the global is immutable or wrong type.
+    /// `get` returns the value as a [`WasmValue`].
+    pub fn global_get(
+        &self,
+        instance_id: InstanceId,
+        name: &str,
+    ) -> Result<WasmValue> {
+        let inst = self.instances.get(&instance_id).ok_or_else(|| {
+            AfterburnerError::Host(format!("WebAssembly: unknown instance {instance_id}"))
+        })?;
+        let mut state = inst.store.lock();
+        let g = inst
+            .instance
+            .get_global(&mut state.store, name)
+            .ok_or_else(|| {
+                AfterburnerError::Host(format!(
+                    "WebAssembly: instance does not export global `{name}`"
+                ))
+            })?;
+        let val = g.get(&mut state.store);
+        Ok(match val {
+            Val::I32(v) => WasmValue::I32(v),
+            Val::I64(v) => WasmValue::I64(v),
+            Val::F32(v) => WasmValue::F32(f32::from_bits(v)),
+            Val::F64(v) => WasmValue::F64(f64::from_bits(v)),
+            _ => {
+                return Err(AfterburnerError::Host(format!(
+                    "WebAssembly.Global: unsupported value type for `{name}`"
+                )));
+            }
+        })
+    }
+
+    pub fn global_set(
+        &self,
+        instance_id: InstanceId,
+        name: &str,
+        value: WasmValue,
+    ) -> Result<()> {
+        let inst = self.instances.get(&instance_id).ok_or_else(|| {
+            AfterburnerError::Host(format!("WebAssembly: unknown instance {instance_id}"))
+        })?;
+        let mut state = inst.store.lock();
+        let g = inst
+            .instance
+            .get_global(&mut state.store, name)
+            .ok_or_else(|| {
+                AfterburnerError::Host(format!(
+                    "WebAssembly: instance does not export global `{name}`"
+                ))
+            })?;
+        let ty = g.ty(&state.store).content().clone();
+        let coerced = value.coerce(&ty)?;
+        g.set(&mut state.store, coerced)
+            .map_err(|e| AfterburnerError::Host(format!("WebAssembly.Global.set: {e}")))
+    }
+
+    /// Table size (number of slots).
+    pub fn table_size(&self, instance_id: InstanceId, name: &str) -> Result<u32> {
+        let inst = self.instances.get(&instance_id).ok_or_else(|| {
+            AfterburnerError::Host(format!("WebAssembly: unknown instance {instance_id}"))
+        })?;
+        let mut state = inst.store.lock();
+        let t = inst
+            .instance
+            .get_table(&mut state.store, name)
+            .ok_or_else(|| {
+                AfterburnerError::Host(format!(
+                    "WebAssembly: instance does not export table `{name}`"
+                ))
+            })?;
+        Ok(t.size(&state.store) as u32)
+    }
+
+    /// Get a table slot as a JSON-encoded reference descriptor
+    /// (`{"kind":"funcref","null":true|false}` for funcref tables).
+    /// JS callers compare against the spec's `null` sentinel — we
+    /// don't yet expose the func itself.
+    pub fn table_get(
+        &self,
+        instance_id: InstanceId,
+        name: &str,
+        index: u32,
+    ) -> Result<String> {
+        let inst = self.instances.get(&instance_id).ok_or_else(|| {
+            AfterburnerError::Host(format!("WebAssembly: unknown instance {instance_id}"))
+        })?;
+        let mut state = inst.store.lock();
+        let t = inst
+            .instance
+            .get_table(&mut state.store, name)
+            .ok_or_else(|| {
+                AfterburnerError::Host(format!(
+                    "WebAssembly: instance does not export table `{name}`"
+                ))
+            })?;
+        let val = t.get(&mut state.store, index as u64).ok_or_else(|| {
+            AfterburnerError::Host(format!("WebAssembly.Table.get: index {index} out of bounds"))
+        })?;
+        let (kind, is_null) = match val {
+            wasmtime::Ref::Func(f) => ("funcref", f.is_none()),
+            wasmtime::Ref::Extern(e) => ("externref", e.is_none()),
+            _ => ("any", true),
+        };
+        Ok(serde_json::json!({"kind": kind, "null": is_null}).to_string())
+    }
+
+    /// Grow a table by `delta` slots, filling with null. Returns the
+    /// previous size, or -1 on failure (e.g. maximum exceeded).
+    pub fn table_grow(
+        &self,
+        instance_id: InstanceId,
+        name: &str,
+        delta: u32,
+    ) -> Result<i64> {
+        let inst = self.instances.get(&instance_id).ok_or_else(|| {
+            AfterburnerError::Host(format!("WebAssembly: unknown instance {instance_id}"))
+        })?;
+        let mut state = inst.store.lock();
+        let t = inst
+            .instance
+            .get_table(&mut state.store, name)
+            .ok_or_else(|| {
+                AfterburnerError::Host(format!(
+                    "WebAssembly: instance does not export table `{name}`"
+                ))
+            })?;
+        // Use a null func ref as the fill value — matches the JS spec
+        // default for `WebAssembly.Table.prototype.grow(delta)`.
+        let init = wasmtime::Ref::Func(None);
+        match t.grow(&mut state.store, delta as u64, init) {
+            Ok(prev) => Ok(prev as i64),
+            Err(_) => Ok(-1),
+        }
+    }
 }
 
 /// Cross-boundary value type. Polyfill encodes JS numbers /

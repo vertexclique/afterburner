@@ -56,9 +56,10 @@
 
 use oxc::allocator::Allocator;
 use oxc::ast::ast::{
-    BindingPattern, Declaration, ExportDefaultDeclarationKind, ImportDeclarationSpecifier,
-    ModuleExportName, Statement,
+    AwaitExpression, BindingPattern, Declaration, ExportDefaultDeclarationKind,
+    ImportDeclarationSpecifier, ModuleExportName, Statement,
 };
+use oxc::ast_visit::Visit;
 use oxc::parser::Parser;
 use oxc::semantic::SemanticBuilder;
 use oxc::span::{GetSpan, SourceType};
@@ -229,6 +230,57 @@ pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
                     replacement.clone(),
                 ));
             }
+        }
+    }
+
+    // Await-tracking pass — wrap every `await EXPR` so the value
+    // flows through user-patched `Promise.prototype.then` before the
+    // engine resumes. This is the only path that makes
+    // `async_hooks.createHook({init,before,after})` fire for native
+    // `await` expressions: QuickJS resolves async/await internally
+    // with no JS-visible hook, but the spliced `__ab_await_track`
+    // call routes the resolved value through one user-level `.then`
+    // first, which our patched prototype catches.
+    //
+    // The rewrite is span-surgical — two inserts per await — so it
+    // doesn't disturb the original expression text or its inner
+    // byte spans (which the live-binding pass may have already
+    // queued edits over).
+    {
+        let mut collector = AwaitSpanCollector::default();
+        collector.visit_program(&parsed.program);
+        for (arg_start, arg_end) in collector.spans {
+            edits.push((arg_start, arg_start, "__ab_await_track(".to_string()));
+            edits.push((arg_end, arg_end, ")".to_string()));
+        }
+    }
+
+    // Debugger statement-instrumentation pass — gated on
+    // `BURN_DEBUGGER_INSTRUMENT=1`. When enabled, every statement
+    // gets prefixed with `__ab_brk("<path>", line, col);`. The JS
+    // global `__ab_brk` checks the active breakpoint table (populated
+    // by `Debugger.setBreakpointByUrl`); when a hit matches the
+    // current location, it fires `Debugger.paused` and blocks via
+    // `__host_inspector_pause` until the connected DevTools client
+    // sends `Debugger.resume`/`stepX`. Off by default — the
+    // instrumented call has a fast path (`if (!breakpoints.length)
+    // return`) so its cost is one property read per statement, but
+    // keeping it gated keeps non-debug runs zero-cost.
+    if std::env::var("BURN_DEBUGGER_INSTRUMENT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        let path_lit = js_string_literal(&path.display().to_string());
+        let mut bcol = BreakpointCollector::default();
+        bcol.visit_program(&parsed.program);
+        for stmt_start in bcol.statement_starts {
+            let (line, col) = byte_to_line_col(source, stmt_start);
+            let probe = format!(
+                "__ab_brk({path_lit},{line},{col});",
+                line = line,
+                col = col
+            );
+            edits.push((stmt_start, stmt_start, probe));
         }
     }
 
@@ -644,6 +696,85 @@ fn starts_with(bytes: &[u8], at: usize, needle: &[u8]) -> bool {
 
 fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+/// AST visitor that collects byte spans of every `AwaitExpression`'s
+/// *argument*. Used by the await-tracking pass to wrap each awaited
+/// value in a `__ab_await_track(EXPR)` call so `async_hooks` Promise
+/// hooks fire across the engine's internal await resolution. The
+/// expression's outer span (including the `await` keyword) is
+/// untouched; we splice `__ab_await_track(` and `)` around the
+/// argument only.
+#[derive(Default)]
+struct AwaitSpanCollector {
+    spans: Vec<(usize, usize)>,
+}
+
+impl<'a> Visit<'a> for AwaitSpanCollector {
+    fn visit_await_expression(&mut self, expr: &AwaitExpression<'a>) {
+        let arg_span = expr.argument.span();
+        self.spans
+            .push((arg_span.start as usize, arg_span.end as usize));
+        // Descend into the argument — nested awaits in `await foo(await bar())`
+        // need their own wrap too.
+        oxc::ast_visit::walk::walk_await_expression(self, expr);
+    }
+}
+
+/// Collects byte offsets of every `Statement` start position so the
+/// Debugger instrumentation pass can insert `__ab_brk(...)` probes
+/// immediately before each. Triggered only when
+/// `BURN_DEBUGGER_INSTRUMENT=1`.
+#[derive(Default)]
+struct BreakpointCollector {
+    statement_starts: Vec<usize>,
+}
+
+impl<'a> Visit<'a> for BreakpointCollector {
+    fn visit_statement(&mut self, stmt: &Statement<'a>) {
+        // Skip declarations that introduce hoisted bindings —
+        // injecting code before a `function f()` declaration would
+        // separate the declaration from its scope-position semantics
+        // (V8 hoists the binding to the top of the function). The
+        // probe goes BEFORE the visible position of all *non-decl*
+        // statements: expression statements, if/for/while, return,
+        // try/catch, etc. Function declarations themselves don't
+        // need a hit point because they're hoisted; their bodies'
+        // statements get instrumented when the visitor descends.
+        match stmt {
+            Statement::FunctionDeclaration(_)
+            | Statement::ClassDeclaration(_)
+            | Statement::ImportDeclaration(_)
+            | Statement::ExportNamedDeclaration(_)
+            | Statement::ExportDefaultDeclaration(_)
+            | Statement::ExportAllDeclaration(_) => {}
+            _ => {
+                let span = stmt.span();
+                self.statement_starts.push(span.start as usize);
+            }
+        }
+        oxc::ast_visit::walk::walk_statement(self, stmt);
+    }
+}
+
+/// Convert a byte offset into (line, col) 1-based for the debugger
+/// surface. Walks the source from the start to count line breaks —
+/// O(N) per call; for instrumentation we sort the offsets and reuse
+/// a running scanner if needed, but for typical user scripts the
+/// per-statement cost is acceptable at transpile time.
+fn byte_to_line_col(source: &str, offset: usize) -> (u32, u32) {
+    let mut line: u32 = 1;
+    let mut last_nl: usize = 0;
+    let bytes = source.as_bytes();
+    let cap = offset.min(bytes.len());
+    for i in 0..cap {
+        if bytes[i] == b'\n' {
+            line += 1;
+            last_nl = i + 1;
+        }
+    }
+    let col = (cap - last_nl) as u32 + 1;
+    (line, col)
 }
 
 #[cfg(test)]

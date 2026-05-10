@@ -50,6 +50,9 @@ flate2.workspace = true
 # safe-Rust wrapper. Used by `zlib.zstdCompress*` / `zstdDecompress*`
 # host fns and the `compression`-stream `'zstd'` format.
 zstd = { version = "0.13", default-features = false }
+# Brotli codec — pure-Rust impl (no C dependency). Backs the
+# `zlib.brotliCompress*` / `brotliDecompress*` host fns.
+brotli.workspace = true
 kovan-channel.workspace = true
 # B7 dns expansion — hickory-resolver replaces ToSocketAddrs for
 # record-type-aware lookups (MX/TXT/CNAME/...). We run it

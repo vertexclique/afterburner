@@ -192,10 +192,13 @@
         return bytes.length;
     };
 
-    Memory.prototype.grow = function() {
-        // grow() returns the previous size in pages. Not exposed in
-        // v1; callers usually let WASM grow itself.
-        throw new Error('WebAssembly.Memory.grow is not supported in burn yet');
+    Memory.prototype.grow = function(deltaPages) {
+        var fn = ensureHost('__host_wasm_memory_grow');
+        var prev = fn(this._instanceId, deltaPages | 0);
+        if (prev < 0) {
+            throw new RangeError('WebAssembly.Memory.grow: maximum exceeded');
+        }
+        return prev;
     };
 
     // ---- Instance -------------------------------------------------
@@ -251,19 +254,107 @@
                     if (memoryExportName === null) memoryExportName = exp.name;
                     out[exp.name] = new Memory({ _instanceId: instanceId });
                 } else if (exp.kind === 'table') {
-                    out[exp.name] = {
-                        // v1: opaque table object — methods stub.
+                    var tName = exp.name;
+                    out[tName] = {
                         _kind: 'table',
-                        get: function() { throw new Error('WebAssembly.Table.get not supported in burn yet'); },
-                        set: function() { throw new Error('WebAssembly.Table.set not supported in burn yet'); },
-                        grow: function() { throw new Error('WebAssembly.Table.grow not supported in burn yet'); },
+                        _instanceId: instanceId,
+                        _name: tName,
+                        get length() {
+                            var fn = ensureHost('__host_wasm_table_size');
+                            return fn(instanceId, tName) | 0;
+                        },
+                        get: function(idx) {
+                            var fn = ensureHost('__host_wasm_table_get');
+                            var raw = fn(instanceId, tName, idx | 0);
+                            if (isHostErr(raw)) {
+                                throw new RangeError(raw.slice('__HOST_ERR__:'.length));
+                            }
+                            var v = JSON.parse(raw);
+                            // Spec: returns the referenced value, or
+                            // null for empty slots. Burn doesn't yet
+                            // expose Func/Extern object identities;
+                            // we surface null for nullable slots and
+                            // a sentinel object for non-null.
+                            if (v.null) return null;
+                            return { _kind: v.kind, _slot: idx | 0 };
+                        },
+                        set: function() {
+                            // Storing arbitrary Refs into a table
+                            // requires the engine to know the value
+                            // (e.g. a JS-imported function). Burn's
+                            // wasmtime store doesn't yet bridge that.
+                            throw new TypeError(
+                                'WebAssembly.Table.set: storing JS callbacks into a wasm Table '
+                                + 'requires JS→wasm callbacks; burn imports are export-only'
+                            );
+                        },
+                        grow: function(delta, initValue) {
+                            var fn = ensureHost('__host_wasm_table_grow');
+                            var prev = fn(instanceId, tName, delta | 0);
+                            if (prev < 0) {
+                                throw new RangeError('WebAssembly.Table.grow: maximum exceeded');
+                            }
+                            // initValue ignored — engine fills with null.
+                            var _ = initValue;
+                            return prev;
+                        },
                     };
                 } else if (exp.kind === 'global') {
-                    out[exp.name] = {
+                    var gName = exp.name;
+                    out[gName] = Object.defineProperty({
                         _kind: 'global',
-                        get value() { throw new Error('WebAssembly.Global.value not supported in burn yet'); },
-                        set value(_) { throw new Error('WebAssembly.Global.value not supported in burn yet'); },
-                    };
+                        _instanceId: instanceId,
+                        _name: gName,
+                    }, 'value', {
+                        get: function() {
+                            var fn = ensureHost('__host_wasm_global_get');
+                            var raw = fn(instanceId, gName);
+                            if (isHostErr(raw)) {
+                                throw new Error(raw.slice('__HOST_ERR__:'.length));
+                            }
+                            var v = JSON.parse(raw);
+                            if (v.type === 'i64') {
+                                // BigInt — match spec semantics.
+                                return BigInt(v.value);
+                            }
+                            return v.value;
+                        },
+                        set: function(newVal) {
+                            // Need to round-trip with a typed value
+                            // object. Burn defaults the param type
+                            // based on the JS value's shape: BigInt
+                            // → i64, Number with .0 fraction → f64,
+                            // integer → i32.
+                            var ty;
+                            var v;
+                            if (typeof newVal === 'bigint') {
+                                ty = 'i64';
+                                v = newVal.toString();
+                            } else if (typeof newVal === 'number') {
+                                if (Math.floor(newVal) === newVal && Math.abs(newVal) < 2**31) {
+                                    ty = 'i32';
+                                    v = newVal;
+                                } else {
+                                    ty = 'f64';
+                                    v = newVal;
+                                }
+                            } else {
+                                throw new TypeError(
+                                    'WebAssembly.Global.value: expected number or bigint'
+                                );
+                            }
+                            var fn = ensureHost('__host_wasm_global_set');
+                            var rc = fn(instanceId, gName, JSON.stringify({type: ty, value: v}));
+                            if (rc < 0) {
+                                throw new Error(
+                                    (typeof globalThis.__host_last_error === 'function'
+                                        ? globalThis.__host_last_error()
+                                        : 'global set failed')
+                                );
+                            }
+                        },
+                        enumerable: true,
+                    });
                 }
             })(exp);
         }

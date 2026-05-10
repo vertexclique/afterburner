@@ -341,6 +341,9 @@ fn wrap_inspector(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError
             |_caller: Caller<'_, HostState>, _sid: i32, _ptr: i32, _len: i32| -> i32 { -1 },
         )
         .map_err(link_err)?;
+    linker
+        .func_wrap(NS, "host_inspector_pause", |_caller: Caller<'_, HostState>| -> i32 { -1 })
+        .map_err(link_err)?;
     Ok(())
 }
 
@@ -403,6 +406,24 @@ fn wrap_inspector(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError
                 if let Some(i) = caller.data().daemon_inspector.clone() {
                     i.send(session_id, payload);
                     0
+                } else {
+                    -1
+                }
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_inspector_pause",
+            |caller: Caller<'_, HostState>| -> i32 {
+                if let Some(i) = caller.data().daemon_inspector.clone() {
+                    // Blocks the wasmtime instance until the WS reader
+                    // intercepts a Debugger.resume / stepX message
+                    // and signals the pause channel. Returns the
+                    // step-kind code so the JS side can react
+                    // (resume / step-over / step-into / step-out).
+                    i.pause_block()
                 } else {
                     -1
                 }
@@ -2711,6 +2732,8 @@ fn wrap_zlib(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         ("host_zlib_gunzip_sync", ZlibOp::Gunzip),
         ("host_zlib_zstd_compress_sync", ZlibOp::ZstdCompress),
         ("host_zlib_zstd_decompress_sync", ZlibOp::ZstdDecompress),
+        ("host_zlib_brotli_compress_sync", ZlibOp::BrotliCompress),
+        ("host_zlib_brotli_decompress_sync", ZlibOp::BrotliDecompress),
     ] {
         linker
             .func_wrap(
@@ -2745,6 +2768,8 @@ fn wrap_zlib(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                         ZlibOp::Gunzip => zlib_host::gunzip_sync(&input),
                         ZlibOp::ZstdCompress => zlib_host::zstd_compress_sync(&input),
                         ZlibOp::ZstdDecompress => zlib_host::zstd_decompress_sync(&input),
+                        ZlibOp::BrotliCompress => zlib_host::brotli_compress_sync(&input),
+                        ZlibOp::BrotliDecompress => zlib_host::brotli_decompress_sync(&input),
                     };
                     match result {
                         Ok(bytes) => {
@@ -2768,6 +2793,8 @@ enum ZlibOp {
     Gunzip,
     ZstdCompress,
     ZstdDecompress,
+    BrotliCompress,
+    BrotliDecompress,
 }
 
 // ---- host context (embedder-facing) --------------------------------------
@@ -5406,6 +5433,233 @@ fn wrap_wasm_loader(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
                 let loader = caller.data().wasm_loader.clone();
                 match loader.memory_size(instance_id as u64) {
                     Ok(n) => n as i64,
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_memory_grow",
+            |mut caller: Caller<'_, HostState>,
+             instance_id: i64,
+             delta_pages: i32|
+             -> i64 {
+                if delta_pages < 0 {
+                    return -1;
+                }
+                let loader = caller.data().wasm_loader.clone();
+                match loader.memory_grow(instance_id as u64, delta_pages as u32) {
+                    Ok(prev) => prev,
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_global_get",
+            |mut caller: Caller<'_, HostState>,
+             instance_id: i64,
+             name_ptr: i32,
+             name_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(name) = read_str(&memory, &caller, name_ptr, name_len) else {
+                    return E_OTHER;
+                };
+                let loader = caller.data().wasm_loader.clone();
+                match loader.global_get(instance_id as u64, &name) {
+                    Ok(v) => {
+                        let json = match v {
+                            crate::wasm_loader::WasmValue::I32(n) => {
+                                serde_json::json!({"type": "i32", "value": n})
+                            }
+                            crate::wasm_loader::WasmValue::I64(n) => {
+                                serde_json::json!({"type": "i64", "value": n.to_string()})
+                            }
+                            crate::wasm_loader::WasmValue::F32(f) => {
+                                serde_json::json!({"type": "f32", "value": f})
+                            }
+                            crate::wasm_loader::WasmValue::F64(f) => {
+                                serde_json::json!({"type": "f64", "value": f})
+                            }
+                        };
+                        let s = json.to_string();
+                        write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes())
+                    }
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        E_OTHER
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_global_set",
+            |mut caller: Caller<'_, HostState>,
+             instance_id: i64,
+             name_ptr: i32,
+             name_len: i32,
+             value_ptr: i32,
+             value_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(name) = read_str(&memory, &caller, name_ptr, name_len) else {
+                    return E_OTHER;
+                };
+                let Some(value_json) = read_str(&memory, &caller, value_ptr, value_len) else {
+                    return E_OTHER;
+                };
+                let parsed: serde_json::Value = match serde_json::from_str(&value_json) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        return E_OTHER;
+                    }
+                };
+                let value = match parsed.get("type").and_then(|t| t.as_str()) {
+                    Some("i32") => {
+                        crate::wasm_loader::WasmValue::I32(
+                            parsed.get("value").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                        )
+                    }
+                    Some("i64") => {
+                        let s = parsed
+                            .get("value")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("0");
+                        crate::wasm_loader::WasmValue::I64(s.parse::<i64>().unwrap_or(0))
+                    }
+                    Some("f32") => crate::wasm_loader::WasmValue::F32(
+                        parsed
+                            .get("value")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0) as f32,
+                    ),
+                    Some("f64") => crate::wasm_loader::WasmValue::F64(
+                        parsed.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    ),
+                    _ => {
+                        caller.data_mut().last_error =
+                            "WebAssembly.Global.set: unknown type".into();
+                        return E_OTHER;
+                    }
+                };
+                let loader = caller.data().wasm_loader.clone();
+                match loader.global_set(instance_id as u64, &name, value) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        E_OTHER
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_table_size",
+            |mut caller: Caller<'_, HostState>,
+             instance_id: i64,
+             name_ptr: i32,
+             name_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(name) = read_str(&memory, &caller, name_ptr, name_len) else {
+                    return E_OTHER;
+                };
+                let loader = caller.data().wasm_loader.clone();
+                match loader.table_size(instance_id as u64, &name) {
+                    Ok(n) => n as i32,
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        E_OTHER
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_table_get",
+            |mut caller: Caller<'_, HostState>,
+             instance_id: i64,
+             name_ptr: i32,
+             name_len: i32,
+             index: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(name) = read_str(&memory, &caller, name_ptr, name_len) else {
+                    return E_OTHER;
+                };
+                if index < 0 {
+                    return E_OTHER;
+                }
+                let loader = caller.data().wasm_loader.clone();
+                match loader.table_get(instance_id as u64, &name, index as u32) {
+                    Ok(s) => write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes()),
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        E_OTHER
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_table_grow",
+            |mut caller: Caller<'_, HostState>,
+             instance_id: i64,
+             name_ptr: i32,
+             name_len: i32,
+             delta: i32|
+             -> i64 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return -1;
+                };
+                let Some(name) = read_str(&memory, &caller, name_ptr, name_len) else {
+                    return -1;
+                };
+                if delta < 0 {
+                    return -1;
+                }
+                let loader = caller.data().wasm_loader.clone();
+                match loader.table_grow(instance_id as u64, &name, delta as u32) {
+                    Ok(prev) => prev,
                     Err(e) => {
                         caller.data_mut().last_error = e.to_string();
                         -1

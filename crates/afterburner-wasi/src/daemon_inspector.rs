@@ -18,7 +18,7 @@
 use kovan_channel::flavors::bounded::{Receiver, Sender, channel};
 use kovan_map::HopscotchMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU16, Ordering};
 
 use axum::Router;
 use axum::extract::{State, WebSocketUpgrade};
@@ -65,6 +65,16 @@ struct InspectorInner {
     events_tx: Sender<InspectorEvent>,
     events_rx: Receiver<InspectorEvent>,
     bound_port: AtomicU16,
+    /// Active breakpoint pause channels. Keyed by pause_id. When a JS
+    /// breakpoint fires, the JS side calls `host_inspector_pause`
+    /// which inserts a (pause_id, Sender) here and blocks on the
+    /// matching Receiver. The WebSocket reader intercepts
+    /// `Debugger.resume`/`stepOver`/`stepInto`/`stepOut` messages on
+    /// the Rust side (not in JS) and signals the Sender, unblocking
+    /// the paused wasmtime instance. Going through JS would deadlock
+    /// — the wasmtime instance is what's blocked.
+    pause_signals: HopscotchMap<i64, kovan_channel::flavors::bounded::Sender<i32>>,
+    next_pause_id: AtomicI64,
 }
 
 /// Public coordinator handle stored on `HostState::daemon_inspector`.
@@ -127,10 +137,51 @@ impl DaemonInspector {
                 events_tx: tx,
                 events_rx: rx,
                 bound_port: AtomicU16::new(0),
+                pause_signals: HopscotchMap::new(),
+                next_pause_id: AtomicI64::new(1),
             }),
             runtime,
             server_task: parking_lot_free::OnceCell::new(),
         })
+    }
+
+    /// Block the calling thread until any WS client sends a
+    /// `Debugger.resume`-class command. Used by `__host_inspector_pause`
+    /// when a breakpoint fires. Returns 0 for resume, 1 for stepOver,
+    /// 2 for stepInto, 3 for stepOut — so the JS side can react
+    /// differently to stepping commands. If no inspector listener
+    /// is open or no client is connected, returns -1 immediately so
+    /// the JS side doesn't deadlock forever waiting for nothing.
+    pub fn pause_block(&self) -> i32 {
+        if self.bound_port() == 0 || self.inner.sessions.iter().next().is_none() {
+            return -1;
+        }
+        let (tx, rx) = kovan_channel::bounded::<i32>(1);
+        let pause_id = self.inner.next_pause_id.fetch_add(1, Ordering::Relaxed);
+        self.inner.pause_signals.insert(pause_id, tx);
+        // Block this thread until the WS reader signals via send().
+        // kovan_channel's recv is blocking by default; the wasmtime
+        // instance pauses here while the daemon's other tasks
+        // (including the inspector listener) continue.
+        let code = rx.recv().unwrap_or(-1);
+        self.inner.pause_signals.remove(&pause_id);
+        code
+    }
+
+    /// Drain any pending pause signals — used on listener teardown so
+    /// the JS side doesn't stay blocked when the inspector closes.
+    fn release_all_pauses(&self) {
+        let ids: Vec<i64> = self
+            .inner
+            .pause_signals
+            .iter()
+            .map(|(id, _)| id)
+            .collect();
+        for id in ids {
+            if let Some(tx) = self.inner.pause_signals.remove(&id) {
+                let _ = tx.send(-1);
+            }
+        }
     }
 
     pub fn try_recv_event(&self) -> Option<InspectorEvent> {
@@ -210,6 +261,9 @@ impl DaemonInspector {
             self.inner.sessions.remove(&id);
         }
         self.inner.bound_port.store(0, Ordering::Release);
+        // Wake any paused JS instance with -1 so user code doesn't
+        // hang after the inspector listener closes.
+        self.release_all_pauses();
         0
     }
 }
@@ -309,6 +363,44 @@ async fn handle_ws(socket: WebSocket, inner: Arc<InspectorInner>) {
             Ok(Message::Close(_)) => break,
             Err(_) => break,
         };
+        // Intercept resume-class commands on the Rust side: when the
+        // JS instance is parked in `host_inspector_pause`, the WS
+        // event-loop can't route the resume through JS (the wasmtime
+        // store is busy). Wake the pause channel directly here.
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&bytes) {
+            if let Some(method) = v.get("method").and_then(|m| m.as_str()) {
+                let code = match method {
+                    "Debugger.resume" => Some(0),
+                    "Debugger.stepOver" => Some(1),
+                    "Debugger.stepInto" => Some(2),
+                    "Debugger.stepOut" => Some(3),
+                    _ => None,
+                };
+                if let Some(c) = code {
+                    let ids: Vec<i64> = inner
+                        .pause_signals
+                        .iter()
+                        .map(|(id, _)| id)
+                        .collect();
+                    for id in ids {
+                        if let Some(tx) = inner.pause_signals.remove(&id) {
+                            let _ = tx.send(c);
+                        }
+                    }
+                    // Send the spec ack so the client's pending id
+                    // resolves. The JS dispatcher also handles this
+                    // method but for the no-paused case its result
+                    // is identical (`{}`).
+                    if let Some(id) = v.get("id").and_then(|x| x.as_i64()) {
+                        let reply = serde_json::json!({"id": id, "result": {}}).to_string();
+                        if let Some(s) = inner.sessions.get(&session_id) {
+                            let _ = s.send(reply);
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
         let _ = inner.events_tx.send(InspectorEvent {
             session_id,
             kind: InspectorEventKind::Message(bytes),

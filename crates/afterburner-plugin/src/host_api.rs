@@ -333,6 +333,18 @@ unsafe extern "C" {
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
+    pub fn host_zlib_brotli_compress_sync(
+        in_ptr: *const u8,
+        in_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_zlib_brotli_decompress_sync(
+        in_ptr: *const u8,
+        in_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
 
     // ---- sign / verify (RSA + ECDSA) --------------------------------
     //
@@ -793,6 +805,12 @@ unsafe extern "C" {
         payload_ptr: *const u8,
         payload_len: u32,
     ) -> i32;
+    /// Block the JS shard until a connected WebSocket inspector
+    /// session sends `Debugger.resume`/`stepOver`/`stepInto`/`stepOut`.
+    /// Returns the step-kind code (0=resume, 1=stepOver, 2=stepInto,
+    /// 3=stepOut) or -1 when no listener / no client is connected
+    /// (so `__ab_brk` doesn't hang user code in non-debugger runs).
+    pub fn host_inspector_pause() -> i32;
     pub fn host_worker_post_message(
         worker_id: i32,
         payload_ptr: *const u8,
@@ -987,4 +1005,38 @@ unsafe extern "C" {
         b64_len: u32,
     ) -> i32;
     pub fn host_wasm_memory_size(instance_id: i64) -> i64;
+    pub fn host_wasm_memory_grow(instance_id: i64, delta_pages: i32) -> i64;
+    pub fn host_wasm_global_get(
+        instance_id: i64,
+        name_ptr: *const u8,
+        name_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_wasm_global_set(
+        instance_id: i64,
+        name_ptr: *const u8,
+        name_len: u32,
+        value_ptr: *const u8,
+        value_len: u32,
+    ) -> i32;
+    pub fn host_wasm_table_size(
+        instance_id: i64,
+        name_ptr: *const u8,
+        name_len: u32,
+    ) -> i32;
+    pub fn host_wasm_table_get(
+        instance_id: i64,
+        name_ptr: *const u8,
+        name_len: u32,
+        index: i32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_wasm_table_grow(
+        instance_id: i64,
+        name_ptr: *const u8,
+        name_len: u32,
+        delta: i32,
+    ) -> i64;
 }

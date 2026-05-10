@@ -337,6 +337,250 @@
         });
     }
 
+    // ---- Iterator Helpers (Stage 3 / Node 22+) ---------------------
+    //
+    // ES2025 Iterator Helpers extend the `Iterator` global with
+    // `from(iter)` static, plus `Iterator.prototype.{map, filter, take,
+    // drop, reduce, toArray, forEach, every, some, find, flatMap}`.
+    // We install the constructor if the engine doesn't ship one (QuickJS
+    // is the realistic case) and patch the prototype every time so
+    // older engine builds get the helpers too.
+    (function installIteratorHelpers() {
+        var IterCtor = globalThis.Iterator;
+        if (typeof IterCtor !== 'function') {
+            // Synthesize a prototype that any iterator object's
+            // `Symbol.iterator` chain can hang off. The Stage 3 spec
+            // uses `%IteratorPrototype%` — we materialise it from
+            // a generator's prototype (every iterator engine ships
+            // shares this object).
+            var genProto = Object.getPrototypeOf(
+                Object.getPrototypeOf((function*(){})())
+            );
+            IterCtor = function Iterator() {
+                throw new TypeError('Iterator: not constructable');
+            };
+            IterCtor.prototype = genProto;
+            try {
+                Object.defineProperty(globalThis, 'Iterator', {
+                    value: IterCtor, writable: true, configurable: true,
+                });
+            } catch (_) {}
+        }
+        var proto = IterCtor.prototype;
+        if (!proto) return;
+
+        function _wrap(generator) {
+            // Wrap a generator in a fresh iterator object whose
+            // prototype is the Iterator prototype so chained helpers
+            // resolve correctly.
+            var out = generator;
+            try { Object.setPrototypeOf(out, proto); } catch (_) {}
+            return out;
+        }
+
+        function _iterOf(value) {
+            // Accept iterators (return them as-is) and iterables
+            // (call Symbol.iterator). Matches the spec's
+            // `GetIteratorFlattenable`.
+            if (value == null) {
+                throw new TypeError('Iterator.from: argument is nullish');
+            }
+            if (typeof value.next === 'function') return value;
+            var it = value[Symbol.iterator];
+            if (typeof it === 'function') return it.call(value);
+            throw new TypeError('Iterator.from: argument is not iterable');
+        }
+
+        if (typeof IterCtor.from !== 'function') {
+            IterCtor.from = function from(iterable) {
+                var it = _iterOf(iterable);
+                return _wrap((function*() {
+                    var step = it.next();
+                    while (!step.done) { yield step.value; step = it.next(); }
+                })());
+            };
+        }
+
+        function define(name, fn) {
+            if (typeof proto[name] === 'function') return;
+            try {
+                Object.defineProperty(proto, name, {
+                    value: fn, writable: true, configurable: true,
+                });
+            } catch (_) {}
+        }
+
+        define('map', function map(mapper) {
+            if (typeof mapper !== 'function') {
+                throw new TypeError('Iterator.map: mapper must be a function');
+            }
+            var src = this;
+            return _wrap((function*() {
+                var i = 0;
+                var step = src.next();
+                while (!step.done) {
+                    yield mapper(step.value, i++);
+                    step = src.next();
+                }
+            })());
+        });
+
+        define('filter', function filter(pred) {
+            if (typeof pred !== 'function') {
+                throw new TypeError('Iterator.filter: predicate must be a function');
+            }
+            var src = this;
+            return _wrap((function*() {
+                var i = 0;
+                var step = src.next();
+                while (!step.done) {
+                    if (pred(step.value, i++)) yield step.value;
+                    step = src.next();
+                }
+            })());
+        });
+
+        define('take', function take(limit) {
+            limit = Number(limit);
+            if (!Number.isFinite(limit) || limit < 0) {
+                throw new RangeError('Iterator.take: limit must be a non-negative number');
+            }
+            limit = Math.floor(limit);
+            var src = this;
+            return _wrap((function*() {
+                var n = 0;
+                while (n < limit) {
+                    var step = src.next();
+                    if (step.done) return;
+                    yield step.value;
+                    n++;
+                }
+            })());
+        });
+
+        define('drop', function drop(limit) {
+            limit = Number(limit);
+            if (!Number.isFinite(limit) || limit < 0) {
+                throw new RangeError('Iterator.drop: limit must be a non-negative number');
+            }
+            limit = Math.floor(limit);
+            var src = this;
+            return _wrap((function*() {
+                var n = 0;
+                var step = src.next();
+                while (!step.done) {
+                    if (n >= limit) yield step.value;
+                    n++;
+                    step = src.next();
+                }
+            })());
+        });
+
+        define('reduce', function reduce(reducer, initialValue) {
+            if (typeof reducer !== 'function') {
+                throw new TypeError('Iterator.reduce: reducer must be a function');
+            }
+            var acc;
+            var i = 0;
+            var step = this.next();
+            if (arguments.length < 2) {
+                if (step.done) {
+                    throw new TypeError(
+                        'Iterator.reduce: empty iterator with no initial value');
+                }
+                acc = step.value;
+                step = this.next();
+                i = 1;
+            } else {
+                acc = initialValue;
+            }
+            while (!step.done) {
+                acc = reducer(acc, step.value, i++);
+                step = this.next();
+            }
+            return acc;
+        });
+
+        define('toArray', function toArray() {
+            var out = [];
+            var step = this.next();
+            while (!step.done) {
+                out.push(step.value);
+                step = this.next();
+            }
+            return out;
+        });
+
+        define('forEach', function forEach(fn) {
+            if (typeof fn !== 'function') {
+                throw new TypeError('Iterator.forEach: argument must be a function');
+            }
+            var i = 0;
+            var step = this.next();
+            while (!step.done) {
+                fn(step.value, i++);
+                step = this.next();
+            }
+        });
+
+        define('every', function every(pred) {
+            if (typeof pred !== 'function') {
+                throw new TypeError('Iterator.every: predicate must be a function');
+            }
+            var i = 0;
+            var step = this.next();
+            while (!step.done) {
+                if (!pred(step.value, i++)) return false;
+                step = this.next();
+            }
+            return true;
+        });
+
+        define('some', function some(pred) {
+            if (typeof pred !== 'function') {
+                throw new TypeError('Iterator.some: predicate must be a function');
+            }
+            var i = 0;
+            var step = this.next();
+            while (!step.done) {
+                if (pred(step.value, i++)) return true;
+                step = this.next();
+            }
+            return false;
+        });
+
+        define('find', function find(pred) {
+            if (typeof pred !== 'function') {
+                throw new TypeError('Iterator.find: predicate must be a function');
+            }
+            var i = 0;
+            var step = this.next();
+            while (!step.done) {
+                if (pred(step.value, i++)) return step.value;
+                step = this.next();
+            }
+            return undefined;
+        });
+
+        define('flatMap', function flatMap(mapper) {
+            if (typeof mapper !== 'function') {
+                throw new TypeError('Iterator.flatMap: mapper must be a function');
+            }
+            var src = this;
+            return _wrap((function*() {
+                var i = 0;
+                var step = src.next();
+                while (!step.done) {
+                    var sub = mapper(step.value, i++);
+                    var inner = _iterOf(sub);
+                    var s2 = inner.next();
+                    while (!s2.done) { yield s2.value; s2 = inner.next(); }
+                    step = src.next();
+                }
+            })());
+        });
+    })();
+
     // ---- JSON.rawJSON / isRawJSON (Stage 4, Node 21+) -------------
     //
     // `JSON.rawJSON(text)` returns a value that JSON.stringify

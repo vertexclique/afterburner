@@ -42,7 +42,21 @@ __register_module('zlib', function(module, exports, require) {
 
     // Promise wrappers — handy, free, no actual async under the hood.
     function asPromise(fn) {
-        return function(input) {
+        // Node's API is `gzip(buf, [opts], cb)` — when the second or
+        // third argument is a function we honour the cb shape; with
+        // no cb we return a Promise. The cb fires on a microtask so
+        // ordering matches Node's `process.nextTick` semantics.
+        return function(input, optsOrCb, maybeCb) {
+            var cb = (typeof optsOrCb === 'function') ? optsOrCb
+                   : (typeof maybeCb === 'function') ? maybeCb
+                   : null;
+            if (cb) {
+                Promise.resolve().then(function() {
+                    try { cb(null, fn(input)); }
+                    catch (e) { cb(e); }
+                });
+                return;
+            }
             return new Promise(function(resolve, reject) {
                 try { resolve(fn(input)); } catch (e) { reject(e); }
             });
@@ -186,17 +200,24 @@ __register_module('zlib', function(module, exports, require) {
     exports.DeflateRaw    = exports.Deflate;
     exports.InflateRaw    = exports.Inflate;
     exports.Unzip         = exports.Gunzip;
-    // Brotli — flate2 doesn't ship a brotli codec by default and the
-    // host bridge lacks the entry. Constructable so `class X extends
-    // zlib.BrotliCompress` doesn't trip QuickJS's "parent class must
-    // be constructor" guard, but throws on actual use.
-    function BrotliNotSupported() {
-        throw Object.assign(new Error('zlib brotli codec not available'), { code: 'ERR_BROTLI_INVALID_PARAM' });
-    }
-    var BrotliClass = function() { BrotliNotSupported(); };
-    BrotliClass.prototype = Object.create(EventEmitter.prototype);
-    exports.BrotliCompress    = BrotliClass;
-    exports.BrotliDecompress  = BrotliClass;
+    // Brotli — pure-Rust impl behind `__host_zlib_brotli_*`. Same
+    // streaming/sync surface as the deflate/gzip codecs above.
+    exports.brotliCompressSync = function(input) {
+        return call('brotli_compress_sync', input);
+    };
+    exports.brotliDecompressSync = function(input) {
+        return call('brotli_decompress_sync', input);
+    };
+    exports.BrotliCompress = attachCodecPrototype(
+        makeStreamingClass(exports.brotliCompressSync, 'brotliCompress'),
+        exports.brotliCompressSync,
+        'brotliCompress'
+    );
+    exports.BrotliDecompress = attachCodecPrototype(
+        makeStreamingClass(exports.brotliDecompressSync, 'brotliDecompress'),
+        exports.brotliDecompressSync,
+        'brotliDecompress'
+    );
 
     // Factory functions that return a fresh codec instance. Mirrors
     // `http.createServer` / `net.createConnection` — Node sprinkles
@@ -208,30 +229,13 @@ __register_module('zlib', function(module, exports, require) {
     exports.createDeflateRaw = function(opts) { return new exports.DeflateRaw(opts); };
     exports.createInflateRaw = function(opts) { return new exports.InflateRaw(opts); };
     exports.createUnzip      = function(opts) { return new exports.Unzip(opts); };
-    exports.createBrotliCompress    = function() { BrotliNotSupported(); };
-    exports.createBrotliDecompress  = function() { BrotliNotSupported(); };
+    exports.createBrotliCompress    = function(opts) { return new exports.BrotliCompress(opts); };
+    exports.createBrotliDecompress  = function(opts) { return new exports.BrotliDecompress(opts); };
 
-    /// Brotli async surface — promise-shaped wrappers around the
-    /// not-supported callable so callers that probe for the names
-    /// (and feature-detect via `typeof`) don't trip `is not a function`
-    /// before they get a chance to handle the absence. The callbacks
-    /// fire on a microtask with an ERR_BROTLI_INVALID_PARAM error.
-    exports.brotliCompress = function(_input, optionsOrCb, cb) {
-        if (typeof optionsOrCb === 'function') cb = optionsOrCb;
-        Promise.resolve().then(function() {
-            cb(Object.assign(new Error('zlib brotli codec not available'),
-                             { code: 'ERR_BROTLI_INVALID_PARAM' }));
-        });
-    };
-    exports.brotliDecompress = function(_input, optionsOrCb, cb) {
-        if (typeof optionsOrCb === 'function') cb = optionsOrCb;
-        Promise.resolve().then(function() {
-            cb(Object.assign(new Error('zlib brotli codec not available'),
-                             { code: 'ERR_BROTLI_INVALID_PARAM' }));
-        });
-    };
-    exports.brotliCompressSync = function() { BrotliNotSupported(); };
-    exports.brotliDecompressSync = function() { BrotliNotSupported(); };
+    /// Async brotli — sync codec wrapped in `Promise.resolve().then`
+    /// so the callback fires on a microtask (matches Node's contract).
+    exports.brotliCompress = asPromise(exports.brotliCompressSync);
+    exports.brotliDecompress = asPromise(exports.brotliDecompressSync);
 
     /// `zlib.crc32(data, value)` — Node 22.2+ pure-JS CRC32 (IEEE
     /// polynomial 0xedb88320). Pulls bytes via Buffer to handle the

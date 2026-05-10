@@ -360,7 +360,13 @@ fn unknown_method_surfaces_typed_error() {
 
 #[test]
 #[serial]
-fn breakpoint_returns_typed_engine_ceiling_error() {
+fn breakpoint_registers_real_id() {
+    // The previous stub-era test asserted that
+    // `Debugger.setBreakpointByUrl` threw
+    // `ERR_INSPECTOR_NOT_SUPPORTED_ON_BURN`. Engine ceiling #2 is now
+    // closed (source-level statement instrumentation backs real
+    // breakpoint hits, see `b_debugger_breakpoint`), so the method
+    // returns a real `breakpointId` instead of throwing.
     let dir = TempDir::new().expect("tempdir");
     let entry = write_temp(
         &dir,
@@ -369,14 +375,18 @@ fn breakpoint_returns_typed_engine_ceiling_error() {
             const inspector = require('inspector');
             const session = new inspector.Session();
             session.connect();
-            session.post('Debugger.setBreakpointByUrl', { lineNumber: 0 }, (err, res) => {
-                if (err && err.code === 'ERR_INSPECTOR_NOT_SUPPORTED_ON_BURN') {
-                    console.log('BP_CEILING_OK');
-                    process.exit(0);
-                } else {
-                    console.error('expected ceiling err, got:', err, res);
-                    process.exit(2);
+            session.post('Debugger.setBreakpointByUrl', {
+                url: 'app.js',
+                lineNumber: 0,
+            }, (err, res) => {
+                if (err) {
+                    console.error('unexpected err:', err); process.exit(2);
                 }
+                if (!res || typeof res.breakpointId !== 'string') {
+                    console.error('no id:', JSON.stringify(res)); process.exit(3);
+                }
+                console.log('BP_REGISTER_OK');
+                process.exit(0);
             });
             setTimeout(() => process.exit(99), 5000);
         "#,
@@ -395,7 +405,7 @@ fn breakpoint_returns_typed_engine_ceiling_error() {
         out.status.code()
     );
     assert!(
-        stdout.contains("BP_CEILING_OK"),
-        "missing BP_CEILING_OK\nSTDOUT:\n{stdout}"
+        stdout.contains("BP_REGISTER_OK"),
+        "missing BP_REGISTER_OK\nSTDOUT:\n{stdout}"
     );
 }

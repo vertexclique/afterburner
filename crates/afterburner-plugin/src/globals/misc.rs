@@ -635,6 +635,10 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
         }),
     );
     let _ = globals.set(
+        "__host_inspector_pause",
+        Func::from(|| -> f64 { unsafe { host_inspector_pause() as f64 } }),
+    );
+    let _ = globals.set(
         "__host_worker_post_message",
         Func::from(|worker_id: f64, payload: String| -> f64 {
             let pb = payload.as_bytes();
@@ -1148,6 +1152,82 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
             unsafe { host_wasm_memory_size(instance_id as i64) as f64 }
         }),
     );
+    let _ = globals.set(
+        "__host_wasm_memory_grow",
+        Func::from(|instance_id: f64, delta: f64| -> f64 {
+            unsafe { host_wasm_memory_grow(instance_id as i64, delta as i32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_wasm_global_get",
+        Func::from(|instance_id: f64, name: String| -> String {
+            let nb = name.as_bytes();
+            match call_read(|out, cap| unsafe {
+                host_wasm_global_get(instance_id as i64, nb.as_ptr(), nb.len() as u32, out, cap)
+            }) {
+                Ok(s) => s,
+                Err(e) => alloc::format!("__HOST_ERR__:{e}"),
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_wasm_global_set",
+        Func::from(|instance_id: f64, name: String, value_json: String| -> f64 {
+            let nb = name.as_bytes();
+            let vb = value_json.as_bytes();
+            unsafe {
+                host_wasm_global_set(
+                    instance_id as i64,
+                    nb.as_ptr(),
+                    nb.len() as u32,
+                    vb.as_ptr(),
+                    vb.len() as u32,
+                ) as f64
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_wasm_table_size",
+        Func::from(|instance_id: f64, name: String| -> f64 {
+            let nb = name.as_bytes();
+            unsafe {
+                host_wasm_table_size(instance_id as i64, nb.as_ptr(), nb.len() as u32) as f64
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_wasm_table_get",
+        Func::from(|instance_id: f64, name: String, index: f64| -> String {
+            let nb = name.as_bytes();
+            match call_read(|out, cap| unsafe {
+                host_wasm_table_get(
+                    instance_id as i64,
+                    nb.as_ptr(),
+                    nb.len() as u32,
+                    index as i32,
+                    out,
+                    cap,
+                )
+            }) {
+                Ok(s) => s,
+                Err(e) => alloc::format!("__HOST_ERR__:{e}"),
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_wasm_table_grow",
+        Func::from(|instance_id: f64, name: String, delta: f64| -> f64 {
+            let nb = name.as_bytes();
+            unsafe {
+                host_wasm_table_grow(
+                    instance_id as i64,
+                    nb.as_ptr(),
+                    nb.len() as u32,
+                    delta as i32,
+                ) as f64
+            }
+        }),
+    );
 }
 
 fn install_os<'js>(globals: &Object<'js>) {
@@ -1330,6 +1410,14 @@ fn install_zlib<'js>(globals: &Object<'js>) {
     bind_zlib!(
         "__host_zlib_zstd_decompress_sync",
         host_zlib_zstd_decompress_sync
+    );
+    bind_zlib!(
+        "__host_zlib_brotli_compress_sync",
+        host_zlib_brotli_compress_sync
+    );
+    bind_zlib!(
+        "__host_zlib_brotli_decompress_sync",
+        host_zlib_brotli_decompress_sync
     );
 }
 

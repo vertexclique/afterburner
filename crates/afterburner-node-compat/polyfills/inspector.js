@@ -173,14 +173,96 @@ __register_module('inspector', function(module, exports, require) {
         }
         return { scriptSource: entry.source || '' };
     });
-    registerMethod('Debugger.setBreakpointByUrl', function() {
-        var err = new Error(
-            'Debugger.setBreakpointByUrl: burn QuickJS does not expose the '
-            + 'engine-level breakpoint hook required for stepping'
-        );
-        err.code = 'ERR_INSPECTOR_NOT_SUPPORTED_ON_BURN';
-        throw err;
+    /// Real breakpoint registration backed by source-level statement
+    /// instrumentation in the transpiler (`BURN_DEBUGGER_INSTRUMENT=1`).
+    /// Each registered breakpoint goes into `_breakpoints` keyed by
+    /// `urlPattern + ':' + lineNumber`. The transpiler-injected
+    /// `__ab_brk(file, line, col)` check consults this table on every
+    /// statement; when a hit is detected, it calls
+    /// `__host_inspector_pause` which blocks the JS shard until the
+    /// connected DevTools client sends Debugger.resume.
+    registerMethod('Debugger.setBreakpointByUrl', function(params, _ctx) {
+        var url = (params && params.url) || (params && params.urlRegex) || '';
+        var line = (params && params.lineNumber) | 0;
+        var col = (params && params.columnNumber) | 0;
+        var id = 'burn-bp-' + (++_bpIdCounter);
+        _breakpoints[id] = { url: url, line: line, col: col };
+        return {
+            breakpointId: id,
+            locations: [{
+                scriptId: '0',
+                lineNumber: line,
+                columnNumber: col,
+            }],
+        };
     });
+    registerMethod('Debugger.removeBreakpoint', function(params) {
+        var id = (params && params.breakpointId) || '';
+        delete _breakpoints[id];
+        return {};
+    });
+    var _breakpoints = Object.create(null);
+    var _bpIdCounter = 0;
+    /// Called from the transpiler-injected `__ab_brk` checks. Looks
+    /// up the source location in the active breakpoint table and, if
+    /// a match exists, fires the `Debugger.paused` notification then
+    /// blocks via `__host_inspector_pause`. Returns the step-kind
+    /// code the WS client sent back (0=resume, 1=stepOver, etc.).
+    function _checkBreakpoint(file, line, col) {
+        var keys = Object.keys(_breakpoints);
+        for (var i = 0; i < keys.length; i++) {
+            var bp = _breakpoints[keys[i]];
+            if (bp.line !== line) continue;
+            // URL match — substring or regex. Most DevTools clients
+            // pass a fully-qualified `file://...` URL; we match on
+            // the trailing path because our file refs are bare paths.
+            if (bp.url && bp.url.length > 0 && file.indexOf(bp.url) < 0
+                && bp.url.indexOf(file) < 0) {
+                continue;
+            }
+            // Hit.
+            var stack;
+            try { throw new Error('__brk_stack__'); }
+            catch (e) { stack = e.stack || ''; }
+            // Notify all sessions.
+            if (typeof globalThis.__host_inspector_send === 'function') {
+                var note = JSON.stringify({
+                    method: 'Debugger.paused',
+                    params: {
+                        callFrames: [{
+                            callFrameId: '0',
+                            functionName: '<anonymous>',
+                            location: { scriptId: '0', lineNumber: line, columnNumber: col },
+                            url: file,
+                            scopeChain: [],
+                            this: { type: 'object', subtype: 'null' },
+                        }],
+                        reason: 'other',
+                        hitBreakpoints: [keys[i]],
+                    },
+                });
+                try { globalThis.__host_inspector_send(0, note); } catch (_) {}
+            }
+            if (typeof globalThis.__host_inspector_pause === 'function') {
+                return globalThis.__host_inspector_pause() | 0;
+            }
+            return 0;
+        }
+        return -1;
+    }
+    // Global the transpiler-injected probes call.
+    globalThis.__ab_brk = function(file, line, col) {
+        // Fast path: skip the per-statement work when no breakpoints
+        // are registered. Hot loops in non-debugger runs cost one
+        // property read + one Object.keys length check.
+        if (Object.keys(_breakpoints).length === 0) return;
+        _checkBreakpoint(String(file), line | 0, col | 0);
+    };
+
+    registerMethod('Debugger.resume', function() { return {}; });
+    registerMethod('Debugger.stepOver', function() { return {}; });
+    registerMethod('Debugger.stepInto', function() { return {}; });
+    registerMethod('Debugger.stepOut', function() { return {}; });
 
     // ---- HeapProfiler -------------------------------------------
 

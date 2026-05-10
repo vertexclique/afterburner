@@ -25,6 +25,19 @@
 // `executionAsyncId()` / `triggerAsyncId()` reflect the live
 // asyncId stack so logging libraries can correlate work units.
 
+// Install `__ab_await_track` eagerly (outside the `__register_module`
+// factory) so user code's `await EXPR` rewrites resolve from line 1.
+// The factory body still re-installs idempotently — same shape — so
+// `require('async_hooks')` doesn't undo this.
+if (typeof globalThis.__ab_await_track !== 'function') {
+    Object.defineProperty(globalThis, '__ab_await_track', {
+        value: function(value) {
+            return Promise.resolve(value).then(function(v) { return v; });
+        },
+        writable: true, configurable: true,
+    });
+}
+
 __register_module('async_hooks', function(module, exports, require) {
 
     // ---- async-id stack + hook registry --------------------------
@@ -415,6 +428,27 @@ __register_module('async_hooks', function(module, exports, require) {
             };
             return _origQueueMicrotask.call(this, wrapped);
         };
+    }
+
+    // ---- await tracking ------------------------------------------
+    //
+    // The ESM transpiler wraps every `await EXPR` as
+    // `await __ab_await_track(EXPR)`. This routes the awaited value
+    // through our patched `Promise.prototype.then` (an internal
+    // engine `await` otherwise bypasses user-level `.then`), so the
+    // PROMISE AsyncResource fires init/before/after for every await
+    // and AsyncLocalStorage snapshots restore at handler-fire time
+    // for the duration of `.then`'s wrapped continuation.
+    if (typeof globalThis.__ab_await_track !== 'function') {
+        Object.defineProperty(globalThis, '__ab_await_track', {
+            value: function(value) {
+                // Promise.resolve gives a Promise even if `value` was
+                // a bare value; the `.then(v => v)` is the hook anchor
+                // that triggers the patched prototype handler.
+                return Promise.resolve(value).then(function(v) { return v; });
+            },
+            writable: true, configurable: true,
+        });
     }
 
     // ---- exports -------------------------------------------------

@@ -43,6 +43,7 @@ oxc = { version = "=0.127.0", default-features = false, features = [
     "transformer",
     "codegen",
     "semantic",
+    "ast_visit",
 ], optional = true }
 thiserror = { workspace = true, optional = true }
 
