@@ -724,6 +724,59 @@ unsafe extern "C" {
     /// `cluster` so `Worker.process.pid` reports a real OS pid.
     pub fn host_worker_pid(worker_id: i32) -> i32;
 
+    // ---- SharedArrayBuffer + Atomics.wait/notify -------------
+    //
+    // mmap-backed shared regions with cross-process futex
+    // semantics. `host_sab_alloc(byte_length)` creates a fresh
+    // region; `host_sab_open(descriptor, byte_length)` attaches
+    // an existing one (used by worker subprocesses to inherit a
+    // region created by the parent). `host_sab_wait` blocks the
+    // current shard until another process calls `host_sab_notify`
+    // on the same byte_offset (or the timeout fires).
+    pub fn host_sab_alloc(byte_length: i64) -> i64;
+    pub fn host_sab_open(
+        desc_ptr: *const u8,
+        desc_len: u32,
+        byte_length: i64,
+    ) -> i64;
+    pub fn host_sab_release(region_id: i64) -> i32;
+    pub fn host_sab_byte_length(region_id: i64) -> i64;
+    pub fn host_sab_descriptor(region_id: i64, out_ptr: *mut u8, out_cap: u32) -> i32;
+    pub fn host_sab_read(
+        region_id: i64,
+        offset: i64,
+        len: i64,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_sab_write(
+        region_id: i64,
+        offset: i64,
+        bytes_ptr: *const u8,
+        bytes_len: u32,
+    ) -> i32;
+    pub fn host_sab_atomic_load(region_id: i64, byte_offset: i64, width: i32) -> i64;
+    pub fn host_sab_atomic_store(
+        region_id: i64,
+        byte_offset: i64,
+        value: i64,
+        width: i32,
+    ) -> i32;
+    pub fn host_sab_atomic_cas(
+        region_id: i64,
+        byte_offset: i64,
+        expected: i64,
+        replacement: i64,
+        width: i32,
+    ) -> i64;
+    pub fn host_sab_wait(
+        region_id: i64,
+        byte_offset: i64,
+        expected: i32,
+        timeout_ms: i64,
+    ) -> i32;
+    pub fn host_sab_notify(region_id: i64, byte_offset: i64, count: i64) -> i32;
+
     // ---- inspector / Chrome DevTools Protocol -----------------
     //
     // `host_inspector_open(port)` boots an axum HTTP+WebSocket

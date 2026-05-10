@@ -160,6 +160,11 @@ hickory-resolver = { version = "0.24", default-features = false, features = [
 # keepalive knob, hence this dep. Gated behind `daemon` since net /
 # tls are the only callers.
 socket2 = { version = "0.5", features = ["all"] }
+# Cross-platform shared memory + futex. memmap2 wraps mmap/CreateFileMapping;
+# atomic-wait wraps futex (Linux) / __ulock (macOS) / WaitOnAddress (Windows).
+# Used by SharedArrayBuffer + Atomics.wait/notify across worker subprocesses.
+memmap2 = "0.9"
+atomic-wait = "1"
 
 rquickjs = { version = "0.11", features = ["bindgen"] }
 

@@ -69,6 +69,248 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_shadow_sharp(linker)?;
     wrap_wasm_loader(linker)?;
     wrap_inspector(linker)?;
+    wrap_sab(linker)?;
+    Ok(())
+}
+
+// ---- SharedArrayBuffer + Atomics.wait/notify -------------------------
+//
+// Twelve host imports back the JS-side `SharedArrayBuffer` constructor
+// and `Atomics.{load,store,compareExchange,wait,notify}` primitives.
+// Memory is mmap-backed so worker subprocesses can attach to the same
+// region; wait/notify use the OS futex equivalent for real cross-
+// process blocking semantics.
+
+fn wrap_sab(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    linker
+        .func_wrap(
+            NS,
+            "host_sab_alloc",
+            |caller: Caller<'_, HostState>, byte_length: i64| -> i64 {
+                if byte_length <= 0 || byte_length > (1i64 << 32) {
+                    return crate::daemon_sab::ERR_BAD_WIDTH as i64;
+                }
+                caller.data().daemon_sab.alloc(byte_length as usize)
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_sab_open",
+            |mut caller: Caller<'_, HostState>,
+             desc_ptr: i32,
+             desc_len: i32,
+             byte_length: i64|
+             -> i64 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return crate::daemon_sab::ERR_IO as i64;
+                };
+                let Some(desc) = read_str(&memory, &caller, desc_ptr, desc_len) else {
+                    return crate::daemon_sab::ERR_IO as i64;
+                };
+                if byte_length <= 0 || byte_length > (1i64 << 32) {
+                    return crate::daemon_sab::ERR_BAD_WIDTH as i64;
+                }
+                caller.data().daemon_sab.open(&desc, byte_length as usize)
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_sab_release",
+            |caller: Caller<'_, HostState>, region_id: i64| -> i32 {
+                caller.data().daemon_sab.release(region_id)
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_sab_byte_length",
+            |caller: Caller<'_, HostState>, region_id: i64| -> i64 {
+                caller.data().daemon_sab.byte_length(region_id)
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_sab_descriptor",
+            |mut caller: Caller<'_, HostState>,
+             region_id: i64,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return -1;
+                };
+                let s = caller.data().daemon_sab.descriptor(region_id);
+                write_out(&mut caller, &memory, out_ptr, out_cap, s.as_bytes())
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_sab_read",
+            |mut caller: Caller<'_, HostState>,
+             region_id: i64,
+             offset: i64,
+             len: i64,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                if offset < 0 || len < 0 {
+                    return crate::daemon_sab::ERR_OUT_OF_BOUNDS;
+                }
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return crate::daemon_sab::ERR_IO;
+                };
+                let result = caller.data().daemon_sab.read(
+                    region_id,
+                    offset as usize,
+                    len as usize,
+                );
+                match result {
+                    Ok(bytes) => write_out(&mut caller, &memory, out_ptr, out_cap, &bytes),
+                    Err(e) => e,
+                }
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_sab_write",
+            |mut caller: Caller<'_, HostState>,
+             region_id: i64,
+             offset: i64,
+             bytes_ptr: i32,
+             bytes_len: i32|
+             -> i32 {
+                if offset < 0 {
+                    return crate::daemon_sab::ERR_OUT_OF_BOUNDS;
+                }
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return crate::daemon_sab::ERR_IO;
+                };
+                let Some(bytes) = read_bytes(&memory, &caller, bytes_ptr, bytes_len) else {
+                    return crate::daemon_sab::ERR_IO;
+                };
+                caller.data().daemon_sab.write(region_id, offset as usize, &bytes)
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_sab_atomic_load",
+            |caller: Caller<'_, HostState>,
+             region_id: i64,
+             byte_offset: i64,
+             width: i32|
+             -> i64 {
+                if byte_offset < 0 {
+                    return crate::daemon_sab::ERR_OUT_OF_BOUNDS as i64;
+                }
+                caller.data().daemon_sab.atomic_load(
+                    region_id,
+                    byte_offset as usize,
+                    width as u8,
+                )
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_sab_atomic_store",
+            |caller: Caller<'_, HostState>,
+             region_id: i64,
+             byte_offset: i64,
+             value: i64,
+             width: i32|
+             -> i32 {
+                if byte_offset < 0 {
+                    return crate::daemon_sab::ERR_OUT_OF_BOUNDS;
+                }
+                caller.data().daemon_sab.atomic_store(
+                    region_id,
+                    byte_offset as usize,
+                    value,
+                    width as u8,
+                )
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_sab_atomic_cas",
+            |caller: Caller<'_, HostState>,
+             region_id: i64,
+             byte_offset: i64,
+             expected: i64,
+             replacement: i64,
+             width: i32|
+             -> i64 {
+                if byte_offset < 0 {
+                    return crate::daemon_sab::ERR_OUT_OF_BOUNDS as i64;
+                }
+                caller.data().daemon_sab.atomic_cas(
+                    region_id,
+                    byte_offset as usize,
+                    expected,
+                    replacement,
+                    width as u8,
+                )
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_sab_wait",
+            |caller: Caller<'_, HostState>,
+             region_id: i64,
+             byte_offset: i64,
+             expected: i32,
+             timeout_ms: i64|
+             -> i32 {
+                if byte_offset < 0 {
+                    return crate::daemon_sab::ERR_OUT_OF_BOUNDS;
+                }
+                caller.data().daemon_sab.wait(
+                    region_id,
+                    byte_offset as usize,
+                    expected,
+                    timeout_ms,
+                )
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_sab_notify",
+            |caller: Caller<'_, HostState>,
+             region_id: i64,
+             byte_offset: i64,
+             count: i64|
+             -> i32 {
+                if byte_offset < 0 {
+                    return crate::daemon_sab::ERR_OUT_OF_BOUNDS;
+                }
+                caller.data().daemon_sab.notify(
+                    region_id,
+                    byte_offset as usize,
+                    count,
+                )
+            },
+        )
+        .map_err(link_err)?;
     Ok(())
 }
 

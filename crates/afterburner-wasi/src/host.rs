@@ -116,6 +116,12 @@ pub struct HostState {
     /// a listener.
     #[cfg(feature = "daemon")]
     pub daemon_inspector: Option<Arc<crate::daemon_inspector::DaemonInspector>>,
+    /// Cross-process `SharedArrayBuffer` + `Atomics.wait`/`notify`
+    /// coordinator. Always present (cheap to construct — no listener
+    /// or socket) so the JS side's `new SharedArrayBuffer(...)` and
+    /// `Atomics.{wait,notify}` work uniformly across UDF, script,
+    /// and daemon modes.
+    pub daemon_sab: Arc<crate::daemon_sab::DaemonSab>,
     /// Per-thrust SQLite shadow registry. Each opened
     /// `new sqlite3.Database(...)` runs in its own worker thread
     /// owned by this store; the field is just the lookup table that
@@ -207,6 +213,7 @@ impl HostState {
             daemon_http_outbound: None,
             #[cfg(feature = "daemon")]
             daemon_inspector: None,
+            daemon_sab: crate::daemon_sab::DaemonSab::new(),
             #[cfg(feature = "shadow-sqlite3")]
             sqlite3_shadow: Arc::new(
                 afterburner_node_compat::shadows::sqlite3::SqliteShadow::new(),

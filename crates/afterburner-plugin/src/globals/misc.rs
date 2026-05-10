@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 use javy_plugin_api::javy::quickjs::{Object, prelude::Func};
 
 use super::call_read;
+use base64::Engine as _;
 use crate::host_api::*;
 
 pub fn install<'js>(globals: &Object<'js>) {
@@ -467,6 +468,149 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
         "__host_worker_pid",
         Func::from(|worker_id: f64| -> f64 {
             unsafe { host_worker_pid(worker_id as i32) as f64 }
+        }),
+    );
+
+    // ---- SharedArrayBuffer + Atomics.wait/notify ----------------
+    //
+    // Numbers cross the JS↔WASM boundary as f64; for region_id /
+    // byte_offset / values we cast to i64 inside the call. Bytes
+    // travel as base64-encoded strings via `call_read` (auto-doubling
+    // buffer) — same shape used by the rest of the byte-payload host
+    // imports.
+    let _ = globals.set(
+        "__host_sab_alloc",
+        Func::from(|byte_length: f64| -> f64 {
+            unsafe { host_sab_alloc(byte_length as i64) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_sab_open",
+        Func::from(|descriptor: String, byte_length: f64| -> f64 {
+            let db = descriptor.as_bytes();
+            unsafe {
+                host_sab_open(db.as_ptr(), db.len() as u32, byte_length as i64) as f64
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_sab_release",
+        Func::from(|region_id: f64| -> f64 {
+            unsafe { host_sab_release(region_id as i64) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_sab_byte_length",
+        Func::from(|region_id: f64| -> f64 {
+            unsafe { host_sab_byte_length(region_id as i64) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_sab_descriptor",
+        Func::from(|region_id: f64| -> String {
+            match call_read(|out, cap| unsafe {
+                host_sab_descriptor(region_id as i64, out, cap)
+            }) {
+                Ok(s) => s,
+                Err(_) => String::new(),
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_sab_read_b64",
+        Func::from(|region_id: f64, offset: f64, len: f64| -> String {
+            match call_read(|out, cap| unsafe {
+                host_sab_read(region_id as i64, offset as i64, len as i64, out, cap)
+            }) {
+                Ok(s) => alloc::format!(
+                    "{}",
+                    base64::engine::general_purpose::STANDARD
+                        .encode(s.as_bytes())
+                ),
+                Err(e) => alloc::format!("__HOST_ERR__:{e}"),
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_sab_write_b64",
+        Func::from(|region_id: f64, offset: f64, bytes_b64: String| -> f64 {
+            let bytes = match base64::engine::general_purpose::STANDARD.decode(&bytes_b64) {
+                Ok(b) => b,
+                Err(_) => return -1.0,
+            };
+            unsafe {
+                host_sab_write(
+                    region_id as i64,
+                    offset as i64,
+                    bytes.as_ptr(),
+                    bytes.len() as u32,
+                ) as f64
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_sab_atomic_load",
+        Func::from(|region_id: f64, byte_offset: f64, width: f64| -> f64 {
+            unsafe {
+                host_sab_atomic_load(region_id as i64, byte_offset as i64, width as i32) as f64
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_sab_atomic_store",
+        Func::from(|region_id: f64, byte_offset: f64, value: f64, width: f64| -> f64 {
+            unsafe {
+                host_sab_atomic_store(
+                    region_id as i64,
+                    byte_offset as i64,
+                    value as i64,
+                    width as i32,
+                ) as f64
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_sab_atomic_cas",
+        Func::from(
+            |region_id: f64,
+             byte_offset: f64,
+             expected: f64,
+             replacement: f64,
+             width: f64|
+             -> f64 {
+                unsafe {
+                    host_sab_atomic_cas(
+                        region_id as i64,
+                        byte_offset as i64,
+                        expected as i64,
+                        replacement as i64,
+                        width as i32,
+                    ) as f64
+                }
+            },
+        ),
+    );
+    let _ = globals.set(
+        "__host_sab_wait",
+        Func::from(
+            |region_id: f64, byte_offset: f64, expected: f64, timeout_ms: f64| -> f64 {
+                unsafe {
+                    host_sab_wait(
+                        region_id as i64,
+                        byte_offset as i64,
+                        expected as i32,
+                        timeout_ms as i64,
+                    ) as f64
+                }
+            },
+        ),
+    );
+    let _ = globals.set(
+        "__host_sab_notify",
+        Func::from(|region_id: f64, byte_offset: f64, count: f64| -> f64 {
+            unsafe {
+                host_sab_notify(region_id as i64, byte_offset as i64, count as i64) as f64
+            }
         }),
     );
 

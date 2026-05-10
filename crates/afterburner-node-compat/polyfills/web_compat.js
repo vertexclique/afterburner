@@ -2483,11 +2483,102 @@
         _relinkPrototype(globalThis.TextDecoderStream);
     }
 
-    // ---- Atomics (single-threaded fallback) -----------------------
+    // ---- SharedArrayBuffer (cross-process via mmap) ---------------
     //
-    // QuickJS doesn't ship Atomics (it requires SharedArrayBuffer +
-    // a thread runtime). Burn is single-threaded inside one shard,
-    // so SharedArrayBuffer is effectively a normal ArrayBuffer.
+    // Real OS-shared memory backed by `__host_sab_alloc` (memfd on
+    // Linux). The JS surface mimics ArrayBuffer's shape so existing
+    // typed-array code works; reads / writes hop through host imports
+    // so cross-process coherence is honoured.
+    if (typeof globalThis.__ab_sab_registry !== 'object') {
+        globalThis.__ab_sab_registry = Object.create(null);
+    }
+    var _sabRegistry = globalThis.__ab_sab_registry;
+
+    /// Build a `SharedArrayBuffer`-shaped object backed by an
+    /// mmap region. We can't subclass `ArrayBuffer` (the engine's
+    /// internal slots aren't accessible from JS), so the strategy
+    /// is: allocate a regular ArrayBuffer of the same byteLength,
+    /// bolt the SAB metadata onto it as non-enumerable properties,
+    /// register it in the SAB registry. Typed-array views over the
+    /// returned ArrayBuffer index through the standard JS heap;
+    /// `Atomics.{load,store,wait,notify}` detect the registered
+    /// region via the registry and route atomic ops to the host so
+    /// cross-process coherence holds.
+    function _SAB(byteLengthOrAttach) {
+        if (!(this instanceof _SAB)) return new _SAB(byteLengthOrAttach);
+        var byteLength;
+        var regionId;
+        if (typeof byteLengthOrAttach === 'object' && byteLengthOrAttach !== null
+            && byteLengthOrAttach.__ab_sab_attach) {
+            var attach = byteLengthOrAttach;
+            regionId = globalThis.__host_sab_open(attach.descriptor, attach.byteLength);
+            if (regionId < 0) {
+                throw new Error('SharedArrayBuffer attach: rc=' + regionId);
+            }
+            byteLength = attach.byteLength;
+        } else {
+            byteLength = (byteLengthOrAttach | 0) >>> 0;
+            if (byteLength === 0) {
+                throw new RangeError('SharedArrayBuffer: byteLength must be > 0');
+            }
+            regionId = globalThis.__host_sab_alloc(byteLength);
+            if (regionId < 0) {
+                throw new Error('SharedArrayBuffer: alloc failed (rc=' + regionId + ')');
+            }
+        }
+        // The buffer the user gets IS a real ArrayBuffer so
+        // `new Int32Array(sab)` works without monkey-patching the
+        // typed-array constructor. Atomics.* detect this is a SAB
+        // shadow via the registry keyed by buffer identity.
+        var buf = new ArrayBuffer(byteLength);
+        Object.defineProperty(buf, '_regionId', {
+            value: regionId,
+            enumerable: false,
+            writable: false,
+        });
+        Object.defineProperty(buf, '_descriptor', {
+            value: globalThis.__host_sab_descriptor(regionId) || '',
+            enumerable: false,
+            writable: false,
+        });
+        Object.defineProperty(buf, '_isSharedArrayBuffer', {
+            value: true,
+            enumerable: false,
+            writable: false,
+        });
+        _sabRegistry[regionId] = buf;
+        return buf;
+    }
+
+    // Replace globalThis.SharedArrayBuffer with our shadow. Old code
+    // that captured the original is the rare case — the global is
+    // re-checked at every constructor call here.
+    if (typeof globalThis.__host_sab_alloc === 'function') {
+        globalThis.SharedArrayBuffer = _SAB;
+    }
+
+    function _sabFromView(view) {
+        // Map a typed-array view over a SharedArrayBuffer to its
+        // underlying region. Returns the buffer if it carries our
+        // `_regionId` brand, null otherwise.
+        var buf = view && view.buffer;
+        if (!buf) return null;
+        if (typeof buf._regionId === 'number') return buf;
+        return null;
+    }
+
+    function _viewByteOffset(view, idx) {
+        var bytesPerElement = view.BYTES_PER_ELEMENT || 1;
+        return (view.byteOffset | 0) + ((idx | 0) * bytesPerElement);
+    }
+
+    // ---- Atomics (cross-process via __host_sab_*) -----------------
+    //
+    // For typed-array views over a `SharedArrayBuffer`, each Atomics
+    // op routes through the host so the bytes the kernel sees are
+    // exactly the slot the futex / wake operates on. Over a regular
+    // (non-shared) `ArrayBuffer`, ops fall back to single-realm
+    // semantics — there's no cross-process coherence to enforce.
     // Atomics ops simplify to their non-atomic equivalents because
     // there's no other thread to race with; the wait/notify
     // primitives raise — single-threaded code that calls `wait()`
@@ -2500,13 +2591,64 @@
             return view;
         }
         globalThis.Atomics = {
-            load: function(view, idx) { return _ta(view)[idx]; },
-            store: function(view, idx, value) { _ta(view)[idx] = value; return value; },
+            load: function(view, idx) {
+                _ta(view);
+                var sab = _sabFromView(view);
+                if (sab) {
+                    var w = view.BYTES_PER_ELEMENT === 8 ? 8 : 4;
+                    var v = globalThis.__host_sab_atomic_load(
+                        sab._regionId, _viewByteOffset(view, idx), w);
+                    view[idx] = v;
+                    return v;
+                }
+                return view[idx];
+            },
+            store: function(view, idx, value) {
+                _ta(view);
+                var sab = _sabFromView(view);
+                if (sab) {
+                    var w = view.BYTES_PER_ELEMENT === 8 ? 8 : 4;
+                    globalThis.__host_sab_atomic_store(
+                        sab._regionId, _viewByteOffset(view, idx), value, w);
+                }
+                view[idx] = value;
+                return value;
+            },
             add: function(view, idx, value) {
-                var v = _ta(view)[idx]; view[idx] = v + value; return v;
+                _ta(view);
+                var sab = _sabFromView(view);
+                if (sab) {
+                    var w = view.BYTES_PER_ELEMENT === 8 ? 8 : 4;
+                    var off = _viewByteOffset(view, idx);
+                    while (true) {
+                        var cur = globalThis.__host_sab_atomic_load(sab._regionId, off, w);
+                        var got = globalThis.__host_sab_atomic_cas(
+                            sab._regionId, off, cur, cur + value, w);
+                        if (got === cur) {
+                            view[idx] = cur + value;
+                            return cur;
+                        }
+                    }
+                }
+                var v = view[idx]; view[idx] = v + value; return v;
             },
             sub: function(view, idx, value) {
-                var v = _ta(view)[idx]; view[idx] = v - value; return v;
+                _ta(view);
+                var sab = _sabFromView(view);
+                if (sab) {
+                    var w = view.BYTES_PER_ELEMENT === 8 ? 8 : 4;
+                    var off = _viewByteOffset(view, idx);
+                    while (true) {
+                        var cur = globalThis.__host_sab_atomic_load(sab._regionId, off, w);
+                        var got = globalThis.__host_sab_atomic_cas(
+                            sab._regionId, off, cur, cur - value, w);
+                        if (got === cur) {
+                            view[idx] = cur - value;
+                            return cur;
+                        }
+                    }
+                }
+                var v = view[idx]; view[idx] = v - value; return v;
             },
             and: function(view, idx, value) {
                 var v = _ta(view)[idx]; view[idx] = v & value; return v;
@@ -2518,25 +2660,98 @@
                 var v = _ta(view)[idx]; view[idx] = v ^ value; return v;
             },
             exchange: function(view, idx, value) {
-                var v = _ta(view)[idx]; view[idx] = value; return v;
+                _ta(view);
+                var sab = _sabFromView(view);
+                if (sab) {
+                    var w = view.BYTES_PER_ELEMENT === 8 ? 8 : 4;
+                    var off = _viewByteOffset(view, idx);
+                    while (true) {
+                        var cur = globalThis.__host_sab_atomic_load(sab._regionId, off, w);
+                        var got = globalThis.__host_sab_atomic_cas(
+                            sab._regionId, off, cur, value, w);
+                        if (got === cur) {
+                            view[idx] = value;
+                            return cur;
+                        }
+                    }
+                }
+                var v = view[idx]; view[idx] = value; return v;
             },
             compareExchange: function(view, idx, expected, replacement) {
-                var v = _ta(view)[idx];
+                _ta(view);
+                var sab = _sabFromView(view);
+                if (sab) {
+                    var w = view.BYTES_PER_ELEMENT === 8 ? 8 : 4;
+                    var got = globalThis.__host_sab_atomic_cas(
+                        sab._regionId, _viewByteOffset(view, idx),
+                        expected, replacement, w);
+                    if (got === expected) view[idx] = replacement;
+                    return got;
+                }
+                var v = view[idx];
                 if (v === expected) view[idx] = replacement;
                 return v;
             },
             isLockFree: function(_size) { return true; },
-            wait: function(_view, _idx, _value, _timeout) {
-                // Sync wait would block the event loop, which without
-                // engine-level support is a deadlock in our single-
-                // threaded realm. Atomics.waitAsync is the supported
-                // primitive — see below.
-                throw new TypeError(
-                    'Atomics.wait: not supported in burn — use Atomics.waitAsync'
-                );
+            wait: function(view, idx, value, timeout) {
+                // Cross-process semantics when the view is over a
+                // SharedArrayBuffer: route through the host's
+                // futex / WaitOnAddress equivalent. Single-realm SAB
+                // (or non-shared backing) falls through to a typed
+                // error since blocking sync would deadlock the realm.
+                _ta(view);
+                var sab = _sabFromView(view);
+                if (!sab) {
+                    throw new TypeError(
+                        'Atomics.wait: requires a SharedArrayBuffer-backed typed-array view'
+                    );
+                }
+                var byteOffset = _viewByteOffset(view, idx);
+                var to = (typeof timeout === 'number' && isFinite(timeout) && timeout >= 0)
+                    ? (timeout | 0) : -1;
+                var rc = globalThis.__host_sab_wait(sab._regionId, byteOffset, value | 0, to);
+                if (rc === 0) return 'ok';
+                if (rc === 1) return 'not-equal';
+                if (rc === 2) return 'timed-out';
+                throw new Error('Atomics.wait: rc=' + rc);
             },
             notify: function(view, idx, count) {
+                _ta(view);
                 if (count === undefined || count === null) count = Infinity;
+                var sab = _sabFromView(view);
+                if (sab) {
+                    // Cross-process wake via the host's
+                    // wake_one / wake_all primitive.
+                    var byteOffset = _viewByteOffset(view, idx);
+                    var n = count === Infinity ? -1 : (count | 0);
+                    var rc = globalThis.__host_sab_notify(sab._regionId, byteOffset, n);
+                    if (rc < 0) {
+                        // ERR_OUT_OF_BOUNDS / ERR_BAD_ID surface as 0
+                        // woken (matches spec — invalid args don't wake).
+                        return 0;
+                    }
+                    // Single-realm waitAsync waiters parked on this
+                    // same address still need a wake, but a process-
+                    // level futex notify already covered them via
+                    // their wait_async() path that's polling the same
+                    // bytes. We additionally fire JS-side waiters for
+                    // the local realm.
+                    var key = _atomicsKey(view, idx);
+                    var queue = _atomicsWaiters[key];
+                    if (queue && queue.length > 0) {
+                        var jsCount = count === Infinity ? queue.length : count;
+                        var woken = 0;
+                        while (woken < jsCount && queue.length > 0) {
+                            var w = queue.shift();
+                            if (w._timer) try { clearTimeout(w._timer); } catch (_) {}
+                            if (!w._settled) { w._settled = true; w._resolve('ok'); }
+                            woken++;
+                        }
+                        if (queue.length === 0) delete _atomicsWaiters[key];
+                    }
+                    return rc;
+                }
+                // Non-SAB path — single-realm waiter queue only.
                 var key = _atomicsKey(view, idx);
                 var queue = _atomicsWaiters[key];
                 if (!queue || queue.length === 0) return 0;

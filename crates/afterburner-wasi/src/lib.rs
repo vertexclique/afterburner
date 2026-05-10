@@ -8,6 +8,7 @@
 pub mod columnar;
 #[cfg(feature = "daemon")]
 pub mod daemon_cluster;
+pub mod daemon_sab;
 #[cfg(feature = "daemon")]
 pub mod daemon_dgram;
 pub mod daemon_envelopes;

@@ -47,7 +47,72 @@ __register_module('worker_threads', function(module, exports, require) {
         if (typeof globalThis.__host_worker_data !== 'function') return undefined;
         var s = globalThis.__host_worker_data();
         if (!s) return undefined;
-        try { return JSON.parse(s); } catch (_) { return undefined; }
+        try {
+            var obj = JSON.parse(s);
+            return _reattachSABs(obj);
+        } catch (_) { return undefined; }
+    }
+
+    /// Walk a parsed workerData tree replacing every
+    /// `{__ab_sab:true, descriptor, byteLength}` marker with a fresh
+    /// SharedArrayBuffer that re-attaches to the parent's region.
+    /// Plain values (numbers, strings, etc.) pass through untouched.
+    function _reattachSABs(value) {
+        if (!value || typeof value !== 'object') return value;
+        if (value.__ab_sab === true) {
+            var SAB = globalThis.SharedArrayBuffer;
+            return new SAB({
+                __ab_sab_attach: true,
+                descriptor: value.descriptor,
+                byteLength: value.byteLength | 0,
+            });
+        }
+        if (Array.isArray(value)) {
+            for (var i = 0; i < value.length; i++) {
+                value[i] = _reattachSABs(value[i]);
+            }
+            return value;
+        }
+        var keys = Object.keys(value);
+        for (var k = 0; k < keys.length; k++) {
+            value[keys[k]] = _reattachSABs(value[keys[k]]);
+        }
+        return value;
+    }
+
+    /// Inverse of [`_reattachSABs`]: walk a tree pre-`JSON.stringify`
+    /// and replace SharedArrayBuffer instances with markers the child
+    /// can reconstruct. Mutates a *clone* of the input so the user's
+    /// workerData object isn't disturbed.
+    function _markSABs(value, seen) {
+        if (!value || typeof value !== 'object') return value;
+        seen = seen || new WeakMap();
+        if (seen.has(value)) return seen.get(value);
+        // SharedArrayBuffer shadow detection — our shadow stores the
+        // host region id on `_regionId`. A literal SAB the engine
+        // produced (no descriptor) can't be shared cross-process; we
+        // pass it as null so the child observes a missing entry.
+        if (typeof value._regionId === 'number'
+            && typeof value._descriptor === 'string') {
+            return {
+                __ab_sab: true,
+                descriptor: value._descriptor,
+                byteLength: value.byteLength | 0,
+            };
+        }
+        if (Array.isArray(value)) {
+            var arr = [];
+            seen.set(value, arr);
+            for (var i = 0; i < value.length; i++) arr.push(_markSABs(value[i], seen));
+            return arr;
+        }
+        var out = {};
+        seen.set(value, out);
+        var keys = Object.keys(value);
+        for (var k = 0; k < keys.length; k++) {
+            out[keys[k]] = _markSABs(value[keys[k]], seen);
+        }
+        return out;
     }
 
     var IS_MAIN = isMainThreadFn();
@@ -87,7 +152,12 @@ __register_module('worker_threads', function(module, exports, require) {
 
         var dataJson = '';
         if (typeof opts.workerData !== 'undefined') {
-            try { dataJson = JSON.stringify(opts.workerData); }
+            try {
+                // Replace SharedArrayBuffer instances with markers the
+                // child reconstructs via host_sab_open. Plain values
+                // (and non-SAB ArrayBuffers) pass through unchanged.
+                dataJson = JSON.stringify(_markSABs(opts.workerData));
+            }
             catch (e) {
                 throw new TypeError(
                     'workerData must be JSON-serializable: ' + e.message
