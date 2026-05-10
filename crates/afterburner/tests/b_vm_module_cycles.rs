@@ -73,13 +73,16 @@ fn cycle_AB_links_and_evaluates() {
                         console.error('B.fromB=', B.namespace.fromB);
                         process.exit(4);
                     }
-                    // First-evaluated direction: B finishes before A
-                    // (depth-first dep walk), so A's readB sees the
-                    // populated namespace. B's readA back-edge gets
-                    // undefined under snapshot semantics.
+                    // Live-binding semantics: every reference to an
+                    // imported name gets rewritten by the transpiler
+                    // into a property access on the dep's namespace.
+                    // Both directions of the cycle resolve correctly
+                    // post-evaluate, regardless of which body ran
+                    // first.
                     var rb = A.namespace.readB();
-                    if (rb !== 'B_VALUE') {
-                        console.error('A.readB()=', rb);
+                    var ra = B.namespace.readA();
+                    if (rb !== 'B_VALUE' || ra !== 'A_VALUE') {
+                        console.error('cross-ref: A.readB()=' + rb + ' B.readA()=' + ra);
                         process.exit(5);
                     }
                     console.log('CYCLE_OK');
@@ -183,9 +186,13 @@ fn three_node_cycle_ABC() {
                     // (works). C.av() is the back-edge — it captured A
                     // pre-evaluate when its body ran, so it's undefined
                     // under snapshot semantics.
-                    if (A.namespace.bv() !== 2 || B.namespace.cv() !== 3) {
-                        console.error('forward-direction cross-refs:',
-                            A.namespace.bv(), B.namespace.cv());
+                    // Live-binding semantics applies to every back-edge
+                    // in the cycle: each cross-ref reads the dep's
+                    // current namespace property at call time.
+                    if (A.namespace.bv() !== 2 || B.namespace.cv() !== 3
+                        || C.namespace.av() !== 1) {
+                        console.error('cross-refs:', A.namespace.bv(),
+                            B.namespace.cv(), C.namespace.av());
                         process.exit(3);
                     }
                     console.log('THREE_CYCLE_OK');

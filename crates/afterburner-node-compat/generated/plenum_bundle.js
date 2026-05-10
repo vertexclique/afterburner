@@ -11535,8 +11535,16 @@ __register_module('perf_hooks', function(module, exports, require) {
         this._observed = types.slice();
         this._buffered = !!opts.buffered;
         // Spec: when `buffered` is true, replay matching prior entries.
+        // Read from BOTH this module's `entries` buffer AND the global
+        // `performance._entries` buffer that `web_compat.js` populates
+        // via `globalThis.performance.mark()`. Either side may have
+        // pre-existing entries depending on which API the user code
+        // reached for first.
         if (this._buffered) {
-            var matched = entries.filter(function(e) {
+            var globalEntries = (globalThis.performance && globalThis.performance._entries)
+                || [];
+            var pool = entries.concat(globalEntries);
+            var matched = pool.filter(function(e) {
                 return types.indexOf(e.entryType) !== -1;
             });
             if (matched.length) {
@@ -18055,10 +18063,11 @@ __register_module('vm', function(module, exports, require) {
                     var actualExports = moduleObj.exports;
                     // Reuse the namespace placeholder allocated at
                     // link time so any live-binding Proxy already
-                    // pointing at it continues to resolve. The
-                    // namespace isn't frozen — cyclic deps may finish
-                    // populating their own exports after this body
-                    // returns.
+                    // pointing at it continues to resolve. We freeze
+                    // post-population — cyclic deps populate their
+                    // own namespaces during their own evaluate frame,
+                    // so by the time control returns to user code
+                    // every module in the cycle has run its body.
                     var ns = self._namespace;
                     if (actualExports && typeof actualExports === 'object') {
                         var keys = Object.keys(actualExports);
@@ -18071,6 +18080,7 @@ __register_module('vm', function(module, exports, require) {
                     } else if (actualExports !== undefined) {
                         ns['default'] = actualExports;
                     }
+                    Object.freeze(ns);
                     self._status = 'evaluated';
                     resolve(undefined);
                 }

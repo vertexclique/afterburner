@@ -60,7 +60,9 @@ use oxc::ast::ast::{
     ModuleExportName, Statement,
 };
 use oxc::parser::Parser;
+use oxc::semantic::SemanticBuilder;
 use oxc::span::{GetSpan, SourceType};
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Rewrite any top-level ESM declarations in `source` into CJS
@@ -95,8 +97,26 @@ pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
             .join("\n"));
     }
 
+    // Build semantic info so we can find every `IdentifierReference`
+    // that resolves to a named import. Each such reference gets
+    // rewritten in place to `<temp>.<imported_name>`, which gives the
+    // module body live-binding semantics for named imports — the
+    // ES2015 spec's `module record import binding` shape — without
+    // needing engine support. This matches what V8 / SpiderMonkey do
+    // internally with module export getter slots.
+    let semantic = SemanticBuilder::new()
+        .build(&parsed.program)
+        .semantic;
+    let scoping = semantic.scoping();
+    let nodes = semantic.nodes();
+
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
     let mut has_named_or_default_export = false;
+    // Map from each named-import-local symbol id to its rewrite text.
+    // We walk references at the end because oxc's reference table
+    // is keyed by SymbolId; collecting the per-import map first lets
+    // us emit one Vec of edits in source order at the bottom.
+    let mut named_import_rewrites: HashMap<oxc::syntax::symbol::SymbolId, String> = HashMap::new();
 
     for stmt in &parsed.program.body {
         match stmt {
@@ -104,9 +124,33 @@ pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
                 let src_name = decl.source.value.as_str();
                 let start = decl.span.start as usize;
                 let end = decl.span.end as usize;
-                let replacement =
-                    rewrite_import(src_name, decl.specifiers.as_ref().map(|v| v.as_slice()));
+                let temp = next_temp();
+                let (replacement, named_locals) = rewrite_import(
+                    src_name,
+                    decl.specifiers.as_ref().map(|v| v.as_slice()),
+                    &temp,
+                );
                 edits.push((start, end, replacement));
+                // Register named-import locals for the live-binding
+                // reference rewrite. The semantic phase has already
+                // populated `BindingIdentifier::symbol_id` for each
+                // import specifier, so we read it straight from the
+                // AST node — no name-keyed scope lookup needed.
+                if let Some(specs) = decl.specifiers.as_ref() {
+                    for spec in specs {
+                        if let ImportDeclarationSpecifier::ImportSpecifier(s) = spec {
+                            let imported_name = mod_export_name(&s.imported);
+                            if let Some(symbol_id) = s.local.symbol_id.get() {
+                                named_import_rewrites
+                                    .insert(symbol_id, format!("{temp}.{imported_name}"));
+                            }
+                        }
+                    }
+                }
+                // The Vec returned by `rewrite_import` is now unused
+                // here (kept on the function signature for potential
+                // future callers), so drop it.
+                let _ = named_locals;
             }
             Statement::ExportDefaultDeclaration(decl) => {
                 has_named_or_default_export = true;
@@ -117,15 +161,38 @@ pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
             }
             Statement::ExportNamedDeclaration(decl) => {
                 has_named_or_default_export = true;
-                let start = decl.span.start as usize;
-                let end = decl.span.end as usize;
-                let replacement = rewrite_export_named(
-                    decl.declaration.as_ref(),
-                    &decl.specifiers,
-                    decl.source.as_ref().map(|s| s.value.as_str()),
-                    source,
-                );
-                edits.push((start, end, replacement));
+                if let Some(inner) = decl.declaration.as_ref() {
+                    // `export const foo = …` / `export function foo()` /
+                    // `export class Foo` — leave the inner declaration's
+                    // *body* in place so any imported-name references
+                    // inside it stay at their original byte offsets
+                    // (the live-binding pass relies on those positions).
+                    // Two surgical edits: drop the leading `export ` and
+                    // append the `exports.X = X` line after the body.
+                    let outer_start = decl.span.start as usize;
+                    let inner_span = inner.span();
+                    let inner_start = inner_span.start as usize;
+                    let inner_end = inner_span.end as usize;
+                    edits.push((outer_start, inner_start, String::new()));
+                    let names = decl_names(inner);
+                    let mut tail = String::new();
+                    for name in names {
+                        tail.push_str(&format!("\nexports.{name} = {name};"));
+                    }
+                    if !tail.is_empty() {
+                        edits.push((inner_end, inner_end, tail));
+                    }
+                } else {
+                    let start = decl.span.start as usize;
+                    let end = decl.span.end as usize;
+                    let replacement = rewrite_export_named(
+                        decl.declaration.as_ref(),
+                        &decl.specifiers,
+                        decl.source.as_ref().map(|s| s.value.as_str()),
+                        source,
+                    );
+                    edits.push((start, end, replacement));
+                }
             }
             Statement::ExportAllDeclaration(decl) => {
                 has_named_or_default_export = true;
@@ -140,6 +207,28 @@ pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
                 ));
             }
             _ => {}
+        }
+    }
+
+    // Live-binding pass: walk every named-import local's resolved
+    // references and rewrite each one to `<temp>.<imported>`. The
+    // `IdentifierReference` AST node's span is the byte range of
+    // *just the identifier* — declarations and import-spec sites
+    // don't appear in the reference table, so we never accidentally
+    // splice the import declaration itself (it's already replaced
+    // above by the `const __ab_esm_N = require(...)` shape).
+    if !named_import_rewrites.is_empty() {
+        for (symbol_id, replacement) in &named_import_rewrites {
+            for ref_id in scoping.get_resolved_reference_ids(*symbol_id) {
+                let reference = scoping.get_reference(*ref_id);
+                let node = nodes.get_node(reference.node_id());
+                let span = node.span();
+                edits.push((
+                    span.start as usize,
+                    span.end as usize,
+                    replacement.clone(),
+                ));
+            }
         }
     }
 
@@ -166,18 +255,40 @@ pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
     Ok(out)
 }
 
-fn rewrite_import(src: &str, specifiers: Option<&[ImportDeclarationSpecifier]>) -> String {
+/// Lower one `import` declaration. Returns the replacement text and a
+/// `Vec<(local_name, imported_name)>` of *named* imports the caller
+/// must then live-bind by reference rewriting in the module body.
+///
+/// Default + namespace imports stay declared as `const` because:
+///
+/// * **default**: spec semantics for `import X from 'Y'` are a snapshot
+///   of `Y`'s default export at link time. CJS already enforces that —
+///   `module.exports.default` is set once during evaluate and doesn't
+///   change. A `const` binding matches.
+/// * **namespace**: `import * as Ns from 'Y'` binds the module
+///   namespace object. Since CJS `require('Y')` returns the same
+///   object reference forever, `const Ns = require('Y')` already
+///   gives live property reads (`Ns.foo` always reads the current
+///   value). No rewrite needed.
+/// * **named**: `import { fromB } from 'Y'` is the case the spec
+///   defines as a *getter slot* on the importer's environment. The
+///   caller rewrites every reference to `fromB` into `<temp>.fromB`
+///   so cross-module reads bypass the snapshot a const binding would
+///   freeze.
+fn rewrite_import(
+    src: &str,
+    specifiers: Option<&[ImportDeclarationSpecifier]>,
+    temp: &str,
+) -> (String, Vec<(String, String)>) {
     let src_lit = js_string_literal(src);
     let Some(specs) = specifiers else {
         // `import 'Y'` — pure side-effect.
-        return format!("require({src_lit});");
+        return (format!("require({src_lit});"), Vec::new());
     };
     if specs.is_empty() {
-        return format!("require({src_lit});");
+        return (format!("require({src_lit});"), Vec::new());
     }
 
-    // Collect the three kinds separately so we can build one require
-    // per module (avoids re-evaluating side effects).
     let mut default_local: Option<String> = None;
     let mut namespace_local: Option<String> = None;
     let mut named: Vec<(String, String)> = Vec::new();
@@ -193,22 +304,16 @@ fn rewrite_import(src: &str, specifiers: Option<&[ImportDeclarationSpecifier]>) 
             ImportDeclarationSpecifier::ImportSpecifier(s) => {
                 let imported = mod_export_name(&s.imported);
                 let local = s.local.name.to_string();
-                named.push((imported, local));
+                // `(local, imported)` — local is what the user code
+                // refers to; imported is the property to read off the
+                // namespace object. Same string when there's no rename.
+                named.push((local, imported));
             }
         }
     }
 
-    // One stable temp binding per import statement holds the module
-    // object; each specifier binds off that. `__ab_esm_N` isn't
-    // colliding with user code if the user doesn't write names
-    // starting with `__ab_`, which they shouldn't.
-    let temp = next_temp();
     let mut out = format!("const {temp} = require({src_lit});\n");
-
     if let Some(local) = default_local {
-        // TS `esModuleInterop` equivalent: if the require object has
-        // an `__esModule: true` flag, pull `.default`; otherwise take
-        // the object itself as the default binding.
         out.push_str(&format!(
             "const {local} = {temp} && {temp}.__esModule ? {temp}.default : {temp};\n"
         ));
@@ -216,20 +321,12 @@ fn rewrite_import(src: &str, specifiers: Option<&[ImportDeclarationSpecifier]>) 
     if let Some(local) = namespace_local {
         out.push_str(&format!("const {local} = {temp};\n"));
     }
-    if !named.is_empty() {
-        let bindings: Vec<String> = named
-            .iter()
-            .map(|(imp, local)| {
-                if imp == local {
-                    local.clone()
-                } else {
-                    format!("{imp}: {local}")
-                }
-            })
-            .collect();
-        out.push_str(&format!("const {{ {} }} = {temp};\n", bindings.join(", ")));
-    }
-    out
+    // Named imports: do NOT emit `const { ... } = temp`. The caller
+    // walks oxc's reference table to rewrite every use of `local`
+    // into `temp.imported`, giving real ES2015 live-binding
+    // semantics. The empty const declaration left here would shadow
+    // those rewrites, so it's omitted entirely.
+    (out, named)
 }
 
 fn rewrite_export_default(kind: &ExportDefaultDeclarationKind, source: &str) -> String {
@@ -323,6 +420,15 @@ fn rewrite_export_all(src: &str, exported_as: Option<&str>) -> String {
             )
         }
     }
+}
+
+/// Names a Declaration introduces into scope. Used by the
+/// surgical-edit path for `export const/function/class` so we can
+/// emit one `exports.X = X` line per binding without replacing the
+/// declaration text itself.
+fn decl_names(decl: &Declaration) -> Vec<String> {
+    let (_, names) = decl_span_and_names(decl);
+    names
 }
 
 /// Returns the outer span covering a Declaration and the list of

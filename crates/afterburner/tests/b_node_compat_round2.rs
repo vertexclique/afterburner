@@ -22,6 +22,23 @@ fn run_inline(source: &str) -> std::process::Output {
         .expect("spawn burn")
 }
 
+/// Same as [`run_inline`] but also clears every color-affecting
+/// environment variable. The tty / process polyfills now honour
+/// `COLORTERM`/`FORCE_COLOR`/`NO_COLOR`/`TERM` for real, so tests
+/// that assert deterministic color-depth values need to neutralise
+/// the host shell's environment.
+fn run_inline_no_color(source: &str) -> std::process::Output {
+    Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .env("NO_COLOR", "1")
+        .env_remove("FORCE_COLOR")
+        .env_remove("COLORTERM")
+        .env_remove("TERM")
+        .args(["-A", "-e", source])
+        .output()
+        .expect("spawn burn")
+}
+
 fn assert_ok(out: &std::process::Output, marker: &str) {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -345,17 +362,29 @@ fn inspector_url_returns_undefined_when_closed() {
 
 #[test]
 #[serial]
-fn inspector_session_post_callback_receives_error() {
+fn inspector_session_post_callback_invokes_handler() {
+    // Session.post is now backed by a real CDP dispatcher (see R11).
+    // Debugger.enable is a real method that returns
+    // `{debuggerId: 'burn-debugger'}`; the callback receives no
+    // error. Posting WITHOUT calling .connect() still surfaces
+    // ERR_INSPECTOR_NOT_CONNECTED, which is checked separately
+    // below.
     let src = r#"
         const { Session } = require('inspector');
-        const s = new Session();
-        s.connect();
-        s.post('Debugger.enable', (err) => {
-            if (!err || err.code !== 'ERR_INSPECTOR_NOT_CONNECTED') {
-                console.error('wrong err:', err); process.exit(2);
+        const connected = new Session();
+        connected.connect();
+        connected.post('Debugger.enable', (err, res) => {
+            if (err || !res || res.debuggerId === undefined) {
+                console.error('connected post bad:', err, res); process.exit(2);
             }
-            console.log('SESSION_OK');
-            process.exit(0);
+            const detached = new Session();
+            detached.post('Debugger.enable', (err2) => {
+                if (!err2 || err2.code !== 'ERR_INSPECTOR_NOT_CONNECTED') {
+                    console.error('detached err bad:', err2); process.exit(3);
+                }
+                console.log('SESSION_OK');
+                process.exit(0);
+            });
         });
         setTimeout(() => process.exit(99), 3000);
     "#;
@@ -462,7 +491,11 @@ fn tty_isatty_returns_false() {
 
 #[test]
 #[serial]
-fn tty_writestream_has_stub_terminal_methods() {
+fn tty_writestream_has_terminal_methods() {
+    // tty.WriteStream is now real (env-honouring). With NO_COLOR=1
+    // and TERM/FORCE_COLOR/COLORTERM unset, getColorDepth must
+    // return 1 (mono). The structural surface (isTTY, clearLine,
+    // cursorTo) is still asserted.
     let src = r#"
         const tty = require('tty');
         const w = new tty.WriteStream(1);
@@ -477,7 +510,7 @@ fn tty_writestream_has_stub_terminal_methods() {
         }
         console.log('TTY_WRITE_OK');
     "#;
-    assert_ok(&run_inline(src), "TTY_WRITE_OK");
+    assert_ok(&run_inline_no_color(src), "TTY_WRITE_OK");
 }
 
 // ----- util/types ------------------------------------------------------

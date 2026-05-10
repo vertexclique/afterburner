@@ -144,8 +144,16 @@ __register_module('perf_hooks', function(module, exports, require) {
         this._observed = types.slice();
         this._buffered = !!opts.buffered;
         // Spec: when `buffered` is true, replay matching prior entries.
+        // Read from BOTH this module's `entries` buffer AND the global
+        // `performance._entries` buffer that `web_compat.js` populates
+        // via `globalThis.performance.mark()`. Either side may have
+        // pre-existing entries depending on which API the user code
+        // reached for first.
         if (this._buffered) {
-            var matched = entries.filter(function(e) {
+            var globalEntries = (globalThis.performance && globalThis.performance._entries)
+                || [];
+            var pool = entries.concat(globalEntries);
+            var matched = pool.filter(function(e) {
                 return types.indexOf(e.entryType) !== -1;
             });
             if (matched.length) {
