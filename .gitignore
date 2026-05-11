@@ -22,4 +22,4 @@ worker/.wrangler/
 # in CI). Everything else under docs/ stays out of git.
 docs/**
 !docs/wit/
-!docs/wit/**
+!docs/wit/**report.*.json
