@@ -5669,6 +5669,393 @@ fn wrap_wasm_loader(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
         )
         .map_err(link_err)?;
 
+    // ---- Standalone Memory / Table / Global ---------------------
+    //
+    // `new WebAssembly.Memory(descriptor)` etc. create resources
+    // outside an Instance. Each resource lives in its own Store on
+    // the host side (the WasmLoader's StandaloneRegistry). The
+    // JS-side polyfill calls these to bridge.
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_mem_new",
+            |mut caller: Caller<'_, HostState>, initial: i32, maximum: i32| -> i64 {
+                if initial < 0 {
+                    return -1;
+                }
+                let max = if maximum < 0 { None } else { Some(maximum as u32) };
+                let loader = caller.data().wasm_loader.clone();
+                match loader.memory_standalone_create(initial as u32, max) {
+                    Ok(id) => id as i64,
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_mem_size",
+            |caller: Caller<'_, HostState>, id: i64| -> i64 {
+                let loader = caller.data().wasm_loader.clone();
+                loader
+                    .memory_standalone_size(id as u64)
+                    .map(|n| n as i64)
+                    .unwrap_or(-1)
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_mem_grow",
+            |mut caller: Caller<'_, HostState>, id: i64, delta: i32| -> i64 {
+                if delta < 0 {
+                    return -1;
+                }
+                let loader = caller.data().wasm_loader.clone();
+                match loader.memory_standalone_grow(id as u64, delta as u32) {
+                    Ok(prev) => prev,
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_mem_read",
+            |mut caller: Caller<'_, HostState>,
+             id: i64,
+             offset: i32,
+             len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                if offset < 0 || len < 0 {
+                    return E_OTHER;
+                }
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let loader = caller.data().wasm_loader.clone();
+                match loader.memory_standalone_read(id as u64, offset as u32, len as u32) {
+                    Ok(bytes) => {
+                        // Match the existing instance-memory wire
+                        // format: base64-encode the bytes so the JS
+                        // side can `Buffer.from(s, 'base64')` to
+                        // recover them.
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        write_out(&mut caller, &memory, out_ptr, out_cap, b64.as_bytes())
+                    }
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        E_OTHER
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_mem_write",
+            |mut caller: Caller<'_, HostState>,
+             id: i64,
+             offset: i32,
+             bytes_b64_ptr: i32,
+             bytes_b64_len: i32|
+             -> i32 {
+                if offset < 0 {
+                    return E_OTHER;
+                }
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(b64) = read_str(&memory, &caller, bytes_b64_ptr, bytes_b64_len) else {
+                    return E_OTHER;
+                };
+                let bytes = match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        caller.data_mut().last_error = format!("mem_write base64: {e}");
+                        return E_OTHER;
+                    }
+                };
+                let loader = caller.data().wasm_loader.clone();
+                match loader.memory_standalone_write(id as u64, offset as u32, &bytes) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        E_OTHER
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_mem_drop",
+            |caller: Caller<'_, HostState>, id: i64| -> i32 {
+                let loader = caller.data().wasm_loader.clone();
+                loader.memory_standalone_drop(id as u64);
+                0
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_global_new",
+            |mut caller: Caller<'_, HostState>,
+             ty_ptr: i32,
+             ty_len: i32,
+             mutable: i32,
+             val_ptr: i32,
+             val_len: i32|
+             -> i64 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return -1;
+                };
+                let Some(ty) = read_str(&memory, &caller, ty_ptr, ty_len) else {
+                    return -1;
+                };
+                let init_str = read_str(&memory, &caller, val_ptr, val_len).unwrap_or_default();
+                let init_val: serde_json::Value =
+                    serde_json::from_str(&init_str).unwrap_or(serde_json::json!({}));
+                let init = match ty.as_str() {
+                    "i32" => crate::wasm_loader::WasmValue::I32(
+                        init_val.get("value").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                    ),
+                    "i64" => crate::wasm_loader::WasmValue::I64(
+                        init_val
+                            .get("value")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .or_else(|| init_val.get("value").and_then(|v| v.as_i64()))
+                            .unwrap_or(0),
+                    ),
+                    "f32" => crate::wasm_loader::WasmValue::F32(
+                        init_val.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                    ),
+                    "f64" => crate::wasm_loader::WasmValue::F64(
+                        init_val.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    ),
+                    _ => {
+                        caller.data_mut().last_error = format!("Global.new: unknown type {ty}");
+                        return -1;
+                    }
+                };
+                let loader = caller.data().wasm_loader.clone();
+                match loader.global_standalone_create(&ty, mutable != 0, init) {
+                    Ok(id) => id as i64,
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_global_get_sa",
+            |mut caller: Caller<'_, HostState>, id: i64, out_ptr: i32, out_cap: i32| -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let loader = caller.data().wasm_loader.clone();
+                match loader.global_standalone_get(id as u64) {
+                    Ok(v) => {
+                        let json = match v {
+                            crate::wasm_loader::WasmValue::I32(n) => {
+                                serde_json::json!({"type":"i32","value":n})
+                            }
+                            crate::wasm_loader::WasmValue::I64(n) => {
+                                serde_json::json!({"type":"i64","value":n.to_string()})
+                            }
+                            crate::wasm_loader::WasmValue::F32(f) => {
+                                serde_json::json!({"type":"f32","value":f})
+                            }
+                            crate::wasm_loader::WasmValue::F64(f) => {
+                                serde_json::json!({"type":"f64","value":f})
+                            }
+                        }
+                        .to_string();
+                        write_out(&mut caller, &memory, out_ptr, out_cap, json.as_bytes())
+                    }
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        E_OTHER
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_global_set_sa",
+            |mut caller: Caller<'_, HostState>, id: i64, val_ptr: i32, val_len: i32| -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let Some(val_str) = read_str(&memory, &caller, val_ptr, val_len) else {
+                    return E_OTHER;
+                };
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&val_str).unwrap_or(serde_json::json!({}));
+                let val = match parsed.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                    "i32" => crate::wasm_loader::WasmValue::I32(
+                        parsed.get("value").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                    ),
+                    "i64" => crate::wasm_loader::WasmValue::I64(
+                        parsed
+                            .get("value")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .or_else(|| parsed.get("value").and_then(|v| v.as_i64()))
+                            .unwrap_or(0),
+                    ),
+                    "f32" => crate::wasm_loader::WasmValue::F32(
+                        parsed.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                    ),
+                    "f64" => crate::wasm_loader::WasmValue::F64(
+                        parsed.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    ),
+                    _ => return E_OTHER,
+                };
+                let loader = caller.data().wasm_loader.clone();
+                match loader.global_standalone_set(id as u64, val) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        E_OTHER
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_global_drop",
+            |caller: Caller<'_, HostState>, id: i64| -> i32 {
+                let loader = caller.data().wasm_loader.clone();
+                loader.global_standalone_drop(id as u64);
+                0
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_table_new",
+            |mut caller: Caller<'_, HostState>,
+             elem_ptr: i32,
+             elem_len: i32,
+             initial: i32,
+             maximum: i32|
+             -> i64 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return -1;
+                };
+                let Some(elem) = read_str(&memory, &caller, elem_ptr, elem_len) else {
+                    return -1;
+                };
+                if initial < 0 {
+                    return -1;
+                }
+                let max = if maximum < 0 { None } else { Some(maximum as u32) };
+                let loader = caller.data().wasm_loader.clone();
+                match loader.table_standalone_create(&elem, initial as u32, max) {
+                    Ok(id) => id as i64,
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_table_size_sa",
+            |caller: Caller<'_, HostState>, id: i64| -> i32 {
+                let loader = caller.data().wasm_loader.clone();
+                loader.table_standalone_size(id as u64).map(|n| n as i32).unwrap_or(-1)
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_table_grow_sa",
+            |mut caller: Caller<'_, HostState>, id: i64, delta: i32| -> i64 {
+                if delta < 0 {
+                    return -1;
+                }
+                let loader = caller.data().wasm_loader.clone();
+                match loader.table_standalone_grow(id as u64, delta as u32) {
+                    Ok(prev) => prev,
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_table_drop",
+            |caller: Caller<'_, HostState>, id: i64| -> i32 {
+                let loader = caller.data().wasm_loader.clone();
+                loader.table_standalone_drop(id as u64);
+                0
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_wasm_run_wasi",
+            |mut caller: Caller<'_, HostState>,
+             module_id: i64,
+             cfg_ptr: i32,
+             cfg_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return -1;
+                };
+                let Some(cfg) = read_str(&memory, &caller, cfg_ptr, cfg_len) else {
+                    return -1;
+                };
+                let loader = caller.data().wasm_loader.clone();
+                match loader.run_wasi(module_id as u64, &cfg) {
+                    Ok(code) => code,
+                    Err(e) => {
+                        caller.data_mut().last_error = e.to_string();
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+
     Ok(())
 }
 

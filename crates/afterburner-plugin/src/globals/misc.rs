@@ -1228,6 +1228,131 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
             }
         }),
     );
+
+    // ---- Standalone WebAssembly resources --------------------
+    let _ = globals.set(
+        "__host_wasm_mem_new",
+        Func::from(|initial: f64, maximum: f64| -> f64 {
+            unsafe { host_wasm_mem_new(initial as i32, maximum as i32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_wasm_mem_size",
+        Func::from(|id: f64| -> f64 { unsafe { host_wasm_mem_size(id as i64) as f64 } }),
+    );
+    let _ = globals.set(
+        "__host_wasm_mem_grow",
+        Func::from(|id: f64, delta: f64| -> f64 {
+            unsafe { host_wasm_mem_grow(id as i64, delta as i32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_wasm_mem_read",
+        Func::from(|id: f64, offset: f64, len: f64| -> String {
+            match call_read(|out, cap| unsafe {
+                host_wasm_mem_read(id as i64, offset as i32, len as i32, out, cap)
+            }) {
+                Ok(s) => s,
+                Err(e) => alloc::format!("__HOST_ERR__:{e}"),
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_wasm_mem_write",
+        Func::from(|id: f64, offset: f64, bytes_b64: String| -> f64 {
+            // Pass the base64 string straight through — the host
+            // decodes. Matches the wire shape of the older
+            // instance-export `__host_wasm_memory_write`.
+            let bb = bytes_b64.as_bytes();
+            unsafe {
+                host_wasm_mem_write(
+                    id as i64,
+                    offset as i32,
+                    bb.as_ptr(),
+                    bb.len() as u32,
+                ) as f64
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_wasm_mem_drop",
+        Func::from(|id: f64| -> f64 { unsafe { host_wasm_mem_drop(id as i64) as f64 } }),
+    );
+    let _ = globals.set(
+        "__host_wasm_global_new",
+        Func::from(|ty: String, mutable: f64, val_json: String| -> f64 {
+            let tb = ty.as_bytes();
+            let vb = val_json.as_bytes();
+            unsafe {
+                host_wasm_global_new(
+                    tb.as_ptr(),
+                    tb.len() as u32,
+                    mutable as i32,
+                    vb.as_ptr(),
+                    vb.len() as u32,
+                ) as f64
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_wasm_global_get_sa",
+        Func::from(|id: f64| -> String {
+            match call_read(|out, cap| unsafe { host_wasm_global_get_sa(id as i64, out, cap) }) {
+                Ok(s) => s,
+                Err(e) => alloc::format!("__HOST_ERR__:{e}"),
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_wasm_global_set_sa",
+        Func::from(|id: f64, val_json: String| -> f64 {
+            let vb = val_json.as_bytes();
+            unsafe { host_wasm_global_set_sa(id as i64, vb.as_ptr(), vb.len() as u32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_wasm_global_drop",
+        Func::from(|id: f64| -> f64 { unsafe { host_wasm_global_drop(id as i64) as f64 } }),
+    );
+    let _ = globals.set(
+        "__host_wasm_table_new",
+        Func::from(|elem: String, initial: f64, maximum: f64| -> f64 {
+            let eb = elem.as_bytes();
+            unsafe {
+                host_wasm_table_new(
+                    eb.as_ptr(),
+                    eb.len() as u32,
+                    initial as i32,
+                    maximum as i32,
+                ) as f64
+            }
+        }),
+    );
+    let _ = globals.set(
+        "__host_wasm_table_size_sa",
+        Func::from(|id: f64| -> f64 {
+            unsafe { host_wasm_table_size_sa(id as i64) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_wasm_table_grow_sa",
+        Func::from(|id: f64, delta: f64| -> f64 {
+            unsafe { host_wasm_table_grow_sa(id as i64, delta as i32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_wasm_table_drop",
+        Func::from(|id: f64| -> f64 { unsafe { host_wasm_table_drop(id as i64) as f64 } }),
+    );
+    let _ = globals.set(
+        "__host_wasm_run_wasi",
+        Func::from(|module_id: f64, cfg: String| -> f64 {
+            let cb = cfg.as_bytes();
+            unsafe {
+                host_wasm_run_wasi(module_id as i64, cb.as_ptr(), cb.len() as u32) as f64
+            }
+        }),
+    );
 }
 
 fn install_os<'js>(globals: &Object<'js>) {

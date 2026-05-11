@@ -1039,4 +1039,46 @@ unsafe extern "C" {
         name_len: u32,
         delta: i32,
     ) -> i64;
+    // ---- Standalone WebAssembly resources ---------------------
+    pub fn host_wasm_mem_new(initial: i32, maximum: i32) -> i64;
+    pub fn host_wasm_mem_size(id: i64) -> i64;
+    pub fn host_wasm_mem_grow(id: i64, delta: i32) -> i64;
+    pub fn host_wasm_mem_read(
+        id: i64,
+        offset: i32,
+        len: i32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+    pub fn host_wasm_mem_write(
+        id: i64,
+        offset: i32,
+        bytes_ptr: *const u8,
+        bytes_len: u32,
+    ) -> i32;
+    pub fn host_wasm_mem_drop(id: i64) -> i32;
+    pub fn host_wasm_global_new(
+        ty_ptr: *const u8,
+        ty_len: u32,
+        mutable: i32,
+        val_ptr: *const u8,
+        val_len: u32,
+    ) -> i64;
+    pub fn host_wasm_global_get_sa(id: i64, out_ptr: *mut u8, out_cap: u32) -> i32;
+    pub fn host_wasm_global_set_sa(id: i64, val_ptr: *const u8, val_len: u32) -> i32;
+    pub fn host_wasm_global_drop(id: i64) -> i32;
+    pub fn host_wasm_table_new(
+        elem_ptr: *const u8,
+        elem_len: u32,
+        initial: i32,
+        maximum: i32,
+    ) -> i64;
+    pub fn host_wasm_table_size_sa(id: i64) -> i32;
+    pub fn host_wasm_table_grow_sa(id: i64, delta: i32) -> i64;
+    pub fn host_wasm_table_drop(id: i64) -> i32;
+    pub fn host_wasm_run_wasi(
+        module_id: i64,
+        cfg_ptr: *const u8,
+        cfg_len: u32,
+    ) -> i32;
 }

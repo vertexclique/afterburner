@@ -18410,43 +18410,84 @@ __register_module('wasi', function(module, exports, require) {
     }
 
     WASI.prototype.getImportObject = function() {
-        // v1 returns an empty import map. WASM modules that import
-        // `wasi_snapshot_preview1.<func>` will fail at instantiate
-        // with `LinkError: import not satisfied: wasi_snapshot_preview1.<func>`,
-        // which tells the caller which entry is still pending.
-        return {};
+        // Returns a sentinel object the WebAssembly.Instance shim
+        // recognises and routes through `__host_wasm_run_wasi`. The
+        // import map's `wasi_snapshot_preview1` entry is a marker
+        // — the actual syscall bridge lives in wasmtime-wasi on the
+        // host side, which the run_wasi flow links into a fresh Store.
+        var self = this;
+        return {
+            wasi_snapshot_preview1: { __ab_wasi: self },
+        };
     };
 
-    WASI.prototype.start = function(instance) {
+    function _runHostWasi(wasi, mod) {
+        if (typeof globalThis.__host_wasm_run_wasi !== 'function') {
+            throw new Error('WASI: host runner not available');
+        }
+        if (!mod || typeof mod._id !== 'number') {
+            throw new TypeError(
+                'WASI: argument must be a `WebAssembly.Module` (compile bytes first)'
+            );
+        }
+        var cfg = JSON.stringify({
+            args: wasi.args,
+            env: wasi.env,
+            preopens: wasi.preopens,
+        });
+        var code = globalThis.__host_wasm_run_wasi(mod._id, cfg);
+        return code | 0;
+    }
+
+    /// `start(moduleOrInstance)` — runs the wasm module's `_start`
+    /// export. Burn deviates from Node's exact instance-flow contract
+    /// because WASI imports are bridged on the host (wasmtime-wasi);
+    /// passing a Module directly is the supported path. Passing an
+    /// already-instantiated Instance also works as long as the
+    /// instance was created via `WebAssembly.instantiate(mod,
+    /// wasi.getImportObject())` (we re-use the underlying module).
+    WASI.prototype.start = function(arg) {
         if (this._started) {
             throw new Error('WASI.start: instance already started');
         }
         this._started = true;
-        var fn = instance && instance.exports && instance.exports._start;
-        if (typeof fn !== 'function') {
+        var mod;
+        if (arg && typeof arg._id === 'number') {
+            mod = arg;
+        } else if (arg && arg._module && typeof arg._module._id === 'number') {
+            mod = arg._module;
+        } else {
             throw new TypeError(
-                'WASI.start: instance must export `_start` (compile module ' +
-                'with `wasm32-wasi` / `wasi-libc` to get the standard entry)'
+                'WASI.start: argument must be a `WebAssembly.Module` or Instance'
             );
         }
         try {
-            fn();
+            var code = _runHostWasi(this, mod);
+            if (this.returnOnExit) return code;
+            if (code !== 0) {
+                var err = new Error('WASI exited with code ' + code);
+                err.code = code;
+                throw err;
+            }
+            return 0;
         } catch (e) {
-            // WASI exits via a special trap; surface the exit code
-            // when present.
-            if (e && typeof e.code === 'number') {
-                if (this.returnOnExit) return e.code;
-                throw e;
+            if (this.returnOnExit && e && typeof e.code === 'number') {
+                return e.code;
             }
             throw e;
         }
-        return 0;
     };
 
-    WASI.prototype.initialize = function(instance) {
-        var fn = instance && instance.exports && instance.exports._initialize;
-        if (typeof fn !== 'function') return;
-        fn();
+    /// `initialize(moduleOrInstance)` — runs the wasm module's
+    /// `_initialize` export instead of `_start`. Spec-defined alt
+    /// entry for "reactor" modules (libraries, not commands).
+    WASI.prototype.initialize = function(_arg) {
+        // For reactor modules, instantiation alone runs `_initialize`
+        // — wasmtime-wasi's `add_to_linker_sync` plus instantiate is
+        // sufficient. The host's run_wasi path includes that step,
+        // so the most direct mapping is to no-op when the user calls
+        // `initialize` after a sentinel-shaped Instance — the
+        // initialization already happened during instantiation.
     };
 
     exports.WASI = WASI;
@@ -23318,59 +23359,73 @@ __register_module('wasi', function(module, exports, require) {
     /// memory — that's the shape every npm package actually uses.
     /// Constructing a standalone Memory throws a clear error.
     function Memory(descriptor) {
-        // Internal-construction marker. Real callers always pass a
-        // descriptor; instance-export wrap-ups pass `{ _instanceId }`.
+        // Internal-construction marker. Instance-export wrap-ups
+        // pass `{ _instanceId }`; user-facing `new Memory(...)` passes
+        // `{ initial, maximum, shared }` per the WebAssembly spec.
         if (descriptor && descriptor._instanceId !== undefined) {
             this._instanceId = descriptor._instanceId;
+            this._standaloneId = 0;
             return;
         }
-        throw new Error(
-            'WebAssembly.Memory(descriptor) standalone construction is not supported in burn yet — ' +
-            'access memory via instance.exports.memory after instantiating a module that exports one.'
-        );
+        if (!descriptor || typeof descriptor.initial !== 'number') {
+            throw new TypeError(
+                'WebAssembly.Memory: descriptor.initial must be a number'
+            );
+        }
+        var fn = ensureHost('__host_wasm_mem_new');
+        var max = typeof descriptor.maximum === 'number' ? descriptor.maximum : -1;
+        var id = fn(descriptor.initial | 0, max);
+        if (id < 0) {
+            throw new RangeError('WebAssembly.Memory: alloc failed');
+        }
+        this._instanceId = 0;
+        this._standaloneId = id;
     }
 
     Object.defineProperty(Memory.prototype, 'buffer', {
         get: function() {
-            // Spec: returns ArrayBuffer view. We snapshot the host
-            // memory into a fresh Uint8Array each call. Mutating the
-            // snapshot does NOT affect the WASM memory — callers that
-            // want to write must use `memory._write(offset, buf)` (a
-            // burn extension, since the spec's ArrayBuffer would
-            // require shared-buffer semantics we don't have).
-            var sizeFn = ensureHost('__host_wasm_memory_size');
-            var size = sizeFn(this._instanceId) | 0;
-            if (size < 0) {
-                throw new Error('WebAssembly.Memory: instance closed or no memory');
+            var size, b64;
+            if (this._standaloneId) {
+                var sizeFn = ensureHost('__host_wasm_mem_size');
+                size = sizeFn(this._standaloneId) | 0;
+                if (size < 0) throw new Error('WebAssembly.Memory: invalid');
+                var readFn = ensureHost('__host_wasm_mem_read');
+                b64 = readFn(this._standaloneId, 0, size);
+            } else {
+                var sizeFn2 = ensureHost('__host_wasm_memory_size');
+                size = sizeFn2(this._instanceId) | 0;
+                if (size < 0) {
+                    throw new Error('WebAssembly.Memory: instance closed or no memory');
+                }
+                var readFn2 = ensureHost('__host_wasm_memory_read');
+                b64 = readFn2(this._instanceId, 0, size);
             }
-            var readFn = ensureHost('__host_wasm_memory_read');
-            var b64 = readFn(this._instanceId, 0, size);
             if (isHostErr(b64)) throw new Error(b64.slice('__HOST_ERR__:'.length));
             return Buffer.from(b64, 'base64').buffer;
         },
     });
 
-    /// Burn extension: read raw bytes at `offset` for `len` bytes.
-    /// More efficient than `.buffer` for slicing.
     Memory.prototype.read = function(offset, len) {
-        var fn = ensureHost('__host_wasm_memory_read');
-        var b64 = fn(this._instanceId, offset | 0, len | 0);
+        var fn = this._standaloneId
+            ? ensureHost('__host_wasm_mem_read')
+            : ensureHost('__host_wasm_memory_read');
+        var id = this._standaloneId || this._instanceId;
+        var b64 = fn(id, offset | 0, len | 0);
         if (isHostErr(b64)) throw new Error(b64.slice('__HOST_ERR__:'.length));
         return Buffer.from(b64, 'base64');
     };
 
-    /// Burn extension: write a Buffer / Uint8Array into the WASM
-    /// memory at `offset`. The spec's `memory.buffer.set(...)` would
-    /// require shared-buffer semantics with the host, which we don't
-    /// have — `write()` is the explicit replacement.
     Memory.prototype.write = function(offset, data) {
         var bytes;
         if (Buffer.isBuffer(data)) bytes = data;
         else if (data instanceof Uint8Array) bytes = Buffer.from(data);
         else if (data instanceof ArrayBuffer) bytes = Buffer.from(new Uint8Array(data));
         else throw new TypeError('WebAssembly.Memory.write: data must be Buffer/Uint8Array/ArrayBuffer');
-        var fn = ensureHost('__host_wasm_memory_write');
-        var rc = fn(this._instanceId, offset | 0, bytes.toString('base64'));
+        var fn = this._standaloneId
+            ? ensureHost('__host_wasm_mem_write')
+            : ensureHost('__host_wasm_memory_write');
+        var id = this._standaloneId || this._instanceId;
+        var rc = fn(id, offset | 0, bytes.toString('base64'));
         if (rc < 0) {
             var detail = (typeof globalThis.__host_last_error === 'function')
                 ? globalThis.__host_last_error()
@@ -23381,8 +23436,11 @@ __register_module('wasi', function(module, exports, require) {
     };
 
     Memory.prototype.grow = function(deltaPages) {
-        var fn = ensureHost('__host_wasm_memory_grow');
-        var prev = fn(this._instanceId, deltaPages | 0);
+        var fn = this._standaloneId
+            ? ensureHost('__host_wasm_mem_grow')
+            : ensureHost('__host_wasm_memory_grow');
+        var id = this._standaloneId || this._instanceId;
+        var prev = fn(id, deltaPages | 0);
         if (prev < 0) {
             throw new RangeError('WebAssembly.Memory.grow: maximum exceeded');
         }
@@ -23616,17 +23674,35 @@ __register_module('wasi', function(module, exports, require) {
         }
     }
 
-    function compileStreaming() {
-        return Promise.reject(new Error(
-            'WebAssembly.compileStreaming is not supported in burn — ' +
-            'fetch bytes first via fs / fetch and pass them to WebAssembly.compile'
-        ));
+    /// `compileStreaming(source)` — `source` is a `Response` (from
+    /// fetch) or a Promise<Response>. Spec: pull the response body
+    /// as bytes, then run `compile`. Burn implements it as the
+    /// straight composition since our `Response.arrayBuffer()` already
+    /// buffers the body — there's no real streaming-compile in
+    /// wasmtime's JS surface to forward to.
+    function compileStreaming(source) {
+        return Promise.resolve(source).then(function(response) {
+            if (!response || typeof response.arrayBuffer !== 'function') {
+                throw new TypeError(
+                    'WebAssembly.compileStreaming: argument must be a Response'
+                );
+            }
+            return response.arrayBuffer();
+        }).then(function(buffer) {
+            return compile(buffer);
+        });
     }
-    function instantiateStreaming() {
-        return Promise.reject(new Error(
-            'WebAssembly.instantiateStreaming is not supported in burn — ' +
-            'fetch bytes first via fs / fetch and pass them to WebAssembly.instantiate'
-        ));
+    function instantiateStreaming(source, importsObject) {
+        return Promise.resolve(source).then(function(response) {
+            if (!response || typeof response.arrayBuffer !== 'function') {
+                throw new TypeError(
+                    'WebAssembly.instantiateStreaming: argument must be a Response'
+                );
+            }
+            return response.arrayBuffer();
+        }).then(function(buffer) {
+            return instantiate(buffer, importsObject);
+        });
     }
 
     var WebAssembly = {
@@ -23638,11 +23714,103 @@ __register_module('wasi', function(module, exports, require) {
         Module: Module,
         Instance: Instance,
         Memory: Memory,
-        Table: function() {
-            throw new Error('WebAssembly.Table standalone construction is not supported in burn yet');
+        Table: function TableCtor(descriptor) {
+            if (!(this instanceof TableCtor)) {
+                throw new TypeError('WebAssembly.Table: must be called with new');
+            }
+            if (!descriptor || typeof descriptor.initial !== 'number') {
+                throw new TypeError('WebAssembly.Table: descriptor.initial required');
+            }
+            var elem = descriptor.element || 'anyfunc';
+            var max = typeof descriptor.maximum === 'number' ? descriptor.maximum : -1;
+            var id = ensureHost('__host_wasm_table_new')(elem, descriptor.initial | 0, max);
+            if (id < 0) {
+                throw new RangeError('WebAssembly.Table: alloc failed');
+            }
+            this._standaloneId = id;
+            this._elemType = elem;
+            var self = this;
+            Object.defineProperty(this, 'length', {
+                get: function() {
+                    return ensureHost('__host_wasm_table_size_sa')(self._standaloneId) | 0;
+                },
+            });
+            this.get = function(_idx) {
+                // Spec returns the slot value. We expose null for the
+                // common funcref/externref-with-null case; full
+                // bridging of JS-imported function refs requires a
+                // JS→wasm callback path beyond the standalone Table
+                // surface.
+                return null;
+            };
+            this.set = function() {
+                throw new TypeError(
+                    'WebAssembly.Table.set: assigning JS callbacks into a wasm Table '
+                    + 'requires JS→wasm import bridging; burn standalone tables are slot-only'
+                );
+            };
+            this.grow = function(delta, _initValue) {
+                var prev = ensureHost('__host_wasm_table_grow_sa')(self._standaloneId, delta | 0);
+                if (prev < 0) {
+                    throw new RangeError('WebAssembly.Table.grow: maximum exceeded');
+                }
+                return prev;
+            };
         },
-        Global: function() {
-            throw new Error('WebAssembly.Global standalone construction is not supported in burn yet');
+        Global: function GlobalCtor(descriptor, initialValue) {
+            if (!(this instanceof GlobalCtor)) {
+                throw new TypeError('WebAssembly.Global: must be called with new');
+            }
+            if (!descriptor || typeof descriptor.value !== 'string') {
+                throw new TypeError('WebAssembly.Global: descriptor.value required');
+            }
+            var ty = descriptor.value;
+            var mutable = !!descriptor.mutable;
+            // Encode initial as a typed value JSON the host parses.
+            var v;
+            if (ty === 'i64') {
+                var bn = (typeof initialValue === 'bigint') ? initialValue : BigInt(initialValue || 0);
+                v = { type: 'i64', value: bn.toString() };
+            } else if (ty === 'i32') {
+                v = { type: 'i32', value: (initialValue | 0) };
+            } else if (ty === 'f32' || ty === 'f64') {
+                v = { type: ty, value: Number(initialValue || 0) };
+            } else {
+                throw new TypeError('WebAssembly.Global: unknown value type ' + ty);
+            }
+            var id = ensureHost('__host_wasm_global_new')(ty, mutable ? 1 : 0, JSON.stringify(v));
+            if (id < 0) {
+                throw new Error('WebAssembly.Global: alloc failed');
+            }
+            this._standaloneId = id;
+            this._type = ty;
+            var self = this;
+            Object.defineProperty(this, 'value', {
+                get: function() {
+                    var raw = ensureHost('__host_wasm_global_get_sa')(self._standaloneId);
+                    if (isHostErr(raw)) throw new Error(raw.slice('__HOST_ERR__:'.length));
+                    var got = JSON.parse(raw);
+                    if (got.type === 'i64') return BigInt(got.value);
+                    return got.value;
+                },
+                set: function(newVal) {
+                    var nv;
+                    if (self._type === 'i64') {
+                        var bn = (typeof newVal === 'bigint') ? newVal : BigInt(newVal);
+                        nv = { type: 'i64', value: bn.toString() };
+                    } else if (self._type === 'i32') {
+                        nv = { type: 'i32', value: newVal | 0 };
+                    } else {
+                        nv = { type: self._type, value: Number(newVal) };
+                    }
+                    var rc = ensureHost('__host_wasm_global_set_sa')(
+                        self._standaloneId, JSON.stringify(nv));
+                    if (rc < 0) {
+                        throw new Error('WebAssembly.Global.value set failed');
+                    }
+                },
+            });
+            this.valueOf = function() { return this.value; };
         },
         CompileError: function(msg) { return CompileError(msg); },
         LinkError: function(msg) { return LinkError(msg); },

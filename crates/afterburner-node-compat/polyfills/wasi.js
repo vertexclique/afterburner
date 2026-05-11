@@ -23,43 +23,84 @@ __register_module('wasi', function(module, exports, require) {
     }
 
     WASI.prototype.getImportObject = function() {
-        // v1 returns an empty import map. WASM modules that import
-        // `wasi_snapshot_preview1.<func>` will fail at instantiate
-        // with `LinkError: import not satisfied: wasi_snapshot_preview1.<func>`,
-        // which tells the caller which entry is still pending.
-        return {};
+        // Returns a sentinel object the WebAssembly.Instance shim
+        // recognises and routes through `__host_wasm_run_wasi`. The
+        // import map's `wasi_snapshot_preview1` entry is a marker
+        // — the actual syscall bridge lives in wasmtime-wasi on the
+        // host side, which the run_wasi flow links into a fresh Store.
+        var self = this;
+        return {
+            wasi_snapshot_preview1: { __ab_wasi: self },
+        };
     };
 
-    WASI.prototype.start = function(instance) {
+    function _runHostWasi(wasi, mod) {
+        if (typeof globalThis.__host_wasm_run_wasi !== 'function') {
+            throw new Error('WASI: host runner not available');
+        }
+        if (!mod || typeof mod._id !== 'number') {
+            throw new TypeError(
+                'WASI: argument must be a `WebAssembly.Module` (compile bytes first)'
+            );
+        }
+        var cfg = JSON.stringify({
+            args: wasi.args,
+            env: wasi.env,
+            preopens: wasi.preopens,
+        });
+        var code = globalThis.__host_wasm_run_wasi(mod._id, cfg);
+        return code | 0;
+    }
+
+    /// `start(moduleOrInstance)` — runs the wasm module's `_start`
+    /// export. Burn deviates from Node's exact instance-flow contract
+    /// because WASI imports are bridged on the host (wasmtime-wasi);
+    /// passing a Module directly is the supported path. Passing an
+    /// already-instantiated Instance also works as long as the
+    /// instance was created via `WebAssembly.instantiate(mod,
+    /// wasi.getImportObject())` (we re-use the underlying module).
+    WASI.prototype.start = function(arg) {
         if (this._started) {
             throw new Error('WASI.start: instance already started');
         }
         this._started = true;
-        var fn = instance && instance.exports && instance.exports._start;
-        if (typeof fn !== 'function') {
+        var mod;
+        if (arg && typeof arg._id === 'number') {
+            mod = arg;
+        } else if (arg && arg._module && typeof arg._module._id === 'number') {
+            mod = arg._module;
+        } else {
             throw new TypeError(
-                'WASI.start: instance must export `_start` (compile module ' +
-                'with `wasm32-wasi` / `wasi-libc` to get the standard entry)'
+                'WASI.start: argument must be a `WebAssembly.Module` or Instance'
             );
         }
         try {
-            fn();
+            var code = _runHostWasi(this, mod);
+            if (this.returnOnExit) return code;
+            if (code !== 0) {
+                var err = new Error('WASI exited with code ' + code);
+                err.code = code;
+                throw err;
+            }
+            return 0;
         } catch (e) {
-            // WASI exits via a special trap; surface the exit code
-            // when present.
-            if (e && typeof e.code === 'number') {
-                if (this.returnOnExit) return e.code;
-                throw e;
+            if (this.returnOnExit && e && typeof e.code === 'number') {
+                return e.code;
             }
             throw e;
         }
-        return 0;
     };
 
-    WASI.prototype.initialize = function(instance) {
-        var fn = instance && instance.exports && instance.exports._initialize;
-        if (typeof fn !== 'function') return;
-        fn();
+    /// `initialize(moduleOrInstance)` — runs the wasm module's
+    /// `_initialize` export instead of `_start`. Spec-defined alt
+    /// entry for "reactor" modules (libraries, not commands).
+    WASI.prototype.initialize = function(_arg) {
+        // For reactor modules, instantiation alone runs `_initialize`
+        // — wasmtime-wasi's `add_to_linker_sync` plus instantiate is
+        // sufficient. The host's run_wasi path includes that step,
+        // so the most direct mapping is to no-op when the user calls
+        // `initialize` after a sentinel-shaped Instance — the
+        // initialization already happened during instantiation.
     };
 
     exports.WASI = WASI;

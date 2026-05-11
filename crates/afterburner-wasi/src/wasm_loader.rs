@@ -108,6 +108,34 @@ pub struct WasmLoader {
     next_instance_id: AtomicU64,
     modules: HopscotchMap<ModuleId, CompiledModule>,
     instances: HopscotchMap<InstanceId, Arc<LoadedInstance>>,
+    /// Standalone WebAssembly resources — `new WebAssembly.Memory(...)`,
+    /// `new WebAssembly.Table(...)`, `new WebAssembly.Global(...)`.
+    /// Each one owns its own `Store<()>` because wasmtime resources
+    /// can't be moved between stores. The JS-side wrapper holds the
+    /// id and operates via the per-kind `standalone_*` methods.
+    standalone: Arc<StandaloneRegistry>,
+}
+
+struct StandaloneRegistry {
+    next_id: AtomicU64,
+    memories: HopscotchMap<u64, Arc<PerInstanceLock<StandaloneMemory>>>,
+    tables: HopscotchMap<u64, Arc<PerInstanceLock<StandaloneTable>>>,
+    globals: HopscotchMap<u64, Arc<PerInstanceLock<StandaloneGlobal>>>,
+}
+
+struct StandaloneMemory {
+    store: Store<()>,
+    memory: wasmtime::Memory,
+}
+
+struct StandaloneTable {
+    store: Store<()>,
+    table: wasmtime::Table,
+}
+
+struct StandaloneGlobal {
+    store: Store<()>,
+    global: wasmtime::Global,
 }
 
 impl Default for WasmLoader {
@@ -130,6 +158,12 @@ impl WasmLoader {
         // boundary synchronously.
         let engine = Engine::default();
         Self {
+            standalone: Arc::new(StandaloneRegistry {
+                next_id: AtomicU64::new(1),
+                memories: HopscotchMap::new(),
+                tables: HopscotchMap::new(),
+                globals: HopscotchMap::new(),
+            }),
             engine,
             next_module_id: AtomicU64::new(1),
             next_instance_id: AtomicU64::new(1),
@@ -520,6 +554,362 @@ impl WasmLoader {
         match t.grow(&mut state.store, delta as u64, init) {
             Ok(prev) => Ok(prev as i64),
             Err(_) => Ok(-1),
+        }
+    }
+
+    // ---- Standalone Memory / Table / Global ---------------------
+    //
+    // These back `new WebAssembly.Memory(descriptor)` /
+    // `new WebAssembly.Table(descriptor)` /
+    // `new WebAssembly.Global(descriptor, value)` — resources the
+    // user creates outside an Instance. Each owns a fresh `Store`
+    // because wasmtime's Store-typed handles can't migrate between
+    // stores; the JS wrapper holds the standalone id and routes
+    // ops through these methods.
+
+    pub fn memory_standalone_create(&self, initial: u32, maximum: Option<u32>) -> Result<u64> {
+        let mut store: Store<()> = Store::new(&self.engine, ());
+        let ty = wasmtime::MemoryType::new(initial, maximum);
+        let memory = wasmtime::Memory::new(&mut store, ty)
+            .map_err(|e| AfterburnerError::Host(format!("Memory::new: {e}")))?;
+        let id = self.standalone.next_id.fetch_add(1, Ordering::Relaxed);
+        self.standalone
+            .memories
+            .insert(id, Arc::new(PerInstanceLock::new(StandaloneMemory {
+                store,
+                memory,
+            })));
+        Ok(id)
+    }
+
+    pub fn memory_standalone_size(&self, id: u64) -> Result<u64> {
+        let cell = self
+            .standalone
+            .memories
+            .get(&id)
+            .ok_or_else(|| AfterburnerError::Host(format!("standalone memory {id} unknown")))?;
+        let state = cell.lock();
+        Ok(state.memory.data(&state.store).len() as u64)
+    }
+
+    pub fn memory_standalone_grow(&self, id: u64, delta_pages: u32) -> Result<i64> {
+        let cell = self
+            .standalone
+            .memories
+            .get(&id)
+            .ok_or_else(|| AfterburnerError::Host(format!("standalone memory {id} unknown")))?;
+        let mut state = cell.lock();
+        // Copy out the wasmtime::Memory handle (it's Copy via
+        // wasmtime's internal Stored<T> handle abstraction) so we
+        // can take a mutable borrow of `state.store` for the grow call.
+        let mem = state.memory;
+        match mem.grow(&mut state.store, delta_pages as u64) {
+            Ok(prev) => Ok(prev as i64),
+            Err(_) => Ok(-1),
+        }
+    }
+
+    pub fn memory_standalone_read(&self, id: u64, offset: u32, len: u32) -> Result<Vec<u8>> {
+        let cell = self
+            .standalone
+            .memories
+            .get(&id)
+            .ok_or_else(|| AfterburnerError::Host(format!("standalone memory {id} unknown")))?;
+        let state = cell.lock();
+        let data = state.memory.data(&state.store);
+        let start = offset as usize;
+        let end = start
+            .checked_add(len as usize)
+            .ok_or_else(|| AfterburnerError::Host("standalone memory read: overflow".into()))?;
+        if end > data.len() {
+            return Err(AfterburnerError::Host(
+                "standalone memory read: out of bounds".into(),
+            ));
+        }
+        Ok(data[start..end].to_vec())
+    }
+
+    pub fn memory_standalone_write(&self, id: u64, offset: u32, bytes: &[u8]) -> Result<()> {
+        let cell = self
+            .standalone
+            .memories
+            .get(&id)
+            .ok_or_else(|| AfterburnerError::Host(format!("standalone memory {id} unknown")))?;
+        let mut state = cell.lock();
+        let mem = state.memory;
+        let data = mem.data_mut(&mut state.store);
+        let start = offset as usize;
+        let end = start
+            .checked_add(bytes.len())
+            .ok_or_else(|| AfterburnerError::Host("standalone memory write: overflow".into()))?;
+        if end > data.len() {
+            return Err(AfterburnerError::Host(
+                "standalone memory write: out of bounds".into(),
+            ));
+        }
+        data[start..end].copy_from_slice(bytes);
+        Ok(())
+    }
+
+    pub fn memory_standalone_drop(&self, id: u64) {
+        self.standalone.memories.remove(&id);
+    }
+
+    pub fn global_standalone_create(
+        &self,
+        ty: &str,
+        mutable: bool,
+        init: WasmValue,
+    ) -> Result<u64> {
+        let mut store: Store<()> = Store::new(&self.engine, ());
+        let val_ty = match ty {
+            "i32" => ValType::I32,
+            "i64" => ValType::I64,
+            "f32" => ValType::F32,
+            "f64" => ValType::F64,
+            other => {
+                return Err(AfterburnerError::Host(format!(
+                    "Global: unknown value type `{other}`"
+                )));
+            }
+        };
+        let init_val = init.coerce(&val_ty)?;
+        let mt = if mutable {
+            wasmtime::Mutability::Var
+        } else {
+            wasmtime::Mutability::Const
+        };
+        let g = wasmtime::Global::new(&mut store, wasmtime::GlobalType::new(val_ty, mt), init_val)
+            .map_err(|e| AfterburnerError::Host(format!("Global::new: {e}")))?;
+        let id = self.standalone.next_id.fetch_add(1, Ordering::Relaxed);
+        self.standalone
+            .globals
+            .insert(id, Arc::new(PerInstanceLock::new(StandaloneGlobal {
+                store,
+                global: g,
+            })));
+        Ok(id)
+    }
+
+    pub fn global_standalone_get(&self, id: u64) -> Result<WasmValue> {
+        let cell = self
+            .standalone
+            .globals
+            .get(&id)
+            .ok_or_else(|| AfterburnerError::Host(format!("standalone global {id} unknown")))?;
+        let mut state = cell.lock();
+        let g = state.global;
+        let v = g.get(&mut state.store);
+        Ok(match v {
+            Val::I32(x) => WasmValue::I32(x),
+            Val::I64(x) => WasmValue::I64(x),
+            Val::F32(x) => WasmValue::F32(f32::from_bits(x)),
+            Val::F64(x) => WasmValue::F64(f64::from_bits(x)),
+            _ => return Err(AfterburnerError::Host("Global: unsupported type".into())),
+        })
+    }
+
+    pub fn global_standalone_set(&self, id: u64, value: WasmValue) -> Result<()> {
+        let cell = self
+            .standalone
+            .globals
+            .get(&id)
+            .ok_or_else(|| AfterburnerError::Host(format!("standalone global {id} unknown")))?;
+        let mut state = cell.lock();
+        let g = state.global;
+        let ty = g.ty(&state.store).content().clone();
+        let coerced = value.coerce(&ty)?;
+        g.set(&mut state.store, coerced)
+            .map_err(|e| AfterburnerError::Host(format!("Global.set: {e}")))
+    }
+
+    pub fn global_standalone_drop(&self, id: u64) {
+        self.standalone.globals.remove(&id);
+    }
+
+    pub fn table_standalone_create(
+        &self,
+        elem: &str,
+        initial: u32,
+        maximum: Option<u32>,
+    ) -> Result<u64> {
+        let mut store: Store<()> = Store::new(&self.engine, ());
+        let ref_ty = match elem {
+            "anyfunc" | "funcref" => wasmtime::RefType::FUNCREF,
+            "externref" => wasmtime::RefType::EXTERNREF,
+            other => {
+                return Err(AfterburnerError::Host(format!(
+                    "Table: unknown element type `{other}`"
+                )));
+            }
+        };
+        let init = match elem {
+            "externref" => wasmtime::Ref::Extern(None),
+            _ => wasmtime::Ref::Func(None),
+        };
+        let t = wasmtime::Table::new(
+            &mut store,
+            wasmtime::TableType::new(ref_ty, initial, maximum),
+            init,
+        )
+        .map_err(|e| AfterburnerError::Host(format!("Table::new: {e}")))?;
+        let id = self.standalone.next_id.fetch_add(1, Ordering::Relaxed);
+        self.standalone
+            .tables
+            .insert(id, Arc::new(PerInstanceLock::new(StandaloneTable {
+                store,
+                table: t,
+            })));
+        Ok(id)
+    }
+
+    pub fn table_standalone_size(&self, id: u64) -> Result<u32> {
+        let cell = self
+            .standalone
+            .tables
+            .get(&id)
+            .ok_or_else(|| AfterburnerError::Host(format!("standalone table {id} unknown")))?;
+        let state = cell.lock();
+        Ok(state.table.size(&state.store) as u32)
+    }
+
+    pub fn table_standalone_grow(&self, id: u64, delta: u32) -> Result<i64> {
+        let cell = self
+            .standalone
+            .tables
+            .get(&id)
+            .ok_or_else(|| AfterburnerError::Host(format!("standalone table {id} unknown")))?;
+        let mut state = cell.lock();
+        let t = state.table;
+        let init = wasmtime::Ref::Func(None);
+        match t.grow(&mut state.store, delta as u64, init) {
+            Ok(prev) => Ok(prev as i64),
+            Err(_) => Ok(-1),
+        }
+    }
+
+    pub fn table_standalone_drop(&self, id: u64) {
+        self.standalone.tables.remove(&id);
+    }
+
+    /// Instantiate a previously-compiled module with the
+    /// `wasi_snapshot_preview1` import set satisfied by wasmtime-wasi,
+    /// then call its `_start` export. Returns the process exit code
+    /// (0 on normal return, the `I32Exit` value when the module calls
+    /// `proc_exit(n)`).
+    ///
+    /// `config_json` is a `{args:[String], env:{String:String},
+    /// preopens:{String:String}}` map; preopens are guest-path →
+    /// host-path pairs, granted with full dir / file permissions
+    /// inside the wasmtime store (the *outer* burn sandbox still
+    /// gates filesystem access at the host level, so a WASI module
+    /// inside burn can't escape burn's overall Manifold even if
+    /// `preopens` lists a path).
+    pub fn run_wasi(&self, module_id: ModuleId, config_json: &str) -> Result<i32> {
+        use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
+        use wasmtime_wasi::preview1::WasiP1Ctx;
+
+        let module = self
+            .modules
+            .get(&module_id)
+            .ok_or_else(|| AfterburnerError::Host(format!("WebAssembly: unknown module {module_id}")))?;
+        let cfg: serde_json::Value = serde_json::from_str(config_json)
+            .map_err(|e| AfterburnerError::Host(format!("WASI config: {e}")))?;
+
+        let mut builder = WasiCtxBuilder::new();
+        if let Some(args) = cfg.get("args").and_then(|v| v.as_array()) {
+            for a in args {
+                if let Some(s) = a.as_str() {
+                    builder.arg(s);
+                }
+            }
+        }
+        if let Some(env) = cfg.get("env").and_then(|v| v.as_object()) {
+            for (k, v) in env {
+                if let Some(s) = v.as_str() {
+                    builder.env(k, s);
+                }
+            }
+        }
+        builder.inherit_stdout();
+        builder.inherit_stderr();
+        builder.inherit_stdin();
+        if let Some(preopens) = cfg.get("preopens").and_then(|v| v.as_object()) {
+            for (guest, host) in preopens {
+                if let Some(host_path) = host.as_str() {
+                    builder
+                        .preopened_dir(host_path, guest, DirPerms::all(), FilePerms::all())
+                        .map_err(|e| AfterburnerError::Host(format!("WASI preopen {host_path}: {e}")))?;
+                }
+            }
+        }
+        let wasi: WasiP1Ctx = builder.build_p1();
+        let mut store = Store::new(&self.engine, wasi);
+        let mut linker = wasmtime::Linker::<WasiP1Ctx>::new(&self.engine);
+        wasmtime_wasi::preview1::add_to_linker_sync(&mut linker, |s| s)
+            .map_err(|e| AfterburnerError::Host(format!("WASI linker: {e}")))?;
+        let instance = linker
+            .instantiate(&mut store, &module.module)
+            .map_err(|e| AfterburnerError::Host(format!("WASI instantiate: {e}")))?;
+        let start = instance
+            .get_typed_func::<(), ()>(&mut store, "_start")
+            .map_err(|e| AfterburnerError::Host(format!("WASI: _start missing: {e}")))?;
+        match start.call(&mut store, ()) {
+            Ok(()) => Ok(0),
+            Err(e) => {
+                // wasmtime wraps the WASI exit in an anyhow chain.
+                // Walk every cause AND check the outermost error.
+                if let Some(exit) = e.downcast_ref::<wasmtime_wasi::I32Exit>() {
+                    return Ok(exit.0);
+                }
+                for cause in e.chain() {
+                    if let Some(exit) = cause.downcast_ref::<wasmtime_wasi::I32Exit>() {
+                        return Ok(exit.0);
+                    }
+                }
+                // Last-ditch: scan every cause's Debug + Display for
+                // the I32Exit signature. Wasmtime versions vary on
+                // whether the cause-chain exposes the raw error or
+                // just a formatted Trap. Display shape is
+                // `Exited with i32 exit status N`; Debug shape is
+                // `I32Exit(N)`.
+                let marker = "Exited with i32 exit status ";
+                let dbg_marker = "I32Exit(";
+                for cause in e.chain() {
+                    let display = format!("{cause}");
+                    if let Some(idx) = display.find(marker) {
+                        let rest = &display[idx + marker.len()..];
+                        let end = rest
+                            .find(|c: char| !c.is_ascii_digit() && c != '-')
+                            .unwrap_or(rest.len());
+                        if let Ok(code) = rest[..end].parse::<i32>() {
+                            return Ok(code);
+                        }
+                    }
+                    let debug = format!("{cause:?}");
+                    if let Some(idx) = debug.find(dbg_marker) {
+                        let rest = &debug[idx + dbg_marker.len()..];
+                        if let Some(end) = rest.find(')') {
+                            if let Ok(code) = rest[..end].trim().parse::<i32>() {
+                                return Ok(code);
+                            }
+                        }
+                    }
+                }
+                // Final fallback: scan the top-level Debug — wasmtime's
+                // error often inlines the cause text there.
+                let outer_dbg = format!("{e:?}");
+                if let Some(idx) = outer_dbg.find(marker) {
+                    let rest = &outer_dbg[idx + marker.len()..];
+                    let end = rest
+                        .find(|c: char| !c.is_ascii_digit() && c != '-')
+                        .unwrap_or(rest.len());
+                    if let Ok(code) = rest[..end].parse::<i32>() {
+                        return Ok(code);
+                    }
+                }
+                Err(AfterburnerError::Host(format!("WASI: trap: {e:?}")))
+            }
         }
     }
 }
