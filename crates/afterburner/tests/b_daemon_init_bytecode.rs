@@ -20,6 +20,7 @@
 
 #![cfg(feature = "bin")]
 
+use serial_test::serial;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
@@ -96,6 +97,7 @@ fn spawn_burn(source: &str) -> Child {
 }
 
 #[test]
+#[serial]
 fn precompiled_daemon_serves_canonical_request() {
     // The simplest possible daemon: one HTTP listener, one route.
     // If precompile didn't bake the user source correctly, the
@@ -126,6 +128,7 @@ fn precompiled_daemon_serves_canonical_request() {
 }
 
 #[test]
+#[serial]
 fn precompiled_daemon_preserves_argv_env() {
     // The script-mode envelope wrap injects `process.argv` and
     // `process.env`. If precompile drifts from the source path on
@@ -172,6 +175,7 @@ fn precompiled_daemon_preserves_argv_env() {
 }
 
 #[test]
+#[serial]
 fn precompiled_daemon_async_handler_round_trips() {
     // Top-level await + async handler. The script-mode wrap is an
     // AsyncFunction; bytecode preserves that. If the bytecode path
@@ -211,6 +215,7 @@ fn precompiled_daemon_async_handler_round_trips() {
 }
 
 #[test]
+#[serial]
 fn precompile_propagates_user_syntax_errors_with_nonzero_exit() {
     // Malformed user JS: the script-mode wrap puts user source inside
     // a `new __ab_AsyncFunction(..., USER_SOURCE)` call, so the
@@ -252,6 +257,7 @@ fn precompile_propagates_user_syntax_errors_with_nonzero_exit() {
 }
 
 #[test]
+#[serial]
 fn precompiled_daemon_console_log_reaches_stdout() {
     // daemon-init `console.log` must produce stdout in both source
     // and bytecode paths. Validates that stdout capture is wired
