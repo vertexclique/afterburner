@@ -1382,12 +1382,22 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
         <div class="compat"><span class="ck ck--gated">⚿</span>crypto</div>
         <div class="compat"><span class="ck ck--gated">⚿</span>http</div>
         <div class="compat"><span class="ck ck--gated">⚿</span>https</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>http2</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>http3 / quic</div>
         <div class="compat"><span class="ck ck--gated">⚿</span>net</div>
         <div class="compat"><span class="ck ck--gated">⚿</span>tls</div>
         <div class="compat"><span class="ck ck--gated">⚿</span>dns</div>
         <div class="compat"><span class="ck ck--gated">⚿</span>dgram</div>
         <div class="compat"><span class="ck ck--gated">⚿</span>child_process</div>
         <div class="compat"><span class="ck ck--gated">⚿</span>worker_threads</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>cluster</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>inspector</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>readline</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>repl</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>trace_events</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>wasi</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>node:test</div>
+        <div class="compat"><span class="ck ck--gated">⚿</span>node:sqlite</div>
       </div>
 
       <h3>Web globals</h3>
@@ -1418,30 +1428,16 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
         <div class="compat"><span class="ck ck--ok">✓</span>sharp</div>
       </div>
 
-      <h3>Host-backed (capability-gated, full implementations)</h3>
-      <div class="compat-grid">
-        <div class="compat"><span class="ck ck--gated">⚿</span>http2</div>
-        <div class="compat"><span class="ck ck--gated">⚿</span>http3 / quic</div>
-        <div class="compat"><span class="ck ck--gated">⚿</span>cluster</div>
-        <div class="compat"><span class="ck ck--gated">⚿</span>inspector</div>
-        <div class="compat"><span class="ck ck--gated">⚿</span>readline</div>
-        <div class="compat"><span class="ck ck--gated">⚿</span>repl</div>
-        <div class="compat"><span class="ck ck--gated">⚿</span>trace_events</div>
-        <div class="compat"><span class="ck ck--gated">⚿</span>wasi</div>
-        <div class="compat"><span class="ck ck--gated">⚿</span>node:test</div>
-        <div class="compat"><span class="ck ck--gated">⚿</span>node:sqlite</div>
-      </div>
-
-      <h3 id="sandbox-security-omissions"><span class="anchor">#</span>Sandbox security omissions</h3>
-      <p>A small number of Node APIs are <strong>refused by design</strong> so user code can't escape the capability sandbox. Each call throws a Node-shaped error so existing code fails fast.</p>
+      <h3 id="sandbox-omissions">Sandbox security omissions</h3>
+      <p>A small number of Node APIs are refused by design so user code can't escape the capability sandbox. Each throws a Node-shaped error so existing code fails fast.</p>
       <div class="table-scroll"><table class="doc-table">
         <thead><tr><th>API</th><th>Reason</th></tr></thead>
         <tbody>
-          <tr><td><code>process.chdir</code></td><td>Mutating cwd would slip paths past the <code>Manifold</code> fs allow-list.</td></tr>
-          <tr><td><code>process.setuid</code> / <code>setgid</code> / <code>seteuid</code> / <code>setegid</code> / <code>setgroups</code></td><td>Identity changes belong to the host, not to sandboxed JS.</td></tr>
-          <tr><td><code>new Worker(code, { eval: true })</code></td><td>Loading code from a string bypasses fs-allow-list checks. Use <code>new Worker(path)</code>.</td></tr>
-          <tr><td><code>process.binding</code></td><td>Node's private internals. Use the corresponding <code>node:</code> module instead.</td></tr>
-          <tr><td>Native <code>.node</code> addons</td><td>Native code bypasses the sandbox. Use the L3 shadows above for the popular cases.</td></tr>
+          <tr><td><code>process.chdir</code></td><td>Would slip paths past the <code>Manifold</code> fs allow-list.</td></tr>
+          <tr><td><code>process.setuid</code> / <code>setgid</code> / <code>seteuid</code> / <code>setegid</code> / <code>setgroups</code></td><td>Identity changes belong to the host, not sandboxed JS.</td></tr>
+          <tr><td><code>new Worker(code, { eval: true })</code></td><td>String-as-code bypasses the fs allow-list. Use <code>new Worker(path)</code>.</td></tr>
+          <tr><td><code>process.binding</code></td><td>Private internals. Use the corresponding <code>node:</code> module.</td></tr>
+          <tr><td>Native <code>.node</code> addons</td><td>Bypasses the sandbox. Use the L3 shadows above for the popular cases.</td></tr>
         </tbody>
       </table></div>
 
@@ -1559,6 +1555,7 @@ $ ./target/release/<span class="tok-mod">burn</span> --version</pre>
       <li class="toc-sub"><a href="#cli-subcommands">Subcommands</a></li>
       <li class="toc-sub"><a href="#cli-flags">Flag reference</a></li>
       <li><a href="#node-compat">Node compat</a></li>
+      <li class="toc-sub"><a href="#sandbox-omissions">Sandbox omissions</a></li>
       <li><a href="#env">Environment vars</a></li>
       <li><a href="#crates">Workspace crates</a></li>
       <li><a href="#build">Building from source</a></li>
