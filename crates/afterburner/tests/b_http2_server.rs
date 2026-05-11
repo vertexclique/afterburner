@@ -12,6 +12,7 @@
 
 #![cfg(feature = "bin")]
 
+use serial_test::serial;
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -83,6 +84,7 @@ fn h1_get(port: u16, path: &str) -> String {
 // ---- listening + basic h1 path -------------------------------------
 
 #[test]
+#[serial]
 fn http2_server_serves_h1_request_via_request_event() {
     let port = pick_port();
     let src = format!(
@@ -109,6 +111,7 @@ fn http2_server_serves_h1_request_via_request_event() {
 }
 
 #[test]
+#[serial]
 fn http2_server_serves_h1_request_via_stream_event() {
     let port = pick_port();
     let src = format!(
@@ -144,6 +147,7 @@ fn h2c_connection_preface() -> Vec<u8> {
 }
 
 #[test]
+#[serial]
 fn http2_server_responds_to_h2_connection_preface() {
     use std::io::{Read, Write};
     let port = pick_port();
@@ -185,6 +189,7 @@ fn http2_server_responds_to_h2_connection_preface() {
 // ---- create server callback shape ----------------------------------
 
 #[test]
+#[serial]
 fn create_server_callback_attaches_request_handler() {
     let port = pick_port();
     let src = format!(
@@ -205,6 +210,7 @@ fn create_server_callback_attaches_request_handler() {
 }
 
 #[test]
+#[serial]
 fn http2_server_address_returns_listening_port() {
     let port = pick_port();
     let src = format!(
@@ -228,6 +234,7 @@ fn http2_server_address_returns_listening_port() {
 }
 
 #[test]
+#[serial]
 fn http2_server_close_releases_port() {
     let port = pick_port();
     let src = format!(
@@ -253,6 +260,7 @@ fn http2_server_close_releases_port() {
 // ---- ServerHttp2Stream surface -------------------------------------
 
 #[test]
+#[serial]
 fn server_h2_stream_response_writes_body() {
     let port = pick_port();
     let src = format!(
@@ -278,6 +286,7 @@ fn server_h2_stream_response_writes_body() {
 }
 
 #[test]
+#[serial]
 fn server_h2_stream_pseudo_headers_translated() {
     let port = pick_port();
     let src = format!(
@@ -309,6 +318,7 @@ fn server_h2_stream_pseudo_headers_translated() {
 // ---- error / lifecycle ---------------------------------------------
 
 #[test]
+#[serial]
 fn http2_server_emits_listening_event() {
     let port = pick_port();
     let src = format!(
@@ -332,6 +342,7 @@ fn http2_server_emits_listening_event() {
 }
 
 #[test]
+#[serial]
 fn http2_create_server_is_constructable_and_loads_module() {
     // No-listen smoke check: classes exist, getDefaultSettings runs,
     // constants are present.
