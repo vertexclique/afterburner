@@ -359,9 +359,11 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
                         ));
                     }
                 };
-                active_manifold::with(|m| crate::prime_host::check_prime(&bytes, checks as usize, m))
-                    .map(|ok| if ok { 1 } else { 0 })
-                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))
+                active_manifold::with(|m| {
+                    crate::prime_host::check_prime(&bytes, checks as usize, m)
+                })
+                .map(|ok| if ok { 1 } else { 0 })
+                .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))
             },
         )
         .map_err(err_to_ab)?,
@@ -425,9 +427,7 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
              _url: String,
              _method: String,
              _body_b64: String|
-             -> rquickjs::Result<String> {
-                Ok("__HOST_ERR__:no-daemon".into())
-            },
+             -> rquickjs::Result<String> { Ok("__HOST_ERR__:no-daemon".into()) },
         )
         .map_err(err_to_ab)?,
     )

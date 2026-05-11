@@ -16,7 +16,9 @@ use num_traits::{One, Zero};
 /// numbers up to 4096 bits, which gives <= 2^-80 false-positive prob.
 pub fn check_prime(candidate_be: &[u8], checks: usize, m: &Manifold) -> Result<bool> {
     if !m.crypto {
-        return Err(AfterburnerError::PermissionDenied("crypto.checkPrime".into()));
+        return Err(AfterburnerError::PermissionDenied(
+            "crypto.checkPrime".into(),
+        ));
     }
     if candidate_be.is_empty() {
         return Ok(false);
@@ -93,7 +95,10 @@ mod tests {
     fn small_known_composites_fail() {
         let m = open();
         for &c in &[1u32, 4, 6, 9, 25, 100, 1000, 7920] {
-            assert!(!check_prime(&be(c), 0, &m).unwrap(), "{c} should be composite");
+            assert!(
+                !check_prime(&be(c), 0, &m).unwrap(),
+                "{c} should be composite"
+            );
         }
     }
 

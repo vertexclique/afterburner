@@ -401,10 +401,12 @@ impl DaemonRuntime {
     }
 
     #[cfg(feature = "daemon")]
-    pub fn try_recv_inspector_event(
-        &self,
-    ) -> Option<crate::daemon_inspector::InspectorEvent> {
-        self.store.data().daemon_inspector.as_ref()?.try_recv_event()
+    pub fn try_recv_inspector_event(&self) -> Option<crate::daemon_inspector::InspectorEvent> {
+        self.store
+            .data()
+            .daemon_inspector
+            .as_ref()?
+            .try_recv_event()
     }
 
     /// Install the outbound HTTP coordinator on this daemon's Store.

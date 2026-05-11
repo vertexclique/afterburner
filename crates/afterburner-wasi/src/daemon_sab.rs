@@ -315,8 +315,8 @@ impl DaemonSab {
                 // the wait actually slept (didn't return immediately
                 // due to spurious wake or value mismatch). We
                 // re-load post-wait to disambiguate timeout vs notify.
-                let deadline = std::time::Instant::now()
-                    + std::time::Duration::from_millis(timeout_ms as u64);
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
                 loop {
                     let now = std::time::Instant::now();
                     if now >= deadline {
@@ -372,7 +372,7 @@ impl DaemonSab {
                 // sees Infinity → wake_all → return Infinity in
                 // userland because we can't observe the exact count
                 // cross-platform.
-                if count < 0 || count > 1 << 30 {
+                if !(0..=1 << 30).contains(&count) {
                     1 << 30
                 } else {
                     count as i32

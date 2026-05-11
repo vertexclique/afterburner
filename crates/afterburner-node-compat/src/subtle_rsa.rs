@@ -10,7 +10,7 @@ use sha2::{Sha256, Sha384, Sha512};
 
 /// Generate an RSA key pair. Returns (pkcs8 private DER, spki public DER).
 pub fn rsa_keygen(modulus_bits: usize, public_exponent: u64) -> Result<(Vec<u8>, Vec<u8>)> {
-    if !(2048..=8192).contains(&modulus_bits) || modulus_bits % 8 != 0 {
+    if !(2048..=8192).contains(&modulus_bits) || !modulus_bits.is_multiple_of(8) {
         return Err(AfterburnerError::Host(format!(
             "RSA keygen: modulusLength must be 2048..8192 and multiple of 8, got {modulus_bits}"
         )));
@@ -82,12 +82,7 @@ pub fn rsa_oaep_encrypt(spki_der: &[u8], hash: &str, label: &[u8], data: &[u8]) 
         .map_err(|e| AfterburnerError::Host(format!("RSA-OAEP encrypt: {e}")))
 }
 
-pub fn rsa_oaep_decrypt(
-    pkcs8_der: &[u8],
-    hash: &str,
-    label: &[u8],
-    ct: &[u8],
-) -> Result<Vec<u8>> {
+pub fn rsa_oaep_decrypt(pkcs8_der: &[u8], hash: &str, label: &[u8], ct: &[u8]) -> Result<Vec<u8>> {
     let key = parse_priv(pkcs8_der)?;
     let label_opt = if label.is_empty() {
         None

@@ -105,9 +105,7 @@ pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
     // ES2015 spec's `module record import binding` shape — without
     // needing engine support. This matches what V8 / SpiderMonkey do
     // internally with module export getter slots.
-    let semantic = SemanticBuilder::new()
-        .build(&parsed.program)
-        .semantic;
+    let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
     let scoping = semantic.scoping();
     let nodes = semantic.nodes();
 
@@ -224,11 +222,7 @@ pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
                 let reference = scoping.get_reference(*ref_id);
                 let node = nodes.get_node(reference.node_id());
                 let span = node.span();
-                edits.push((
-                    span.start as usize,
-                    span.end as usize,
-                    replacement.clone(),
-                ));
+                edits.push((span.start as usize, span.end as usize, replacement.clone()));
             }
         }
     }
@@ -275,11 +269,7 @@ pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
         bcol.visit_program(&parsed.program);
         for stmt_start in bcol.statement_starts {
             let (line, col) = byte_to_line_col(source, stmt_start);
-            let probe = format!(
-                "__ab_brk({path_lit},{line},{col});",
-                line = line,
-                col = col
-            );
+            let probe = format!("__ab_brk({path_lit},{line},{col});", line = line, col = col);
             edits.push((stmt_start, stmt_start, probe));
         }
     }
@@ -767,8 +757,8 @@ fn byte_to_line_col(source: &str, offset: usize) -> (u32, u32) {
     let mut last_nl: usize = 0;
     let bytes = source.as_bytes();
     let cap = offset.min(bytes.len());
-    for i in 0..cap {
-        if bytes[i] == b'\n' {
+    for (i, &b) in bytes.iter().enumerate().take(cap) {
+        if b == b'\n' {
             line += 1;
             last_nl = i + 1;
         }

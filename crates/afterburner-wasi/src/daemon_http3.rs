@@ -14,8 +14,8 @@
 #![cfg(feature = "http3")]
 
 use crate::daemon_http::{
-    DaemonEvent, DaemonHttp, LISTEN_ERR_ADDR_IN_USE, LISTEN_ERR_IO, LISTEN_ERR_NO_DAEMON, PortClaim,
-    ReplyEnvelope, ServerId,
+    DaemonEvent, DaemonHttp, LISTEN_ERR_ADDR_IN_USE, LISTEN_ERR_IO, LISTEN_ERR_NO_DAEMON,
+    PortClaim, ReplyEnvelope, ServerId,
 };
 use bytes::{Buf, Bytes};
 use std::cell::RefCell;
@@ -109,8 +109,7 @@ pub fn bind_h3_listener(
                 return LISTEN_ERR_IO;
             }
         };
-        let runtime_handle = quinn::default_runtime()
-            .expect("tokio runtime present");
+        let runtime_handle = quinn::default_runtime().expect("tokio runtime present");
         let endpoint_config = quinn::EndpointConfig::default();
         match quinn::Endpoint::new(endpoint_config, Some(server_config), udp, runtime_handle) {
             Ok(e) => e,
@@ -150,8 +149,7 @@ fn build_server_config(
         return Err("no certificates in PEM".into());
     }
     let mut key_rdr = Cursor::new(key_pem.as_bytes());
-    let key = rustls_pemfile::private_key(&mut key_rdr)?
-        .ok_or("no private key in PEM")?;
+    let key = rustls_pemfile::private_key(&mut key_rdr)?.ok_or("no private key in PEM")?;
 
     let mut tls_config = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
@@ -167,7 +165,11 @@ fn build_server_config(
     Ok(quinn::ServerConfig::with_crypto(Arc::new(quic_tls)))
 }
 
-async fn serve_h3_endpoint(endpoint: quinn::Endpoint, server_id: ServerId, daemon: Arc<DaemonHttp>) {
+async fn serve_h3_endpoint(
+    endpoint: quinn::Endpoint,
+    server_id: ServerId,
+    daemon: Arc<DaemonHttp>,
+) {
     while let Some(incoming) = endpoint.accept().await {
         let daemon = Arc::clone(&daemon);
         tokio::spawn(async move {
@@ -183,14 +185,9 @@ async fn serve_h3_endpoint(endpoint: quinn::Endpoint, server_id: ServerId, daemo
                 Err(_) => return,
             };
             // Accept request streams in a loop until the client closes.
-            loop {
-                match h3_server.accept().await {
-                    Ok(Some(resolver)) => {
-                        let daemon = Arc::clone(&daemon);
-                        tokio::spawn(handle_h3_request(resolver, server_id, daemon));
-                    }
-                    _ => break,
-                }
+            while let Ok(Some(resolver)) = h3_server.accept().await {
+                let daemon = Arc::clone(&daemon);
+                tokio::spawn(handle_h3_request(resolver, server_id, daemon));
             }
         });
     }
@@ -271,25 +268,25 @@ async fn handle_h3_request(
     let _ = stream.finish().await;
 }
 
-/// Outbound HTTP/3 request — synchronous wrapper around quinn client
-/// + h3 client. Used by `quic.connect(...).request(...)` from JS.
-/// Returns JSON `{"status":N,"headers":{...},"body_b64":"..."}` on
-/// success or `__HOST_ERR__:<msg>` on failure. The runtime is the
-/// same daemon tokio runtime — `block_on` on a sync host import,
-/// matching the shape of `host_http_request`.
+/// Outbound HTTP/3 request — synchronous wrapper around the quinn
+/// client plus h3 client. Used by `quic.connect(...).request(...)`
+/// from JS. Returns JSON `{"status":N,"headers":{...},"body_b64":"..."}`
+/// on success or `__HOST_ERR__:<msg>` on failure. The runtime is
+/// the same daemon tokio runtime — `block_on` on a sync host
+/// import, matching the shape of `host_http_request`.
 pub fn h3_request_sync(
     daemon: &Arc<DaemonHttp>,
     url: &str,
     method: &str,
     body: &[u8],
 ) -> Result<String, String> {
-    let runtime = daemon.runtime_handle().ok_or_else(|| "no daemon runtime".to_string())?;
+    let runtime = daemon
+        .runtime_handle()
+        .ok_or_else(|| "no daemon runtime".to_string())?;
     let url_owned = url.to_string();
     let method_owned = method.to_string();
     let body_owned = body.to_vec();
-    runtime.block_on(async move {
-        h3_request_inner(&url_owned, &method_owned, &body_owned).await
-    })
+    runtime.block_on(async move { h3_request_inner(&url_owned, &method_owned, &body_owned).await })
 }
 
 async fn h3_request_inner(url: &str, method: &str, body: &[u8]) -> Result<String, String> {
@@ -326,17 +323,18 @@ async fn h3_request_inner(url: &str, method: &str, body: &[u8]) -> Result<String
         .map_err(|e| format!("quic client cfg: {e}"))?;
     let client_cfg = quinn::ClientConfig::new(Arc::new(quic_client));
 
-    let mut endpoint = quinn::Endpoint::client(
-        "0.0.0.0:0".parse().unwrap()
-    ).map_err(|e| format!("client endpoint: {e}"))?;
+    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap())
+        .map_err(|e| format!("client endpoint: {e}"))?;
     endpoint.set_default_client_config(client_cfg);
 
-    let conn = endpoint.connect(server_addr, &host)
+    let conn = endpoint
+        .connect(server_addr, &host)
         .map_err(|e| format!("connect: {e}"))?
         .await
         .map_err(|e| format!("handshake: {e}"))?;
     let h3_conn = h3_quinn::Connection::new(conn);
-    let (mut driver, mut send_request) = h3::client::new(h3_conn).await
+    let (mut driver, mut send_request) = h3::client::new(h3_conn)
+        .await
         .map_err(|e| format!("h3 client: {e}"))?;
     let drive_task = tokio::spawn(async move {
         let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
@@ -347,15 +345,22 @@ async fn h3_request_inner(url: &str, method: &str, body: &[u8]) -> Result<String
         .uri(url)
         .body(())
         .map_err(|e| format!("req build: {e}"))?;
-    let mut stream = send_request.send_request(req).await
+    let mut stream = send_request
+        .send_request(req)
+        .await
         .map_err(|e| format!("send: {e}"))?;
     if !body.is_empty() {
-        stream.send_data(Bytes::copy_from_slice(body)).await
+        stream
+            .send_data(Bytes::copy_from_slice(body))
+            .await
             .map_err(|e| format!("send body: {e}"))?;
     }
     stream.finish().await.map_err(|e| format!("finish: {e}"))?;
 
-    let resp = stream.recv_response().await.map_err(|e| format!("recv resp: {e}"))?;
+    let resp = stream
+        .recv_response()
+        .await
+        .map_err(|e| format!("recv resp: {e}"))?;
     let status = resp.status().as_u16();
     let mut hmap = std::collections::BTreeMap::<String, String>::new();
     for (k, v) in resp.headers().iter() {
@@ -363,8 +368,11 @@ async fn h3_request_inner(url: &str, method: &str, body: &[u8]) -> Result<String
     }
 
     let mut body_bytes: Vec<u8> = Vec::new();
-    while let Some(mut chunk) = stream.recv_data().await
-        .map_err(|e| format!("recv data: {e}"))? {
+    while let Some(mut chunk) = stream
+        .recv_data()
+        .await
+        .map_err(|e| format!("recv data: {e}"))?
+    {
         let n = chunk.remaining();
         let bs = chunk.copy_to_bytes(n);
         body_bytes.extend_from_slice(&bs);
@@ -376,7 +384,8 @@ async fn h3_request_inner(url: &str, method: &str, body: &[u8]) -> Result<String
         "status": status,
         "headers": hmap,
         "body_b64": body_b64,
-    }).to_string())
+    })
+    .to_string())
 }
 
 #[derive(Debug)]

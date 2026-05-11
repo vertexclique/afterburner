@@ -39,8 +39,12 @@ fn pick_port() -> u16 {
 fn wait_for_listener(port: u16, max: Duration) -> bool {
     let deadline = Instant::now() + max;
     while Instant::now() < deadline {
-        if TcpStream::connect_timeout(&format!("127.0.0.1:{port}").parse().unwrap(),
-            Duration::from_millis(200)).is_ok() {
+        if TcpStream::connect_timeout(
+            &format!("127.0.0.1:{port}").parse().unwrap(),
+            Duration::from_millis(200),
+        )
+        .is_ok()
+        {
             return true;
         }
         std::thread::sleep(Duration::from_millis(150));
@@ -92,7 +96,10 @@ fn http2_server_serves_h1_request_via_request_event() {
         "#
     );
     let mut child = spawn(&src);
-    assert!(wait_for_listener(port, Duration::from_secs(15)), "no listener on :{port}");
+    assert!(
+        wait_for_listener(port, Duration::from_secs(15)),
+        "no listener on :{port}"
+    );
     let r = h1_get(port, "/");
     assert!(r.starts_with("HTTP/1.1 200"), "{r}");
     assert!(r.contains("h1-served"), "{r}");
@@ -167,7 +174,11 @@ fn http2_server_responds_to_h2_connection_preface() {
     let got_settings_back = n >= 9 && buf[3] == 0x04;
     let _ = child.kill();
     let _ = child.wait();
-    assert!(got_settings_back, "expected H2 SETTINGS frame (type 0x04) from server, got {n} bytes: {:02x?}", &buf[..n]);
+    assert!(
+        got_settings_back,
+        "expected H2 SETTINGS frame (type 0x04) from server, got {n} bytes: {:02x?}",
+        &buf[..n]
+    );
 }
 
 // ---- create server callback shape ----------------------------------

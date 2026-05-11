@@ -67,7 +67,10 @@ fn session_runtime_evaluate_real() {
         "status={:?}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}",
         out.status.code()
     );
-    assert!(stdout.contains("EVAL_OK"), "missing EVAL_OK\nSTDOUT:\n{stdout}");
+    assert!(
+        stdout.contains("EVAL_OK"),
+        "missing EVAL_OK\nSTDOUT:\n{stdout}"
+    );
 }
 
 #[test]
@@ -107,7 +110,10 @@ fn session_runtime_evaluate_exception_packaged() {
         "status={:?}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}",
         out.status.code()
     );
-    assert!(stdout.contains("EXC_OK"), "missing EXC_OK\nSTDOUT:\n{stdout}");
+    assert!(
+        stdout.contains("EXC_OK"),
+        "missing EXC_OK\nSTDOUT:\n{stdout}"
+    );
 }
 
 #[test]
@@ -158,7 +164,10 @@ fn session_compile_run_script_roundtrip() {
         "status={:?}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}",
         out.status.code()
     );
-    assert!(stdout.contains("RUN_OK"), "missing RUN_OK\nSTDOUT:\n{stdout}");
+    assert!(
+        stdout.contains("RUN_OK"),
+        "missing RUN_OK\nSTDOUT:\n{stdout}"
+    );
 }
 
 #[test]
@@ -261,7 +270,10 @@ fn session_profiler_start_stop_returns_profile() {
         "status={:?}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}",
         out.status.code()
     );
-    assert!(stdout.contains("PROF_OK"), "missing PROF_OK\nSTDOUT:\n{stdout}");
+    assert!(
+        stdout.contains("PROF_OK"),
+        "missing PROF_OK\nSTDOUT:\n{stdout}"
+    );
 }
 
 #[test]
@@ -313,7 +325,10 @@ fn inspector_open_serves_json_version() {
         "status={:?}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}",
         out.status.code()
     );
-    assert!(stdout.contains("JSON_OK"), "missing JSON_OK\nSTDOUT:\n{stdout}");
+    assert!(
+        stdout.contains("JSON_OK"),
+        "missing JSON_OK\nSTDOUT:\n{stdout}"
+    );
 }
 
 #[test]

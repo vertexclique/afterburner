@@ -41,8 +41,7 @@ fn assert_marker(out: &std::process::Output, marker: &str) {
 
 #[test]
 fn aes_ctr_encrypt_decrypt_round_trips_128_bit_key() {
-    let out = run(
-        r#"
+    let out = run(r#"
         async function main() {
             const k = await crypto.subtle.generateKey(
                 { name: 'AES-CTR', length: 128 }, true, ['encrypt','decrypt']);
@@ -55,15 +54,13 @@ fn aes_ctr_encrypt_decrypt_round_trips_128_bit_key() {
             if (new TextDecoder().decode(pt) === 'the quick brown fox') console.log('AES-CTR-OK');
         }
         main().catch(e => { console.log('FAIL', e.message); process.exit(1); });
-    "#,
-    );
+    "#);
     assert_marker(&out, "AES-CTR-OK");
 }
 
 #[test]
 fn aes_ctr_encrypt_decrypt_round_trips_256_bit_key() {
-    let out = run(
-        r#"
+    let out = run(r#"
         async function main() {
             const k = await crypto.subtle.generateKey(
                 { name: 'AES-CTR', length: 256 }, true, ['encrypt','decrypt']);
@@ -77,8 +74,7 @@ fn aes_ctr_encrypt_decrypt_round_trips_256_bit_key() {
             if (u.length === 10 && u[0] === 1 && u[9] === 10) console.log('AES-CTR-256-OK');
         }
         main().catch(e => { console.log('FAIL', e.message); process.exit(1); });
-    "#,
-    );
+    "#);
     assert_marker(&out, "AES-CTR-256-OK");
 }
 
@@ -86,8 +82,7 @@ fn aes_ctr_encrypt_decrypt_round_trips_256_bit_key() {
 
 #[test]
 fn aes_kw_wrap_unwrap_round_trips_aes_gcm_key() {
-    let out = run(
-        r#"
+    let out = run(r#"
         async function main() {
             const wk = await crypto.subtle.generateKey(
                 { name: 'AES-KW', length: 128 }, true, ['wrapKey','unwrapKey']);
@@ -100,15 +95,13 @@ fn aes_kw_wrap_unwrap_round_trips_aes_gcm_key() {
             if (unwrapped.algorithm.name === 'AES-GCM') console.log('AES-KW-OK');
         }
         main().catch(e => { console.log('FAIL', e.message); process.exit(1); });
-    "#,
-    );
+    "#);
     assert_marker(&out, "AES-KW-OK");
 }
 
 #[test]
 fn aes_kw_unwrap_rejects_tampered_blob() {
-    let out = run(
-        r#"
+    let out = run(r#"
         async function main() {
             const wk = await crypto.subtle.generateKey(
                 { name: 'AES-KW', length: 128 }, true, ['wrapKey','unwrapKey']);
@@ -125,8 +118,7 @@ fn aes_kw_unwrap_rejects_tampered_blob() {
             }
         }
         main().catch(e => { console.log('FAIL', e.message); process.exit(1); });
-    "#,
-    );
+    "#);
     assert_marker(&out, "AES-KW-TAMPER-OK");
 }
 
@@ -134,8 +126,7 @@ fn aes_kw_unwrap_rejects_tampered_blob() {
 
 #[test]
 fn rsa_oaep_encrypt_decrypt_round_trips_with_sha256() {
-    let out = run(
-        r#"
+    let out = run(r#"
         async function main() {
             const k = await crypto.subtle.generateKey(
                 { name: 'RSA-OAEP', modulusLength: 2048,
@@ -149,8 +140,7 @@ fn rsa_oaep_encrypt_decrypt_round_trips_with_sha256() {
             if (new TextDecoder().decode(pt) === 'secret') console.log('RSA-OAEP-OK');
         }
         main().catch(e => { console.log('FAIL', e.message); process.exit(1); });
-    "#,
-    );
+    "#);
     assert_marker(&out, "RSA-OAEP-OK");
 }
 
@@ -158,8 +148,7 @@ fn rsa_oaep_encrypt_decrypt_round_trips_with_sha256() {
 
 #[test]
 fn rsa_pss_sign_verify_round_trips() {
-    let out = run(
-        r#"
+    let out = run(r#"
         async function main() {
             const k = await crypto.subtle.generateKey(
                 { name: 'RSA-PSS', modulusLength: 2048,
@@ -173,15 +162,13 @@ fn rsa_pss_sign_verify_round_trips() {
             if (ok === true) console.log('RSA-PSS-OK');
         }
         main().catch(e => { console.log('FAIL', e.message); process.exit(1); });
-    "#,
-    );
+    "#);
     assert_marker(&out, "RSA-PSS-OK");
 }
 
 #[test]
 fn rsa_pss_tampered_signature_rejects() {
-    let out = run(
-        r#"
+    let out = run(r#"
         async function main() {
             const k = await crypto.subtle.generateKey(
                 { name: 'RSA-PSS', modulusLength: 2048,
@@ -196,8 +183,7 @@ fn rsa_pss_tampered_signature_rejects() {
             if (ok === false) console.log('RSA-PSS-TAMPER-OK');
         }
         main().catch(e => { console.log('FAIL', e.message); process.exit(1); });
-    "#,
-    );
+    "#);
     assert_marker(&out, "RSA-PSS-TAMPER-OK");
 }
 
@@ -205,8 +191,7 @@ fn rsa_pss_tampered_signature_rejects() {
 
 #[test]
 fn rsa_pkcs1_v15_sign_verify_round_trips() {
-    let out = run(
-        r#"
+    let out = run(r#"
         async function main() {
             const k = await crypto.subtle.generateKey(
                 { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048,
@@ -220,8 +205,7 @@ fn rsa_pkcs1_v15_sign_verify_round_trips() {
             if (ok === true) console.log('RSA-PKCS1-OK');
         }
         main().catch(e => { console.log('FAIL', e.message); process.exit(1); });
-    "#,
-    );
+    "#);
     assert_marker(&out, "RSA-PKCS1-OK");
 }
 
@@ -229,8 +213,7 @@ fn rsa_pkcs1_v15_sign_verify_round_trips() {
 
 #[test]
 fn ecdsa_p256_sign_verify_round_trips() {
-    let out = run(
-        r#"
+    let out = run(r#"
         async function main() {
             const k = await crypto.subtle.generateKey(
                 { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign','verify']);
@@ -242,15 +225,13 @@ fn ecdsa_p256_sign_verify_round_trips() {
             if (ok === true) console.log('ECDSA-P256-OK');
         }
         main().catch(e => { console.log('FAIL', e.message); process.exit(1); });
-    "#,
-    );
+    "#);
     assert_marker(&out, "ECDSA-P256-OK");
 }
 
 #[test]
 fn ecdsa_p384_sign_verify_round_trips() {
-    let out = run(
-        r#"
+    let out = run(r#"
         async function main() {
             const k = await crypto.subtle.generateKey(
                 { name: 'ECDSA', namedCurve: 'P-384' }, true, ['sign','verify']);
@@ -262,15 +243,13 @@ fn ecdsa_p384_sign_verify_round_trips() {
             if (ok === true) console.log('ECDSA-P384-OK');
         }
         main().catch(e => { console.log('FAIL', e.message); process.exit(1); });
-    "#,
-    );
+    "#);
     assert_marker(&out, "ECDSA-P384-OK");
 }
 
 #[test]
 fn ecdsa_p521_sign_verify_round_trips() {
-    let out = run(
-        r#"
+    let out = run(r#"
         async function main() {
             const k = await crypto.subtle.generateKey(
                 { name: 'ECDSA', namedCurve: 'P-521' }, true, ['sign','verify']);
@@ -282,15 +261,13 @@ fn ecdsa_p521_sign_verify_round_trips() {
             if (ok === true) console.log('ECDSA-P521-OK');
         }
         main().catch(e => { console.log('FAIL', e.message); process.exit(1); });
-    "#,
-    );
+    "#);
     assert_marker(&out, "ECDSA-P521-OK");
 }
 
 #[test]
 fn ecdsa_tampered_signature_rejects() {
-    let out = run(
-        r#"
+    let out = run(r#"
         async function main() {
             const k = await crypto.subtle.generateKey(
                 { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign','verify']);
@@ -303,8 +280,7 @@ fn ecdsa_tampered_signature_rejects() {
             if (ok === false) console.log('ECDSA-TAMPER-OK');
         }
         main().catch(e => { console.log('FAIL', e.message); process.exit(1); });
-    "#,
-    );
+    "#);
     assert_marker(&out, "ECDSA-TAMPER-OK");
 }
 
@@ -312,8 +288,7 @@ fn ecdsa_tampered_signature_rejects() {
 
 #[test]
 fn ecdh_p256_derive_bits_agrees_both_directions() {
-    let out = run(
-        r#"
+    let out = run(r#"
         async function main() {
             const a = await crypto.subtle.generateKey(
                 { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
@@ -326,15 +301,13 @@ fn ecdh_p256_derive_bits_agrees_both_directions() {
             if (s1.length === 32 && s1.every((v,i) => v === s2[i])) console.log('ECDH-P256-OK');
         }
         main().catch(e => { console.log('FAIL', e.message); process.exit(1); });
-    "#,
-    );
+    "#);
     assert_marker(&out, "ECDH-P256-OK");
 }
 
 #[test]
 fn ecdh_p384_derive_bits_agrees_both_directions() {
-    let out = run(
-        r#"
+    let out = run(r#"
         async function main() {
             const a = await crypto.subtle.generateKey(
                 { name: 'ECDH', namedCurve: 'P-384' }, true, ['deriveBits']);
@@ -347,8 +320,7 @@ fn ecdh_p384_derive_bits_agrees_both_directions() {
             if (s1.length === 48 && s1.every((v,i) => v === s2[i])) console.log('ECDH-P384-OK');
         }
         main().catch(e => { console.log('FAIL', e.message); process.exit(1); });
-    "#,
-    );
+    "#);
     assert_marker(&out, "ECDH-P384-OK");
 }
 
@@ -356,8 +328,7 @@ fn ecdh_p384_derive_bits_agrees_both_directions() {
 
 #[test]
 fn ed25519_sign_verify_round_trips() {
-    let out = run(
-        r#"
+    let out = run(r#"
         async function main() {
             const k = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign','verify']);
             const data = new TextEncoder().encode('ed25519');
@@ -366,15 +337,13 @@ fn ed25519_sign_verify_round_trips() {
             if (ok === true) console.log('ED25519-OK');
         }
         main().catch(e => { console.log('FAIL', e.message); process.exit(1); });
-    "#,
-    );
+    "#);
     assert_marker(&out, "ED25519-OK");
 }
 
 #[test]
 fn ed25519_signature_is_64_bytes() {
-    let out = run(
-        r#"
+    let out = run(r#"
         async function main() {
             const k = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign','verify']);
             const sig = new Uint8Array(await crypto.subtle.sign(
@@ -382,15 +351,13 @@ fn ed25519_signature_is_64_bytes() {
             if (sig.length === 64) console.log('ED25519-SIGLEN-OK');
         }
         main().catch(e => { console.log('FAIL', e.message); process.exit(1); });
-    "#,
-    );
+    "#);
     assert_marker(&out, "ED25519-SIGLEN-OK");
 }
 
 #[test]
 fn ed25519_tampered_signature_rejects() {
-    let out = run(
-        r#"
+    let out = run(r#"
         async function main() {
             const k = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign','verify']);
             const data = new TextEncoder().encode('ed');
@@ -400,8 +367,7 @@ fn ed25519_tampered_signature_rejects() {
             if (ok === false) console.log('ED25519-TAMPER-OK');
         }
         main().catch(e => { console.log('FAIL', e.message); process.exit(1); });
-    "#,
-    );
+    "#);
     assert_marker(&out, "ED25519-TAMPER-OK");
 }
 
@@ -409,8 +375,7 @@ fn ed25519_tampered_signature_rejects() {
 
 #[test]
 fn x25519_derive_bits_agrees_both_ways() {
-    let out = run(
-        r#"
+    let out = run(r#"
         async function main() {
             const a = await crypto.subtle.generateKey({ name: 'X25519' }, true, ['deriveBits']);
             const b = await crypto.subtle.generateKey({ name: 'X25519' }, true, ['deriveBits']);
@@ -421,8 +386,7 @@ fn x25519_derive_bits_agrees_both_ways() {
             if (s1.length === 32 && s1.every((v,i) => v === s2[i])) console.log('X25519-OK');
         }
         main().catch(e => { console.log('FAIL', e.message); process.exit(1); });
-    "#,
-    );
+    "#);
     assert_marker(&out, "X25519-OK");
 }
 
@@ -430,8 +394,7 @@ fn x25519_derive_bits_agrees_both_ways() {
 
 #[test]
 fn rsa_oaep_export_jwk_emits_expected_field_set() {
-    let out = run(
-        r#"
+    let out = run(r#"
         async function main() {
             const k = await crypto.subtle.generateKey(
                 { name: 'RSA-OAEP', modulusLength: 2048,
@@ -446,7 +409,6 @@ fn rsa_oaep_export_jwk_emits_expected_field_set() {
             else console.log('JWK-FAIL');
         }
         main().catch(e => { console.log('FAIL', e.message); process.exit(1); });
-    "#,
-    );
+    "#);
     assert_marker(&out, "JWK-OK");
 }

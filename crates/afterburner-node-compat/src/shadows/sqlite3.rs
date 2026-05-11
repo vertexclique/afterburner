@@ -593,14 +593,14 @@ mod tests {
     fn float_param_round_trip() {
         let (s, id) = open_mem();
         s.exec(id, "CREATE TABLE t (f REAL)").expect("create");
-        s.run(id, "INSERT INTO t VALUES (?)", vec![json!(3.14159)])
+        s.run(id, "INSERT INTO t VALUES (?)", vec![json!(3.5)])
             .expect("insert");
         let row = s
             .get(id, "SELECT f FROM t", vec![])
             .expect("get")
             .expect("row");
         let f = row["f"].as_f64().expect("number");
-        assert!((f - 3.14159).abs() < 1e-9);
+        assert!((f - 3.5).abs() < 1e-9);
         s.close(id).expect("close");
     }
 

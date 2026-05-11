@@ -52,38 +52,33 @@ fn assert_marker(out: &std::process::Output, marker: &str) {
 
 #[test]
 fn shake256_default_output_is_32_bytes_64_hex() {
-    let out = run(
-        r#"
+    let out = run(r#"
         const c = require('crypto');
         const h = c.createHash('shake256');
         h.update('abc');
         const d = h.digest('hex');
         if (d.length === 64) console.log('SHAKE256-LEN-OK');
         else console.log('FAIL ' + d.length);
-    "#,
-    );
+    "#);
     assert_marker(&out, "SHAKE256-LEN-OK");
 }
 
 #[test]
 fn shake128_default_output_is_16_bytes_32_hex() {
-    let out = run(
-        r#"
+    let out = run(r#"
         const c = require('crypto');
         const h = c.createHash('shake128');
         h.update('abc');
         const d = h.digest('hex');
         if (d.length === 32) console.log('SHAKE128-LEN-OK');
         else console.log('FAIL ' + d.length);
-    "#,
-    );
+    "#);
     assert_marker(&out, "SHAKE128-LEN-OK");
 }
 
 #[test]
 fn shake256_chunked_input_matches_one_shot() {
-    let out = run(
-        r#"
+    let out = run(r#"
         const c = require('crypto');
         const a = c.createHash('shake256');
         a.update('the quick brown fox jumps over the lazy dog');
@@ -94,21 +89,18 @@ fn shake256_chunked_input_matches_one_shot() {
         b.update('over the lazy dog');
         if (b.digest('hex') === oneshot) console.log('SHAKE256-STREAM-OK');
         else console.log('FAIL streamed-vs-oneshot');
-    "#,
-    );
+    "#);
     assert_marker(&out, "SHAKE256-STREAM-OK");
 }
 
 #[test]
 fn shake256_listed_in_get_hashes() {
-    let out = run(
-        r#"
+    let out = run(r#"
         const c = require('crypto');
         const list = c.getHashes();
         if (list.indexOf('shake128') >= 0 && list.indexOf('shake256') >= 0)
             console.log('SHAKE-IN-LIST-OK');
-    "#,
-    );
+    "#);
     assert_marker(&out, "SHAKE-IN-LIST-OK");
 }
 
@@ -116,52 +108,44 @@ fn shake256_listed_in_get_hashes() {
 
 #[test]
 fn check_prime_recognises_small_known_primes() {
-    let out = run(
-        r#"
+    let out = run(r#"
         const { checkPrimeSync } = require('crypto');
         const primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 97, 1009, 7919];
         const fails = primes.filter(p => !checkPrimeSync(BigInt(p)));
         if (fails.length === 0) console.log('CHECK-PRIME-OK');
         else console.log('FAIL', fails);
-    "#,
-    );
+    "#);
     assert_marker(&out, "CHECK-PRIME-OK");
 }
 
 #[test]
 fn check_prime_recognises_carmichael_561_as_composite() {
-    let out = run(
-        r#"
+    let out = run(r#"
         const { checkPrimeSync } = require('crypto');
         if (checkPrimeSync(561n) === false) console.log('CARMICHAEL-OK');
-    "#,
-    );
+    "#);
     assert_marker(&out, "CARMICHAEL-OK");
 }
 
 #[test]
 fn check_prime_async_callback_form_returns_result() {
-    let out = run(
-        r#"
+    let out = run(r#"
         const { checkPrime } = require('crypto');
         checkPrime(7n, (err, ok) => {
             if (err) { console.log('FAIL', err.message); return; }
             if (ok === true) console.log('CHECK-PRIME-ASYNC-OK');
         });
-    "#,
-    );
+    "#);
     assert_marker(&out, "CHECK-PRIME-ASYNC-OK");
 }
 
 #[test]
 fn check_prime_accepts_buffer_be_bytes() {
-    let out = run(
-        r#"
+    let out = run(r#"
         const { checkPrimeSync } = require('crypto');
         // 0x07 is 7, prime
         if (checkPrimeSync(Buffer.from([7]))) console.log('CHECK-PRIME-BUFFER-OK');
-    "#,
-    );
+    "#);
     assert_marker(&out, "CHECK-PRIME-BUFFER-OK");
 }
 
@@ -169,35 +153,30 @@ fn check_prime_accepts_buffer_be_bytes() {
 
 #[test]
 fn generate_prime_returns_bigint_at_target_size() {
-    let out = run(
-        r#"
+    let out = run(r#"
         const c = require('crypto');
         const p = c.generatePrimeSync(64);
         if (typeof p === 'bigint' && c.checkPrimeSync(p) === true)
             console.log('GEN-PRIME-OK');
         else console.log('FAIL', typeof p, p);
-    "#,
-    );
+    "#);
     assert_marker(&out, "GEN-PRIME-OK");
 }
 
 #[test]
 fn generate_prime_buffer_form_returns_be_bytes() {
-    let out = run(
-        r#"
+    let out = run(r#"
         const c = require('crypto');
         const buf = c.generatePrimeSync(64, { bigint: false });
         if (Buffer.isBuffer(buf) && buf.length > 0) console.log('GEN-PRIME-BUF-OK');
         else console.log('FAIL', buf);
-    "#,
-    );
+    "#);
     assert_marker(&out, "GEN-PRIME-BUF-OK");
 }
 
 #[test]
 fn generate_safe_prime_has_safe_property() {
-    let out = run(
-        r#"
+    let out = run(r#"
         const c = require('crypto');
         const p = c.generatePrimeSync(32, { safe: true });
         if (typeof p !== 'bigint') { console.log('FAIL not bigint'); return; }
@@ -205,22 +184,19 @@ fn generate_safe_prime_has_safe_property() {
         // For 32-bit primes both should pass with high probability via Miller-Rabin.
         if (c.checkPrimeSync(p) && c.checkPrimeSync(half)) console.log('SAFE-PRIME-OK');
         else console.log('FAIL safe property');
-    "#,
-    );
+    "#);
     assert_marker(&out, "SAFE-PRIME-OK");
 }
 
 #[test]
 fn generate_prime_async_callback_form() {
-    let out = run(
-        r#"
+    let out = run(r#"
         const c = require('crypto');
         c.generatePrime(64, (err, p) => {
             if (err) { console.log('FAIL', err.message); return; }
             if (typeof p === 'bigint' && c.checkPrimeSync(p)) console.log('GEN-PRIME-ASYNC-OK');
         });
-    "#,
-    );
+    "#);
     assert_marker(&out, "GEN-PRIME-ASYNC-OK");
 }
 
@@ -228,8 +204,7 @@ fn generate_prime_async_callback_form() {
 
 #[test]
 fn event_emitter_async_resource_is_a_class_with_emit_proxy() {
-    let out = run(
-        r#"
+    let out = run(r#"
         const { EventEmitterAsyncResource } = require('events');
         const e = new EventEmitterAsyncResource({ name: 'TEST' });
         let got = null;
@@ -240,37 +215,32 @@ fn event_emitter_async_resource_is_a_class_with_emit_proxy() {
             && e.asyncResource && typeof e.asyncResource.runInAsyncScope === 'function')
             console.log('EE-ASYNC-RES-OK');
         else console.log('FAIL', got, typeof e.asyncId);
-    "#,
-    );
+    "#);
     assert_marker(&out, "EE-ASYNC-RES-OK");
 }
 
 #[test]
 fn event_emitter_async_resource_accepts_no_options() {
-    let out = run(
-        r#"
+    let out = run(r#"
         const { EventEmitterAsyncResource } = require('events');
         const e = new EventEmitterAsyncResource();
         let fired = false;
         e.on('x', () => { fired = true; });
         e.emit('x');
         if (fired) console.log('EE-ASYNC-NOOPTS-OK');
-    "#,
-    );
+    "#);
     assert_marker(&out, "EE-ASYNC-NOOPTS-OK");
 }
 
 #[test]
 fn event_emitter_async_resource_inherits_event_emitter_methods() {
-    let out = run(
-        r#"
+    let out = run(r#"
         const { EventEmitterAsyncResource, EventEmitter } = require('events');
         const e = new EventEmitterAsyncResource({ name: 'X' });
         if (e instanceof EventEmitter && typeof e.once === 'function'
             && typeof e.removeListener === 'function')
             console.log('EE-ASYNC-INHERIT-OK');
-    "#,
-    );
+    "#);
     assert_marker(&out, "EE-ASYNC-INHERIT-OK");
 }
 

@@ -124,14 +124,14 @@ async fn wait_for_h3(port: u16, max: Duration) -> bool {
     ));
     endpoint.set_default_client_config(cfg);
     while Instant::now() < deadline {
-        let connecting = endpoint.connect(
-            format!("127.0.0.1:{port}").parse().unwrap(),
-            "127.0.0.1",
-        );
-        if let Ok(c) = connecting {
-            if let Ok(_conn) = tokio::time::timeout(Duration::from_millis(500), c).await {
-                return true;
-            }
+        let connecting =
+            endpoint.connect(format!("127.0.0.1:{port}").parse().unwrap(), "127.0.0.1");
+        if let Ok(c) = connecting
+            && tokio::time::timeout(Duration::from_millis(500), c)
+                .await
+                .is_ok()
+        {
+            return true;
         }
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
@@ -139,8 +139,8 @@ async fn wait_for_h3(port: u16, max: Duration) -> bool {
 }
 
 async fn h3_request(port: u16, path: &str) -> Result<(u16, Vec<u8>), String> {
-    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap())
-        .map_err(|e| e.to_string())?;
+    let mut endpoint =
+        quinn::Endpoint::client("0.0.0.0:0".parse().unwrap()).map_err(|e| e.to_string())?;
     let cfg = quinn::ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(insecure_client_config())
             .map_err(|e| e.to_string())?,

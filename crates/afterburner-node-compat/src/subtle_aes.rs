@@ -49,7 +49,7 @@ pub fn aes_ctr_apply(key: &[u8], counter: &[u8], data: &[u8]) -> Result<Vec<u8>>
 /// Plaintext (target key) length must be a multiple of 8 bytes and at
 /// least 16 bytes per RFC. Output is plaintext_len + 8 bytes.
 pub fn aes_kw_wrap(kek: &[u8], target: &[u8]) -> Result<Vec<u8>> {
-    if target.len() < 16 || target.len() % 8 != 0 {
+    if target.len() < 16 || !target.len().is_multiple_of(8) {
         return Err(AfterburnerError::Host(format!(
             "AES-KW: plaintext must be ≥16 bytes and a multiple of 8, got {}",
             target.len()
@@ -79,7 +79,7 @@ pub fn aes_kw_wrap(kek: &[u8], target: &[u8]) -> Result<Vec<u8>> {
 /// AES-KW unwrap. Authenticates via the RFC 3394 IV constant; a tampered
 /// blob fails with a clear error rather than silently returning garbage.
 pub fn aes_kw_unwrap(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>> {
-    if wrapped.len() < 24 || wrapped.len() % 8 != 0 {
+    if wrapped.len() < 24 || !wrapped.len().is_multiple_of(8) {
         return Err(AfterburnerError::Host(format!(
             "AES-KW: ciphertext must be ≥24 bytes and a multiple of 8, got {}",
             wrapped.len()
@@ -169,8 +169,7 @@ mod tests {
         // RFC 3394 §4.1: 128-bit KEK, 128-bit data.
         let kek = hex::decode("000102030405060708090A0B0C0D0E0F").unwrap();
         let pt = hex::decode("00112233445566778899AABBCCDDEEFF").unwrap();
-        let expected =
-            hex::decode("1FA68B0A8112B447AEF34BD8FB5A7B829D3E862371D2CFE5").unwrap();
+        let expected = hex::decode("1FA68B0A8112B447AEF34BD8FB5A7B829D3E862371D2CFE5").unwrap();
         let wrapped = aes_kw_wrap(&kek, &pt).unwrap();
         assert_eq!(wrapped, expected);
         let unwrapped = aes_kw_unwrap(&kek, &wrapped).unwrap();

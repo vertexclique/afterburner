@@ -585,7 +585,9 @@ mod axum_server {
             tokio::spawn(async move {
                 let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                     let conn_state = Arc::clone(&conn_state);
-                    async move { Ok::<_, std::convert::Infallible>(dispatch_hyper(conn_state, req).await) }
+                    async move {
+                        Ok::<_, std::convert::Infallible>(dispatch_hyper(conn_state, req).await)
+                    }
                 });
                 let io = TokioIo::new(socket);
                 let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
@@ -677,7 +679,6 @@ mod axum_server {
         server_id: ServerId,
         coord: Arc<DaemonHttp>,
     }
-
 }
 
 use std::fmt;

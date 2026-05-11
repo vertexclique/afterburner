@@ -18,21 +18,21 @@ pub mod bundle;
 pub mod child_process_host;
 pub mod crypto_host;
 pub mod dns_host;
-pub mod prime_host;
-pub mod subtle_aes;
-pub mod subtle_ec;
-pub mod subtle_host;
-pub mod subtle_rsa;
-pub mod v8_host;
-pub mod v8_serde;
 pub mod fs_host;
 pub mod hash_handles;
 pub mod host_context_active;
 pub mod http_host;
 pub mod native_install;
 pub mod os_host;
+pub mod prime_host;
 pub mod sign_handles;
 pub mod state_active;
+pub mod subtle_aes;
+pub mod subtle_ec;
+pub mod subtle_host;
+pub mod subtle_rsa;
+pub mod v8_host;
+pub mod v8_serde;
 pub mod zlib_host;
 
 /// L3 shadows — pure-Rust substitutes for popular native-addon npm

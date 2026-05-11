@@ -96,4 +96,3 @@ pub fn build_udp_socket(addr: SocketAddr) -> Result<UdpSocket, ClusterBindError>
     sock.bind(&addr.into())?;
     Ok(sock.into())
 }
-

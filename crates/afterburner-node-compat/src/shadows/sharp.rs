@@ -115,20 +115,35 @@ enum Op {
     /// Negate (invert) the image.
     Negate,
     /// Per-pixel multiply by an RGB tint colour.
-    Tint { r: u8, g: u8, b: u8 },
+    Tint {
+        r: u8,
+        g: u8,
+        b: u8,
+    },
     /// HSL adjustment — brightness multiplier, saturation multiplier,
     /// hue rotation in degrees. brightness=1, saturation=1, hue=0 is
     /// the identity.
-    Modulate { brightness: f32, saturation: f32, hue: f32 },
+    Modulate {
+        brightness: f32,
+        saturation: f32,
+        hue: f32,
+    },
     /// Unsharp mask. `sigma` controls the blur radius of the mask;
     /// `flat` and `jagged` are the strength multipliers from sharp's
     /// `m1` / `m2`.
-    Sharpen { sigma: f32, flat: f32, jagged: f32 },
+    Sharpen {
+        sigma: f32,
+        flat: f32,
+        jagged: f32,
+    },
     /// Histogram stretch — find min/max per channel, scale to [0,255].
     Normalize,
     /// Threshold to binary; pixels with luminance ≥ level go white.
     /// `grayscale: true` returns a single-channel image.
-    Threshold { level: u8, grayscale: bool },
+    Threshold {
+        level: u8,
+        grayscale: bool,
+    },
     /// Composite layers over the base image. Each layer is decoded
     /// from its own source bytes and alpha-blended at (left, top).
     Composite(Vec<CompositeLayer>),
@@ -206,8 +221,7 @@ pub fn stats(source_json: &str) -> Result<String, String> {
         Source::Buffer(b) => b.clone(),
         Source::File(p) => std::fs::read(p).map_err(|e| format!("sharp: read {p}: {e}"))?,
     };
-    let img = image::load_from_memory(&bytes)
-        .map_err(|e| format!("sharp.stats: decode: {e}"))?;
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("sharp.stats: decode: {e}"))?;
     let rgba = img.to_rgba8();
     let (w, h) = (rgba.width() as u64, rgba.height() as u64);
     let pixel_count = (w * h) as f64;
@@ -426,14 +440,8 @@ fn parse_op(v: &serde_json::Value) -> Result<Op, String> {
             Ok(Op::Tint { r, g, b })
         }
         "modulate" => {
-            let brightness = v
-                .get("brightness")
-                .and_then(|x| x.as_f64())
-                .unwrap_or(1.0) as f32;
-            let saturation = v
-                .get("saturation")
-                .and_then(|x| x.as_f64())
-                .unwrap_or(1.0) as f32;
+            let brightness = v.get("brightness").and_then(|x| x.as_f64()).unwrap_or(1.0) as f32;
+            let saturation = v.get("saturation").and_then(|x| x.as_f64()).unwrap_or(1.0) as f32;
             let hue = v.get("hue").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
             Ok(Op::Modulate {
                 brightness,
@@ -461,10 +469,7 @@ fn parse_op(v: &serde_json::Value) -> Result<Op, String> {
                 .and_then(|x| x.as_u64())
                 .map(|n| n.clamp(0, 255) as u8)
                 .unwrap_or(128);
-            let grayscale = v
-                .get("grayscale")
-                .and_then(|x| x.as_bool())
-                .unwrap_or(true);
+            let grayscale = v.get("grayscale").and_then(|x| x.as_bool()).unwrap_or(true);
             Ok(Op::Threshold { level, grayscale })
         }
         "composite" => {
@@ -710,7 +715,11 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
     if s == 0.0 {
         return (l, l, l);
     }
-    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
     let p = 2.0 * l - q;
     let r = hue_to_rgb(p, q, h + 1.0 / 3.0);
     let g = hue_to_rgb(p, q, h);
@@ -794,18 +803,16 @@ fn apply_threshold(img: DynamicImage, level: u8, grayscale: bool) -> DynamicImag
     if grayscale {
         let mut luma = image::GrayImage::new(rgba.width(), rgba.height());
         for (l, src) in luma.pixels_mut().zip(rgba.pixels()) {
-            let y = (0.299 * src.0[0] as f32
-                + 0.587 * src.0[1] as f32
-                + 0.114 * src.0[2] as f32) as u8;
+            let y =
+                (0.299 * src.0[0] as f32 + 0.587 * src.0[1] as f32 + 0.114 * src.0[2] as f32) as u8;
             l.0[0] = if y >= level { 255 } else { 0 };
         }
         DynamicImage::ImageLuma8(luma)
     } else {
         let mut out = rgba;
         for px in out.pixels_mut() {
-            let y = (0.299 * px.0[0] as f32
-                + 0.587 * px.0[1] as f32
-                + 0.114 * px.0[2] as f32) as u8;
+            let y =
+                (0.299 * px.0[0] as f32 + 0.587 * px.0[1] as f32 + 0.114 * px.0[2] as f32) as u8;
             let v = if y >= level { 255 } else { 0 };
             px.0[0] = v;
             px.0[1] = v;
@@ -840,7 +847,8 @@ fn apply_composite(base: DynamicImage, layers: &[CompositeLayer]) -> Result<Dyna
                 let a = src.0[3] as f32 / 255.0;
                 let inv = 1.0 - a;
                 for c in 0..3 {
-                    dst.0[c] = (src.0[c] as f32 * a + dst.0[c] as f32 * inv).clamp(0.0, 255.0) as u8;
+                    dst.0[c] =
+                        (src.0[c] as f32 * a + dst.0[c] as f32 * inv).clamp(0.0, 255.0) as u8;
                 }
                 dst.0[3] = (src.0[3] as f32 + dst.0[3] as f32 * inv).clamp(0.0, 255.0) as u8;
             }

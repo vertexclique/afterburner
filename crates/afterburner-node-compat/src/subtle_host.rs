@@ -25,12 +25,13 @@ fn decode_args(args_json: &str) -> Result<Vec<Vec<u8>>> {
         .ok_or_else(|| AfterburnerError::Host("subtle: args must be JSON array".into()))?;
     let mut out = Vec::with_capacity(arr.len());
     for (i, item) in arr.iter().enumerate() {
-        let s = item.as_str().ok_or_else(|| {
-            AfterburnerError::Host(format!("subtle: args[{i}] must be string"))
-        })?;
-        out.push(B64.decode(s).map_err(|e| {
-            AfterburnerError::Host(format!("subtle: args[{i}] base64: {e}"))
-        })?);
+        let s = item
+            .as_str()
+            .ok_or_else(|| AfterburnerError::Host(format!("subtle: args[{i}] must be string")))?;
+        out.push(
+            B64.decode(s)
+                .map_err(|e| AfterburnerError::Host(format!("subtle: args[{i}] base64: {e}")))?,
+        );
     }
     Ok(out)
 }
@@ -127,11 +128,13 @@ pub fn subtle_op(op: &str, args_json: &str, m: &Manifold) -> Result<String> {
             need(&args, 5, op)?;
             let hash = arg_str(&args[0])?;
             let salt_len = arg_usize(&args[1])?;
-            Ok(if subtle_rsa::rsa_pss_verify(&args[2], hash, salt_len, &args[3], &args[4])? {
-                "1".into()
-            } else {
-                "0".into()
-            })
+            Ok(
+                if subtle_rsa::rsa_pss_verify(&args[2], hash, salt_len, &args[3], &args[4])? {
+                    "1".into()
+                } else {
+                    "0".into()
+                },
+            )
         }
 
         // ---- RSASSA-PKCS1-v1_5 -------------------------------------
@@ -145,11 +148,13 @@ pub fn subtle_op(op: &str, args_json: &str, m: &Manifold) -> Result<String> {
         "rsa-pkcs1:verify" => {
             need(&args, 4, op)?;
             let hash = arg_str(&args[0])?;
-            Ok(if subtle_rsa::rsa_pkcs1_verify(&args[1], hash, &args[2], &args[3])? {
-                "1".into()
-            } else {
-                "0".into()
-            })
+            Ok(
+                if subtle_rsa::rsa_pkcs1_verify(&args[1], hash, &args[2], &args[3])? {
+                    "1".into()
+                } else {
+                    "0".into()
+                },
+            )
         }
 
         // ---- RSA JWK export ----------------------------------------
@@ -178,24 +183,30 @@ pub fn subtle_op(op: &str, args_json: &str, m: &Manifold) -> Result<String> {
             need(&args, 4, op)?;
             let curve = arg_str(&args[0])?;
             let hash = arg_str(&args[1])?;
-            Ok(encode_one(&subtle_ec::ecdsa_sign(curve, hash, &args[2], &args[3])?))
+            Ok(encode_one(&subtle_ec::ecdsa_sign(
+                curve, hash, &args[2], &args[3],
+            )?))
         }
         "ecdsa:verify" => {
             need(&args, 5, op)?;
             let curve = arg_str(&args[0])?;
             let hash = arg_str(&args[1])?;
-            Ok(if subtle_ec::ecdsa_verify(curve, hash, &args[2], &args[3], &args[4])? {
-                "1".into()
-            } else {
-                "0".into()
-            })
+            Ok(
+                if subtle_ec::ecdsa_verify(curve, hash, &args[2], &args[3], &args[4])? {
+                    "1".into()
+                } else {
+                    "0".into()
+                },
+            )
         }
 
         // ---- ECDH ---------------------------------------------------
         "ecdh:derive" => {
             need(&args, 3, op)?;
             let curve = arg_str(&args[0])?;
-            Ok(encode_one(&subtle_ec::ecdh_derive(curve, &args[1], &args[2])?))
+            Ok(encode_one(&subtle_ec::ecdh_derive(
+                curve, &args[1], &args[2],
+            )?))
         }
 
         // ---- Ed25519 ------------------------------------------------
@@ -210,11 +221,13 @@ pub fn subtle_op(op: &str, args_json: &str, m: &Manifold) -> Result<String> {
         }
         "ed25519:verify" => {
             need(&args, 3, op)?;
-            Ok(if subtle_ec::ed25519_verify(&args[0], &args[1], &args[2])? {
-                "1".into()
-            } else {
-                "0".into()
-            })
+            Ok(
+                if subtle_ec::ed25519_verify(&args[0], &args[1], &args[2])? {
+                    "1".into()
+                } else {
+                    "0".into()
+                },
+            )
         }
 
         // ---- X25519 -------------------------------------------------
@@ -404,14 +417,18 @@ mod tests {
         argv.push_str(&format!("\"{}\",", B64.encode(&pub_)));
         argv.push_str(&format!("\"{}\",", B64.encode(&label)));
         argv.push_str(&format!("\"{}\"]", B64.encode(&data)));
-        let ct = B64.decode(subtle_op("rsa-oaep:encrypt", &argv, &open_manifold()).unwrap()).unwrap();
+        let ct = B64
+            .decode(subtle_op("rsa-oaep:encrypt", &argv, &open_manifold()).unwrap())
+            .unwrap();
 
         let mut argv = String::from("[");
         argv.push_str(&format!("\"{}\",", B64.encode(b"SHA-256")));
         argv.push_str(&format!("\"{}\",", B64.encode(&priv_)));
         argv.push_str(&format!("\"{}\",", B64.encode(&label)));
         argv.push_str(&format!("\"{}\"]", B64.encode(&ct)));
-        let pt = B64.decode(subtle_op("rsa-oaep:decrypt", &argv, &open_manifold()).unwrap()).unwrap();
+        let pt = B64
+            .decode(subtle_op("rsa-oaep:decrypt", &argv, &open_manifold()).unwrap())
+            .unwrap();
         assert_eq!(pt, data);
     }
 

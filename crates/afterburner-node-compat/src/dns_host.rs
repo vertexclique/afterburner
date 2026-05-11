@@ -265,11 +265,7 @@ pub fn resolve_ns(hostname: &str, servers: &[String], m: &Manifold) -> Result<Ve
 
 /// SOA (Start Of Authority) record. Returns the single SOA Node
 /// shape: `{nsname, hostmaster, serial, refresh, retry, expire, minttl}`.
-pub fn resolve_soa(
-    hostname: &str,
-    servers: &[String],
-    m: &Manifold,
-) -> Result<serde_json::Value> {
+pub fn resolve_soa(hostname: &str, servers: &[String], m: &Manifold) -> Result<serde_json::Value> {
     check_net(m, &format!("dns.resolveSoa({hostname})"))?;
     let hn = hostname.to_string();
     let s = servers.to_vec();
@@ -279,10 +275,9 @@ pub fn resolve_soa(
         let lookup = resolver
             .lookup(&hn, RecordType::SOA)
             .map_err(|e| AfterburnerError::Host(format!("dns.resolveSoa({hn}): {e}")))?;
-        let soa = lookup
-            .iter()
-            .find_map(|r| r.as_soa())
-            .ok_or_else(|| AfterburnerError::Host(format!("dns.resolveSoa({hn}): no SOA record")))?;
+        let soa = lookup.iter().find_map(|r| r.as_soa()).ok_or_else(|| {
+            AfterburnerError::Host(format!("dns.resolveSoa({hn}): no SOA record"))
+        })?;
         Ok(serde_json::json!({
             "nsname":     soa.mname().to_string(),
             "hostmaster": soa.rname().to_string(),

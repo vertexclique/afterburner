@@ -786,9 +786,7 @@ fn shard_event_loop(
                 break;
             };
             did_work = true;
-            if let Some(envelope) =
-                crate::daemon_envelopes::inspector_event_to_envelope(&evt)
-            {
+            if let Some(envelope) = crate::daemon_envelopes::inspector_event_to_envelope(&evt) {
                 dispatch_with_panic_isolation(
                     shard_idx,
                     daemon,

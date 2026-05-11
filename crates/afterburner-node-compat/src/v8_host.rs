@@ -47,15 +47,15 @@ fn json_to_v8(j: &serde_json::Value) -> Result<V8Value> {
         "n" => Ok(V8Value::Null),
         "b" => Ok(V8Value::Bool(obj["v"].as_bool().unwrap_or(false))),
         "i" => {
-            let n = obj["v"].as_i64().ok_or_else(|| {
-                AfterburnerError::Host("v8.serialize: i32 missing".into())
-            })?;
+            let n = obj["v"]
+                .as_i64()
+                .ok_or_else(|| AfterburnerError::Host("v8.serialize: i32 missing".into()))?;
             Ok(V8Value::Int32(n as i32))
         }
         "U" => {
-            let n = obj["v"].as_u64().ok_or_else(|| {
-                AfterburnerError::Host("v8.serialize: u32 missing".into())
-            })?;
+            let n = obj["v"]
+                .as_u64()
+                .ok_or_else(|| AfterburnerError::Host("v8.serialize: u32 missing".into()))?;
             Ok(V8Value::Uint32(n as u32))
         }
         "d" => {
@@ -63,7 +63,7 @@ fn json_to_v8(j: &serde_json::Value) -> Result<V8Value> {
             // NaN/Infinity (JSON has no native representation).
             let v = match &obj["v"] {
                 J::Number(n) => n.as_f64().unwrap_or(0.0),
-                J::String(s) => s.parse::<f64>().unwrap_or_else(|_| match s.as_str() {
+                J::String(s) => s.parse::<f64>().unwrap_or(match s.as_str() {
                     "Infinity" => f64::INFINITY,
                     "-Infinity" => f64::NEG_INFINITY,
                     "NaN" => f64::NAN,
@@ -120,7 +120,10 @@ fn json_to_v8(j: &serde_json::Value) -> Result<V8Value> {
                 let v = json_to_v8(&pair[1])?;
                 out.push((idx, v));
             }
-            Ok(V8Value::SparseArray { length, entries: out })
+            Ok(V8Value::SparseArray {
+                length,
+                entries: out,
+            })
         }
         "m" => {
             let entries = obj["e"]
@@ -141,7 +144,9 @@ fn json_to_v8(j: &serde_json::Value) -> Result<V8Value> {
             let items = obj["v"]
                 .as_array()
                 .ok_or_else(|| AfterburnerError::Host("v8.serialize: set 'v' missing".into()))?;
-            Ok(V8Value::Set(items.iter().map(json_to_v8).collect::<Result<Vec<_>>>()?))
+            Ok(V8Value::Set(
+                items.iter().map(json_to_v8).collect::<Result<Vec<_>>>()?,
+            ))
         }
         "B" => {
             let raw = obj["v"].as_str().unwrap_or_default();
@@ -158,7 +163,12 @@ fn json_to_v8(j: &serde_json::Value) -> Result<V8Value> {
                 .map_err(|e| AfterburnerError::Host(format!("v8.serialize: ABV b64: {e}")))?;
             let byte_offset = obj["o"].as_u64().unwrap_or(0) as u32;
             let byte_length = obj["l"].as_u64().unwrap_or(buffer.len() as u64) as u32;
-            Ok(V8Value::TypedArray { kind, buffer, byte_offset, byte_length })
+            Ok(V8Value::TypedArray {
+                kind,
+                buffer,
+                byte_offset,
+                byte_length,
+            })
         }
         "E" => Ok(V8Value::Error {
             kind: obj["k"].as_u64().unwrap_or(b'E' as u64) as u8,
@@ -207,7 +217,10 @@ fn v8_to_json(v: &V8Value) -> serde_json::Value {
         }
         V8Value::RegExp { pattern, flags } => json!({"t":"R","p":pattern,"f":flags}),
         V8Value::Object(entries) => {
-            let e: Vec<_> = entries.iter().map(|(k, v)| json!([k, v8_to_json(v)])).collect();
+            let e: Vec<_> = entries
+                .iter()
+                .map(|(k, v)| json!([k, v8_to_json(v)]))
+                .collect();
             json!({"t":"o","e":e})
         }
         V8Value::DenseArray(items) => {
@@ -215,12 +228,17 @@ fn v8_to_json(v: &V8Value) -> serde_json::Value {
             json!({"t":"a","v":v})
         }
         V8Value::SparseArray { length, entries } => {
-            let e: Vec<_> = entries.iter().map(|(i, v)| json!([i, v8_to_json(v)])).collect();
+            let e: Vec<_> = entries
+                .iter()
+                .map(|(i, v)| json!([i, v8_to_json(v)]))
+                .collect();
             json!({"t":"S","l":length,"e":e})
         }
         V8Value::Map(entries) => {
-            let e: Vec<_> =
-                entries.iter().map(|(k, v)| json!([v8_to_json(k), v8_to_json(v)])).collect();
+            let e: Vec<_> = entries
+                .iter()
+                .map(|(k, v)| json!([v8_to_json(k), v8_to_json(v)]))
+                .collect();
             json!({"t":"m","e":e})
         }
         V8Value::Set(items) => {
@@ -228,10 +246,19 @@ fn v8_to_json(v: &V8Value) -> serde_json::Value {
             json!({"t":"e","v":v})
         }
         V8Value::ArrayBuffer(bytes) => json!({"t":"B","v":B64.encode(bytes)}),
-        V8Value::TypedArray { kind, buffer, byte_offset, byte_length } => {
+        V8Value::TypedArray {
+            kind,
+            buffer,
+            byte_offset,
+            byte_length,
+        } => {
             json!({"t":"V","k":kind,"b":B64.encode(buffer),"o":byte_offset,"l":byte_length})
         }
-        V8Value::Error { kind, message, stack } => {
+        V8Value::Error {
+            kind,
+            message,
+            stack,
+        } => {
             let mut obj = serde_json::Map::new();
             obj.insert("t".into(), json!("E"));
             obj.insert("k".into(), json!(kind));

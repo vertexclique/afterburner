@@ -423,11 +423,7 @@ impl WasmLoader {
     /// Read or grow an exported *global*. `set` returns `Ok(())` on
     /// success, an error if the global is immutable or wrong type.
     /// `get` returns the value as a [`WasmValue`].
-    pub fn global_get(
-        &self,
-        instance_id: InstanceId,
-        name: &str,
-    ) -> Result<WasmValue> {
+    pub fn global_get(&self, instance_id: InstanceId, name: &str) -> Result<WasmValue> {
         let inst = self.instances.get(&instance_id).ok_or_else(|| {
             AfterburnerError::Host(format!("WebAssembly: unknown instance {instance_id}"))
         })?;
@@ -454,12 +450,7 @@ impl WasmLoader {
         })
     }
 
-    pub fn global_set(
-        &self,
-        instance_id: InstanceId,
-        name: &str,
-        value: WasmValue,
-    ) -> Result<()> {
+    pub fn global_set(&self, instance_id: InstanceId, name: &str, value: WasmValue) -> Result<()> {
         let inst = self.instances.get(&instance_id).ok_or_else(|| {
             AfterburnerError::Host(format!("WebAssembly: unknown instance {instance_id}"))
         })?;
@@ -499,12 +490,7 @@ impl WasmLoader {
     /// (`{"kind":"funcref","null":true|false}` for funcref tables).
     /// JS callers compare against the spec's `null` sentinel — we
     /// don't yet expose the func itself.
-    pub fn table_get(
-        &self,
-        instance_id: InstanceId,
-        name: &str,
-        index: u32,
-    ) -> Result<String> {
+    pub fn table_get(&self, instance_id: InstanceId, name: &str, index: u32) -> Result<String> {
         let inst = self.instances.get(&instance_id).ok_or_else(|| {
             AfterburnerError::Host(format!("WebAssembly: unknown instance {instance_id}"))
         })?;
@@ -518,7 +504,9 @@ impl WasmLoader {
                 ))
             })?;
         let val = t.get(&mut state.store, index as u64).ok_or_else(|| {
-            AfterburnerError::Host(format!("WebAssembly.Table.get: index {index} out of bounds"))
+            AfterburnerError::Host(format!(
+                "WebAssembly.Table.get: index {index} out of bounds"
+            ))
         })?;
         let (kind, is_null) = match val {
             wasmtime::Ref::Func(f) => ("funcref", f.is_none()),
@@ -530,12 +518,7 @@ impl WasmLoader {
 
     /// Grow a table by `delta` slots, filling with null. Returns the
     /// previous size, or -1 on failure (e.g. maximum exceeded).
-    pub fn table_grow(
-        &self,
-        instance_id: InstanceId,
-        name: &str,
-        delta: u32,
-    ) -> Result<i64> {
+    pub fn table_grow(&self, instance_id: InstanceId, name: &str, delta: u32) -> Result<i64> {
         let inst = self.instances.get(&instance_id).ok_or_else(|| {
             AfterburnerError::Host(format!("WebAssembly: unknown instance {instance_id}"))
         })?;
@@ -573,12 +556,10 @@ impl WasmLoader {
         let memory = wasmtime::Memory::new(&mut store, ty)
             .map_err(|e| AfterburnerError::Host(format!("Memory::new: {e}")))?;
         let id = self.standalone.next_id.fetch_add(1, Ordering::Relaxed);
-        self.standalone
-            .memories
-            .insert(id, Arc::new(PerInstanceLock::new(StandaloneMemory {
-                store,
-                memory,
-            })));
+        self.standalone.memories.insert(
+            id,
+            Arc::new(PerInstanceLock::new(StandaloneMemory { store, memory })),
+        );
         Ok(id)
     }
 
@@ -682,12 +663,10 @@ impl WasmLoader {
         let g = wasmtime::Global::new(&mut store, wasmtime::GlobalType::new(val_ty, mt), init_val)
             .map_err(|e| AfterburnerError::Host(format!("Global::new: {e}")))?;
         let id = self.standalone.next_id.fetch_add(1, Ordering::Relaxed);
-        self.standalone
-            .globals
-            .insert(id, Arc::new(PerInstanceLock::new(StandaloneGlobal {
-                store,
-                global: g,
-            })));
+        self.standalone.globals.insert(
+            id,
+            Arc::new(PerInstanceLock::new(StandaloneGlobal { store, global: g })),
+        );
         Ok(id)
     }
 
@@ -754,12 +733,10 @@ impl WasmLoader {
         )
         .map_err(|e| AfterburnerError::Host(format!("Table::new: {e}")))?;
         let id = self.standalone.next_id.fetch_add(1, Ordering::Relaxed);
-        self.standalone
-            .tables
-            .insert(id, Arc::new(PerInstanceLock::new(StandaloneTable {
-                store,
-                table: t,
-            })));
+        self.standalone.tables.insert(
+            id,
+            Arc::new(PerInstanceLock::new(StandaloneTable { store, table: t })),
+        );
         Ok(id)
     }
 
@@ -806,13 +783,12 @@ impl WasmLoader {
     /// inside burn can't escape burn's overall Manifold even if
     /// `preopens` lists a path).
     pub fn run_wasi(&self, module_id: ModuleId, config_json: &str) -> Result<i32> {
-        use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
         use wasmtime_wasi::preview1::WasiP1Ctx;
+        use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
-        let module = self
-            .modules
-            .get(&module_id)
-            .ok_or_else(|| AfterburnerError::Host(format!("WebAssembly: unknown module {module_id}")))?;
+        let module = self.modules.get(&module_id).ok_or_else(|| {
+            AfterburnerError::Host(format!("WebAssembly: unknown module {module_id}"))
+        })?;
         let cfg: serde_json::Value = serde_json::from_str(config_json)
             .map_err(|e| AfterburnerError::Host(format!("WASI config: {e}")))?;
 
@@ -839,7 +815,9 @@ impl WasmLoader {
                 if let Some(host_path) = host.as_str() {
                     builder
                         .preopened_dir(host_path, guest, DirPerms::all(), FilePerms::all())
-                        .map_err(|e| AfterburnerError::Host(format!("WASI preopen {host_path}: {e}")))?;
+                        .map_err(|e| {
+                            AfterburnerError::Host(format!("WASI preopen {host_path}: {e}"))
+                        })?;
                 }
             }
         }
@@ -889,10 +867,10 @@ impl WasmLoader {
                     let debug = format!("{cause:?}");
                     if let Some(idx) = debug.find(dbg_marker) {
                         let rest = &debug[idx + dbg_marker.len()..];
-                        if let Some(end) = rest.find(')') {
-                            if let Ok(code) = rest[..end].trim().parse::<i32>() {
-                                return Ok(code);
-                            }
+                        if let Some(end) = rest.find(')')
+                            && let Ok(code) = rest[..end].trim().parse::<i32>()
+                        {
+                            return Ok(code);
                         }
                     }
                 }

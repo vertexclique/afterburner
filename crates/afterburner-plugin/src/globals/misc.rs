@@ -10,8 +10,8 @@ use alloc::vec::Vec;
 use javy_plugin_api::javy::quickjs::{Object, prelude::Func};
 
 use super::call_read;
-use base64::Engine as _;
 use crate::host_api::*;
+use base64::Engine as _;
 
 pub fn install<'js>(globals: &Object<'js>) {
     install_diagnostics(globals);
@@ -448,27 +448,27 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     );
     let _ = globals.set(
         "__host_worker_spawn_env",
-        Func::from(|path: String, worker_data: String, env_json: String| -> f64 {
-            let pb = path.as_bytes();
-            let db = worker_data.as_bytes();
-            let eb = env_json.as_bytes();
-            unsafe {
-                host_worker_spawn_env(
-                    pb.as_ptr(),
-                    pb.len() as u32,
-                    db.as_ptr(),
-                    db.len() as u32,
-                    eb.as_ptr(),
-                    eb.len() as u32,
-                ) as f64
-            }
-        }),
+        Func::from(
+            |path: String, worker_data: String, env_json: String| -> f64 {
+                let pb = path.as_bytes();
+                let db = worker_data.as_bytes();
+                let eb = env_json.as_bytes();
+                unsafe {
+                    host_worker_spawn_env(
+                        pb.as_ptr(),
+                        pb.len() as u32,
+                        db.as_ptr(),
+                        db.len() as u32,
+                        eb.as_ptr(),
+                        eb.len() as u32,
+                    ) as f64
+                }
+            },
+        ),
     );
     let _ = globals.set(
         "__host_worker_pid",
-        Func::from(|worker_id: f64| -> f64 {
-            unsafe { host_worker_pid(worker_id as i32) as f64 }
-        }),
+        Func::from(|worker_id: f64| -> f64 { unsafe { host_worker_pid(worker_id as i32) as f64 } }),
     );
 
     // ---- SharedArrayBuffer + Atomics.wait/notify ----------------
@@ -488,9 +488,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
         "__host_sab_open",
         Func::from(|descriptor: String, byte_length: f64| -> f64 {
             let db = descriptor.as_bytes();
-            unsafe {
-                host_sab_open(db.as_ptr(), db.len() as u32, byte_length as i64) as f64
-            }
+            unsafe { host_sab_open(db.as_ptr(), db.len() as u32, byte_length as i64) as f64 }
         }),
     );
     let _ = globals.set(
@@ -508,12 +506,8 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     let _ = globals.set(
         "__host_sab_descriptor",
         Func::from(|region_id: f64| -> String {
-            match call_read(|out, cap| unsafe {
-                host_sab_descriptor(region_id as i64, out, cap)
-            }) {
-                Ok(s) => s,
-                Err(_) => String::new(),
-            }
+            call_read(|out, cap| unsafe { host_sab_descriptor(region_id as i64, out, cap) })
+                .unwrap_or_default()
         }),
     );
     let _ = globals.set(
@@ -522,11 +516,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
             match call_read(|out, cap| unsafe {
                 host_sab_read(region_id as i64, offset as i64, len as i64, out, cap)
             }) {
-                Ok(s) => alloc::format!(
-                    "{}",
-                    base64::engine::general_purpose::STANDARD
-                        .encode(s.as_bytes())
-                ),
+                Ok(s) => base64::engine::general_purpose::STANDARD.encode(s.as_bytes()),
                 Err(e) => alloc::format!("__HOST_ERR__:{e}"),
             }
         }),
@@ -558,16 +548,18 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     );
     let _ = globals.set(
         "__host_sab_atomic_store",
-        Func::from(|region_id: f64, byte_offset: f64, value: f64, width: f64| -> f64 {
-            unsafe {
-                host_sab_atomic_store(
-                    region_id as i64,
-                    byte_offset as i64,
-                    value as i64,
-                    width as i32,
-                ) as f64
-            }
-        }),
+        Func::from(
+            |region_id: f64, byte_offset: f64, value: f64, width: f64| -> f64 {
+                unsafe {
+                    host_sab_atomic_store(
+                        region_id as i64,
+                        byte_offset as i64,
+                        value as i64,
+                        width as i32,
+                    ) as f64
+                }
+            },
+        ),
     );
     let _ = globals.set(
         "__host_sab_atomic_cas",
@@ -608,18 +600,14 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     let _ = globals.set(
         "__host_sab_notify",
         Func::from(|region_id: f64, byte_offset: f64, count: f64| -> f64 {
-            unsafe {
-                host_sab_notify(region_id as i64, byte_offset as i64, count as i64) as f64
-            }
+            unsafe { host_sab_notify(region_id as i64, byte_offset as i64, count as i64) as f64 }
         }),
     );
 
     // ---- inspector / Chrome DevTools Protocol ---------------
     let _ = globals.set(
         "__host_inspector_open",
-        Func::from(|port: f64| -> f64 {
-            unsafe { host_inspector_open(port as i32) as f64 }
-        }),
+        Func::from(|port: f64| -> f64 { unsafe { host_inspector_open(port as i32) as f64 } }),
     );
     let _ = globals.set(
         "__host_inspector_close",
@@ -629,9 +617,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
         "__host_inspector_send",
         Func::from(|session_id: f64, payload: String| -> f64 {
             let pb = payload.as_bytes();
-            unsafe {
-                host_inspector_send(session_id as i32, pb.as_ptr(), pb.len() as u32) as f64
-            }
+            unsafe { host_inspector_send(session_id as i32, pb.as_ptr(), pb.len() as u32) as f64 }
         }),
     );
     let _ = globals.set(
@@ -1172,27 +1158,27 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     );
     let _ = globals.set(
         "__host_wasm_global_set",
-        Func::from(|instance_id: f64, name: String, value_json: String| -> f64 {
-            let nb = name.as_bytes();
-            let vb = value_json.as_bytes();
-            unsafe {
-                host_wasm_global_set(
-                    instance_id as i64,
-                    nb.as_ptr(),
-                    nb.len() as u32,
-                    vb.as_ptr(),
-                    vb.len() as u32,
-                ) as f64
-            }
-        }),
+        Func::from(
+            |instance_id: f64, name: String, value_json: String| -> f64 {
+                let nb = name.as_bytes();
+                let vb = value_json.as_bytes();
+                unsafe {
+                    host_wasm_global_set(
+                        instance_id as i64,
+                        nb.as_ptr(),
+                        nb.len() as u32,
+                        vb.as_ptr(),
+                        vb.len() as u32,
+                    ) as f64
+                }
+            },
+        ),
     );
     let _ = globals.set(
         "__host_wasm_table_size",
         Func::from(|instance_id: f64, name: String| -> f64 {
             let nb = name.as_bytes();
-            unsafe {
-                host_wasm_table_size(instance_id as i64, nb.as_ptr(), nb.len() as u32) as f64
-            }
+            unsafe { host_wasm_table_size(instance_id as i64, nb.as_ptr(), nb.len() as u32) as f64 }
         }),
     );
     let _ = globals.set(
@@ -1265,12 +1251,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
             // instance-export `__host_wasm_memory_write`.
             let bb = bytes_b64.as_bytes();
             unsafe {
-                host_wasm_mem_write(
-                    id as i64,
-                    offset as i32,
-                    bb.as_ptr(),
-                    bb.len() as u32,
-                ) as f64
+                host_wasm_mem_write(id as i64, offset as i32, bb.as_ptr(), bb.len() as u32) as f64
             }
         }),
     );
@@ -1319,20 +1300,14 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
         Func::from(|elem: String, initial: f64, maximum: f64| -> f64 {
             let eb = elem.as_bytes();
             unsafe {
-                host_wasm_table_new(
-                    eb.as_ptr(),
-                    eb.len() as u32,
-                    initial as i32,
-                    maximum as i32,
-                ) as f64
+                host_wasm_table_new(eb.as_ptr(), eb.len() as u32, initial as i32, maximum as i32)
+                    as f64
             }
         }),
     );
     let _ = globals.set(
         "__host_wasm_table_size_sa",
-        Func::from(|id: f64| -> f64 {
-            unsafe { host_wasm_table_size_sa(id as i64) as f64 }
-        }),
+        Func::from(|id: f64| -> f64 { unsafe { host_wasm_table_size_sa(id as i64) as f64 } }),
     );
     let _ = globals.set(
         "__host_wasm_table_grow_sa",
@@ -1348,9 +1323,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
         "__host_wasm_run_wasi",
         Func::from(|module_id: f64, cfg: String| -> f64 {
             let cb = cfg.as_bytes();
-            unsafe {
-                host_wasm_run_wasi(module_id as i64, cb.as_ptr(), cb.len() as u32) as f64
-            }
+            unsafe { host_wasm_run_wasi(module_id as i64, cb.as_ptr(), cb.len() as u32) as f64 }
         }),
     );
 }

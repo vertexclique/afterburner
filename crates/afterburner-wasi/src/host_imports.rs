@@ -168,11 +168,11 @@ fn wrap_sab(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return crate::daemon_sab::ERR_IO;
                 };
-                let result = caller.data().daemon_sab.read(
-                    region_id,
-                    offset as usize,
-                    len as usize,
-                );
+                let result =
+                    caller
+                        .data()
+                        .daemon_sab
+                        .read(region_id, offset as usize, len as usize);
                 match result {
                     Ok(bytes) => write_out(&mut caller, &memory, out_ptr, out_cap, &bytes),
                     Err(e) => e,
@@ -199,7 +199,10 @@ fn wrap_sab(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 let Some(bytes) = read_bytes(&memory, &caller, bytes_ptr, bytes_len) else {
                     return crate::daemon_sab::ERR_IO;
                 };
-                caller.data().daemon_sab.write(region_id, offset as usize, &bytes)
+                caller
+                    .data()
+                    .daemon_sab
+                    .write(region_id, offset as usize, &bytes)
             },
         )
         .map_err(link_err)?;
@@ -207,19 +210,14 @@ fn wrap_sab(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         .func_wrap(
             NS,
             "host_sab_atomic_load",
-            |caller: Caller<'_, HostState>,
-             region_id: i64,
-             byte_offset: i64,
-             width: i32|
-             -> i64 {
+            |caller: Caller<'_, HostState>, region_id: i64, byte_offset: i64, width: i32| -> i64 {
                 if byte_offset < 0 {
                     return crate::daemon_sab::ERR_OUT_OF_BOUNDS as i64;
                 }
-                caller.data().daemon_sab.atomic_load(
-                    region_id,
-                    byte_offset as usize,
-                    width as u8,
-                )
+                caller
+                    .data()
+                    .daemon_sab
+                    .atomic_load(region_id, byte_offset as usize, width as u8)
             },
         )
         .map_err(link_err)?;
@@ -282,12 +280,10 @@ fn wrap_sab(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 if byte_offset < 0 {
                     return crate::daemon_sab::ERR_OUT_OF_BOUNDS;
                 }
-                caller.data().daemon_sab.wait(
-                    region_id,
-                    byte_offset as usize,
-                    expected,
-                    timeout_ms,
-                )
+                caller
+                    .data()
+                    .daemon_sab
+                    .wait(region_id, byte_offset as usize, expected, timeout_ms)
             },
         )
         .map_err(link_err)?;
@@ -295,19 +291,14 @@ fn wrap_sab(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         .func_wrap(
             NS,
             "host_sab_notify",
-            |caller: Caller<'_, HostState>,
-             region_id: i64,
-             byte_offset: i64,
-             count: i64|
-             -> i32 {
+            |caller: Caller<'_, HostState>, region_id: i64, byte_offset: i64, count: i64| -> i32 {
                 if byte_offset < 0 {
                     return crate::daemon_sab::ERR_OUT_OF_BOUNDS;
                 }
-                caller.data().daemon_sab.notify(
-                    region_id,
-                    byte_offset as usize,
-                    count,
-                )
+                caller
+                    .data()
+                    .daemon_sab
+                    .notify(region_id, byte_offset as usize, count)
             },
         )
         .map_err(link_err)?;
@@ -329,10 +320,18 @@ fn wrap_sab(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
 #[cfg(not(feature = "daemon"))]
 fn wrap_inspector(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
     linker
-        .func_wrap(NS, "host_inspector_open", |_caller: Caller<'_, HostState>, _port: i32| -> i32 { -1 })
+        .func_wrap(
+            NS,
+            "host_inspector_open",
+            |_caller: Caller<'_, HostState>, _port: i32| -> i32 { -1 },
+        )
         .map_err(link_err)?;
     linker
-        .func_wrap(NS, "host_inspector_close", |_caller: Caller<'_, HostState>| -> i32 { -1 })
+        .func_wrap(
+            NS,
+            "host_inspector_close",
+            |_caller: Caller<'_, HostState>| -> i32 { -1 },
+        )
         .map_err(link_err)?;
     linker
         .func_wrap(
@@ -342,7 +341,11 @@ fn wrap_inspector(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError
         )
         .map_err(link_err)?;
     linker
-        .func_wrap(NS, "host_inspector_pause", |_caller: Caller<'_, HostState>| -> i32 { -1 })
+        .func_wrap(
+            NS,
+            "host_inspector_pause",
+            |_caller: Caller<'_, HostState>| -> i32 { -1 },
+        )
         .map_err(link_err)?;
     Ok(())
 }
@@ -355,8 +358,7 @@ fn wrap_inspector(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError
             "host_inspector_open",
             |mut caller: Caller<'_, HostState>, port: i32| -> i32 {
                 if !(0..=65535).contains(&port) {
-                    caller.data_mut().last_error =
-                        format!("inspector.open: invalid port {port}");
+                    caller.data_mut().last_error = format!("inspector.open: invalid port {port}");
                     return crate::daemon_inspector::ERR_BIND;
                 }
                 let inspector = match caller.data().daemon_inspector.clone() {
@@ -1147,11 +1149,7 @@ fn wrap_crypto(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         .func_wrap(
             NS,
             "host_crypto_check_prime",
-            |mut caller: Caller<'_, HostState>,
-             cand_ptr: i32,
-             cand_len: i32,
-             checks: u32|
-             -> i32 {
+            |mut caller: Caller<'_, HostState>, cand_ptr: i32, cand_len: i32, checks: u32| -> i32 {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return E_OTHER;
                 };
@@ -1244,10 +1242,7 @@ fn wrap_crypto(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 };
                 match crate::daemon_http3::h3_request_sync(&daemon, &url, &method, &body) {
                     Ok(json) => write_out(&mut caller, &memory, out_ptr, out_cap, json.as_bytes()),
-                    Err(e) => map_err(
-                        &mut caller,
-                        afterburner_core::AfterburnerError::Host(e),
-                    ),
+                    Err(e) => map_err(&mut caller, afterburner_core::AfterburnerError::Host(e)),
                 }
             },
         )
@@ -1283,13 +1278,7 @@ fn wrap_crypto(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 let Some((cert, key)) = crate::daemon_http3::take_pending_cert() else {
                     return crate::daemon_http::LISTEN_ERR_IO;
                 };
-                crate::daemon_http3::bind_h3_listener(
-                    daemon,
-                    server_id,
-                    port as u16,
-                    &cert,
-                    &key,
-                )
+                crate::daemon_http3::bind_h3_listener(daemon, server_id, port as u16, &cert, &key)
             },
         )
         .map_err(link_err)?;
@@ -1745,11 +1734,20 @@ fn wrap_dns(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 let servers: Vec<String> = if servers_csv.is_empty() {
                     Vec::new()
                 } else {
-                    servers_csv.split(',').map(|s| s.trim().to_string()).collect()
+                    servers_csv
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .collect()
                 };
                 let m = caller.data().manifold.clone();
                 match dns_host::resolve_soa(&name, &servers, &m) {
-                    Ok(v) => write_out(&mut caller, &memory, out_ptr, out_cap, v.to_string().as_bytes()),
+                    Ok(v) => write_out(
+                        &mut caller,
+                        &memory,
+                        out_ptr,
+                        out_cap,
+                        v.to_string().as_bytes(),
+                    ),
                     Err(e) => map_err(&mut caller, e),
                 }
             },
@@ -3860,8 +3858,7 @@ fn wrap_workers(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
                     return werr::E_NO_DAEMON;
                 };
                 let mut last_error = String::new();
-                let result =
-                    workers.spawn_worker_with_env(&path, &data, &env, &mut last_error);
+                let result = workers.spawn_worker_with_env(&path, &data, &env, &mut last_error);
                 if !last_error.is_empty() {
                     caller.data_mut().last_error = last_error;
                 }
@@ -5446,10 +5443,7 @@ fn wrap_wasm_loader(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
         .func_wrap(
             NS,
             "host_wasm_memory_grow",
-            |mut caller: Caller<'_, HostState>,
-             instance_id: i64,
-             delta_pages: i32|
-             -> i64 {
+            |mut caller: Caller<'_, HostState>, instance_id: i64, delta_pages: i32| -> i64 {
                 if delta_pages < 0 {
                     return -1;
                 }
@@ -5539,23 +5533,15 @@ fn wrap_wasm_loader(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
                     }
                 };
                 let value = match parsed.get("type").and_then(|t| t.as_str()) {
-                    Some("i32") => {
-                        crate::wasm_loader::WasmValue::I32(
-                            parsed.get("value").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
-                        )
-                    }
+                    Some("i32") => crate::wasm_loader::WasmValue::I32(
+                        parsed.get("value").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                    ),
                     Some("i64") => {
-                        let s = parsed
-                            .get("value")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("0");
+                        let s = parsed.get("value").and_then(|v| v.as_str()).unwrap_or("0");
                         crate::wasm_loader::WasmValue::I64(s.parse::<i64>().unwrap_or(0))
                     }
                     Some("f32") => crate::wasm_loader::WasmValue::F32(
-                        parsed
-                            .get("value")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(0.0) as f32,
+                        parsed.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
                     ),
                     Some("f64") => crate::wasm_loader::WasmValue::F64(
                         parsed.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0),
@@ -5683,7 +5669,11 @@ fn wrap_wasm_loader(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
                 if initial < 0 {
                     return -1;
                 }
-                let max = if maximum < 0 { None } else { Some(maximum as u32) };
+                let max = if maximum < 0 {
+                    None
+                } else {
+                    Some(maximum as u32)
+                };
                 let loader = caller.data().wasm_loader.clone();
                 match loader.memory_standalone_create(initial as u32, max) {
                     Ok(id) => id as i64,
@@ -5844,10 +5834,16 @@ fn wrap_wasm_loader(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
                             .unwrap_or(0),
                     ),
                     "f32" => crate::wasm_loader::WasmValue::F32(
-                        init_val.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                        init_val
+                            .get("value")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0) as f32,
                     ),
                     "f64" => crate::wasm_loader::WasmValue::F64(
-                        init_val.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        init_val
+                            .get("value")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0),
                     ),
                     _ => {
                         caller.data_mut().last_error = format!("Global.new: unknown type {ty}");
@@ -5976,7 +5972,11 @@ fn wrap_wasm_loader(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
                 if initial < 0 {
                     return -1;
                 }
-                let max = if maximum < 0 { None } else { Some(maximum as u32) };
+                let max = if maximum < 0 {
+                    None
+                } else {
+                    Some(maximum as u32)
+                };
                 let loader = caller.data().wasm_loader.clone();
                 match loader.table_standalone_create(&elem, initial as u32, max) {
                     Ok(id) => id as i64,
@@ -5994,7 +5994,10 @@ fn wrap_wasm_loader(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
             "host_wasm_table_size_sa",
             |caller: Caller<'_, HostState>, id: i64| -> i32 {
                 let loader = caller.data().wasm_loader.clone();
-                loader.table_standalone_size(id as u64).map(|n| n as i32).unwrap_or(-1)
+                loader
+                    .table_standalone_size(id as u64)
+                    .map(|n| n as i32)
+                    .unwrap_or(-1)
             },
         )
         .map_err(link_err)?;

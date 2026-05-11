@@ -21,8 +21,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU16, Ordering};
 
 use axum::Router;
-use axum::extract::{State, WebSocketUpgrade};
 use axum::extract::ws::{Message, WebSocket};
+use axum::extract::{State, WebSocketUpgrade};
 use axum::response::{Json, Response};
 use axum::routing::get;
 use serde_json::json;
@@ -171,15 +171,10 @@ impl DaemonInspector {
     /// Drain any pending pause signals — used on listener teardown so
     /// the JS side doesn't stay blocked when the inspector closes.
     fn release_all_pauses(&self) {
-        let ids: Vec<i64> = self
-            .inner
-            .pause_signals
-            .iter()
-            .map(|(id, _)| id)
-            .collect();
+        let ids: Vec<i64> = self.inner.pause_signals.iter().map(|(id, _)| id).collect();
         for id in ids {
             if let Some(tx) = self.inner.pause_signals.remove(&id) {
-                let _ = tx.send(-1);
+                tx.send(-1);
             }
         }
     }
@@ -315,10 +310,7 @@ async fn json_targets(State(inner): State<Arc<InspectorInner>>) -> Json<serde_js
 
 // ---- WebSocket upgrade ----------------------------------------
 
-async fn ws_handler(
-    State(inner): State<Arc<InspectorInner>>,
-    ws: WebSocketUpgrade,
-) -> Response {
+async fn ws_handler(State(inner): State<Arc<InspectorInner>>, ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(move |socket| handle_ws(socket, inner))
 }
 
@@ -332,7 +324,7 @@ async fn handle_ws(socket: WebSocket, inner: Arc<InspectorInner>) {
     // Notify JS that a session opened so it can send the
     // `Runtime.executionContextCreated` notification once
     // Runtime.enable arrives.
-    let _ = inner.events_tx.send(InspectorEvent {
+    inner.events_tx.send(InspectorEvent {
         session_id,
         kind: InspectorEventKind::SessionOpened,
     });
@@ -367,41 +359,37 @@ async fn handle_ws(socket: WebSocket, inner: Arc<InspectorInner>) {
         // JS instance is parked in `host_inspector_pause`, the WS
         // event-loop can't route the resume through JS (the wasmtime
         // store is busy). Wake the pause channel directly here.
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&bytes) {
-            if let Some(method) = v.get("method").and_then(|m| m.as_str()) {
-                let code = match method {
-                    "Debugger.resume" => Some(0),
-                    "Debugger.stepOver" => Some(1),
-                    "Debugger.stepInto" => Some(2),
-                    "Debugger.stepOut" => Some(3),
-                    _ => None,
-                };
-                if let Some(c) = code {
-                    let ids: Vec<i64> = inner
-                        .pause_signals
-                        .iter()
-                        .map(|(id, _)| id)
-                        .collect();
-                    for id in ids {
-                        if let Some(tx) = inner.pause_signals.remove(&id) {
-                            let _ = tx.send(c);
-                        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&bytes)
+            && let Some(method) = v.get("method").and_then(|m| m.as_str())
+        {
+            let code = match method {
+                "Debugger.resume" => Some(0),
+                "Debugger.stepOver" => Some(1),
+                "Debugger.stepInto" => Some(2),
+                "Debugger.stepOut" => Some(3),
+                _ => None,
+            };
+            if let Some(c) = code {
+                let ids: Vec<i64> = inner.pause_signals.iter().map(|(id, _)| id).collect();
+                for id in ids {
+                    if let Some(tx) = inner.pause_signals.remove(&id) {
+                        tx.send(c);
                     }
-                    // Send the spec ack so the client's pending id
-                    // resolves. The JS dispatcher also handles this
-                    // method but for the no-paused case its result
-                    // is identical (`{}`).
-                    if let Some(id) = v.get("id").and_then(|x| x.as_i64()) {
-                        let reply = serde_json::json!({"id": id, "result": {}}).to_string();
-                        if let Some(s) = inner.sessions.get(&session_id) {
-                            let _ = s.send(reply);
-                        }
-                    }
-                    continue;
                 }
+                // Send the spec ack so the client's pending id
+                // resolves. The JS dispatcher also handles this
+                // method but for the no-paused case its result is
+                // identical (`{}`).
+                if let Some(id) = v.get("id").and_then(|x| x.as_i64()) {
+                    let reply = serde_json::json!({"id": id, "result": {}}).to_string();
+                    if let Some(s) = inner.sessions.get(&session_id) {
+                        let _ = s.send(reply);
+                    }
+                }
+                continue;
             }
         }
-        let _ = inner.events_tx.send(InspectorEvent {
+        inner.events_tx.send(InspectorEvent {
             session_id,
             kind: InspectorEventKind::Message(bytes),
         });
@@ -409,7 +397,7 @@ async fn handle_ws(socket: WebSocket, inner: Arc<InspectorInner>) {
 
     inner.sessions.remove(&session_id);
     writer.abort();
-    let _ = inner.events_tx.send(InspectorEvent {
+    inner.events_tx.send(InspectorEvent {
         session_id,
         kind: InspectorEventKind::SessionClosed,
     });

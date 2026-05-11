@@ -115,8 +115,8 @@ unsafe extern "C" {
         out_cap: u32,
     ) -> i32;
     /// Bind an HTTP/3 (QUIC) listener on `127.0.0.1:port`. The cert
-    /// + key are PEM-encoded TLS-1.3 material; ALPN advertises `h3`
-    /// only. Returns the daemon's `server_id` (≥0) or a negative
+    /// plus key are PEM-encoded TLS-1.3 material; ALPN advertises
+    /// `h3` only. Returns the daemon's `server_id` (≥0) or a negative
     /// error code matching `host_http_listen`'s contract.
     ///
     /// The PEM strings cross via the buffer-protocol (`out_ptr/out_cap`
@@ -170,12 +170,7 @@ unsafe extern "C" {
     ) -> i32;
     /// Generate a probable prime of `bits` bits. Returns big-endian
     /// bytes. `safe = 1` requires (p-1)/2 also prime.
-    pub fn host_crypto_generate_prime(
-        bits: u32,
-        safe: i32,
-        out_ptr: *mut u8,
-        out_cap: u32,
-    ) -> i32;
+    pub fn host_crypto_generate_prime(bits: u32, safe: i32, out_ptr: *mut u8, out_cap: u32) -> i32;
 
     // ---- os ----------------------------------------------------------
     pub fn host_os_platform(out_ptr: *mut u8, out_cap: u32) -> i32;
@@ -746,11 +741,7 @@ unsafe extern "C" {
     // current shard until another process calls `host_sab_notify`
     // on the same byte_offset (or the timeout fires).
     pub fn host_sab_alloc(byte_length: i64) -> i64;
-    pub fn host_sab_open(
-        desc_ptr: *const u8,
-        desc_len: u32,
-        byte_length: i64,
-    ) -> i64;
+    pub fn host_sab_open(desc_ptr: *const u8, desc_len: u32, byte_length: i64) -> i64;
     pub fn host_sab_release(region_id: i64) -> i32;
     pub fn host_sab_byte_length(region_id: i64) -> i64;
     pub fn host_sab_descriptor(region_id: i64, out_ptr: *mut u8, out_cap: u32) -> i32;
@@ -761,19 +752,10 @@ unsafe extern "C" {
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
-    pub fn host_sab_write(
-        region_id: i64,
-        offset: i64,
-        bytes_ptr: *const u8,
-        bytes_len: u32,
-    ) -> i32;
+    pub fn host_sab_write(region_id: i64, offset: i64, bytes_ptr: *const u8, bytes_len: u32)
+    -> i32;
     pub fn host_sab_atomic_load(region_id: i64, byte_offset: i64, width: i32) -> i64;
-    pub fn host_sab_atomic_store(
-        region_id: i64,
-        byte_offset: i64,
-        value: i64,
-        width: i32,
-    ) -> i32;
+    pub fn host_sab_atomic_store(region_id: i64, byte_offset: i64, value: i64, width: i32) -> i32;
     pub fn host_sab_atomic_cas(
         region_id: i64,
         byte_offset: i64,
@@ -781,12 +763,7 @@ unsafe extern "C" {
         replacement: i64,
         width: i32,
     ) -> i64;
-    pub fn host_sab_wait(
-        region_id: i64,
-        byte_offset: i64,
-        expected: i32,
-        timeout_ms: i64,
-    ) -> i32;
+    pub fn host_sab_wait(region_id: i64, byte_offset: i64, expected: i32, timeout_ms: i64) -> i32;
     pub fn host_sab_notify(region_id: i64, byte_offset: i64, count: i64) -> i32;
 
     // ---- inspector / Chrome DevTools Protocol -----------------
@@ -800,11 +777,7 @@ unsafe extern "C" {
     // as `kind: "inspector-cmd"` envelopes.
     pub fn host_inspector_open(port: i32) -> i32;
     pub fn host_inspector_close() -> i32;
-    pub fn host_inspector_send(
-        session_id: i32,
-        payload_ptr: *const u8,
-        payload_len: u32,
-    ) -> i32;
+    pub fn host_inspector_send(session_id: i32, payload_ptr: *const u8, payload_len: u32) -> i32;
     /// Block the JS shard until a connected WebSocket inspector
     /// session sends `Debugger.resume`/`stepOver`/`stepInto`/`stepOut`.
     /// Returns the step-kind code (0=resume, 1=stepOver, 2=stepInto,
@@ -1020,11 +993,7 @@ unsafe extern "C" {
         value_ptr: *const u8,
         value_len: u32,
     ) -> i32;
-    pub fn host_wasm_table_size(
-        instance_id: i64,
-        name_ptr: *const u8,
-        name_len: u32,
-    ) -> i32;
+    pub fn host_wasm_table_size(instance_id: i64, name_ptr: *const u8, name_len: u32) -> i32;
     pub fn host_wasm_table_get(
         instance_id: i64,
         name_ptr: *const u8,
@@ -1050,12 +1019,7 @@ unsafe extern "C" {
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
-    pub fn host_wasm_mem_write(
-        id: i64,
-        offset: i32,
-        bytes_ptr: *const u8,
-        bytes_len: u32,
-    ) -> i32;
+    pub fn host_wasm_mem_write(id: i64, offset: i32, bytes_ptr: *const u8, bytes_len: u32) -> i32;
     pub fn host_wasm_mem_drop(id: i64) -> i32;
     pub fn host_wasm_global_new(
         ty_ptr: *const u8,
@@ -1076,9 +1040,5 @@ unsafe extern "C" {
     pub fn host_wasm_table_size_sa(id: i64) -> i32;
     pub fn host_wasm_table_grow_sa(id: i64, delta: i32) -> i64;
     pub fn host_wasm_table_drop(id: i64) -> i32;
-    pub fn host_wasm_run_wasi(
-        module_id: i64,
-        cfg_ptr: *const u8,
-        cfg_len: u32,
-    ) -> i32;
+    pub fn host_wasm_run_wasi(module_id: i64, cfg_ptr: *const u8, cfg_len: u32) -> i32;
 }

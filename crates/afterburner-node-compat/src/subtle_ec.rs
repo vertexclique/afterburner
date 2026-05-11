@@ -292,7 +292,11 @@ mod tests {
 
     #[test]
     fn ecdsa_sign_verify_round_trips_p256_p384_p521() {
-        for (curve, hash) in [("P-256", "SHA-256"), ("P-384", "SHA-384"), ("P-521", "SHA-512")] {
+        for (curve, hash) in [
+            ("P-256", "SHA-256"),
+            ("P-384", "SHA-384"),
+            ("P-521", "SHA-512"),
+        ] {
             let (sk, pk) = ec_keygen(curve).unwrap();
             let sig = ecdsa_sign(curve, hash, &sk, b"data").unwrap();
             assert!(

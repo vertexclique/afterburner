@@ -104,16 +104,34 @@ pub enum V8Value {
     Double(f64),
     String(String),
     Date(f64),
-    RegExp { pattern: String, flags: u32 },
+    RegExp {
+        pattern: String,
+        flags: u32,
+    },
     Object(Vec<(String, V8Value)>),
     DenseArray(Vec<V8Value>),
-    SparseArray { length: u32, entries: Vec<(u32, V8Value)> },
+    SparseArray {
+        length: u32,
+        entries: Vec<(u32, V8Value)>,
+    },
     Map(Vec<(V8Value, V8Value)>),
     Set(Vec<V8Value>),
     ArrayBuffer(Vec<u8>),
-    TypedArray { kind: u8, buffer: Vec<u8>, byte_offset: u32, byte_length: u32 },
-    Error { kind: u8, message: Option<String>, stack: Option<String> },
-    BigInt { negative: bool, digits: Vec<u8> },
+    TypedArray {
+        kind: u8,
+        buffer: Vec<u8>,
+        byte_offset: u32,
+        byte_length: u32,
+    },
+    Error {
+        kind: u8,
+        message: Option<String>,
+        stack: Option<String>,
+    },
+    BigInt {
+        negative: bool,
+        digits: Vec<u8>,
+    },
 }
 
 // ---- Encoder -------------------------------------------------------
@@ -131,7 +149,9 @@ struct Encoder {
 
 impl Encoder {
     fn new() -> Self {
-        Self { out: Vec::with_capacity(64) }
+        Self {
+            out: Vec::with_capacity(64),
+        }
     }
 
     fn into_bytes(self) -> Vec<u8> {
@@ -262,7 +282,12 @@ impl Encoder {
                 self.write_varint(bytes.len() as u64);
                 self.out.extend_from_slice(bytes);
             }
-            V8Value::TypedArray { kind, buffer, byte_offset, byte_length } => {
+            V8Value::TypedArray {
+                kind,
+                buffer,
+                byte_offset,
+                byte_length,
+            } => {
                 // Wrap the underlying ArrayBuffer first (V8 emits the
                 // buffer inline before the view tag when the buffer
                 // hasn't been seen yet).
@@ -273,7 +298,11 @@ impl Encoder {
                 self.write_varint(*byte_length as u64);
                 self.write_varint(0); // flags reserved
             }
-            V8Value::Error { kind, message, stack } => {
+            V8Value::Error {
+                kind,
+                message,
+                stack,
+            } => {
                 self.write_tag(tag::ERROR);
                 self.out.push(*kind);
                 if let Some(m) = message {
@@ -316,7 +345,11 @@ struct Decoder<'a> {
 
 impl<'a> Decoder<'a> {
     fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0, version: 0 }
+        Self {
+            bytes,
+            pos: 0,
+            version: 0,
+        }
     }
 
     fn at_end(&self) -> bool {
@@ -341,7 +374,9 @@ impl<'a> Decoder<'a> {
         let mut result = 0u64;
         loop {
             if self.pos >= self.bytes.len() {
-                return Err(AfterburnerError::Host("v8.deserialize: truncated varint".into()));
+                return Err(AfterburnerError::Host(
+                    "v8.deserialize: truncated varint".into(),
+                ));
             }
             let byte = self.bytes[self.pos];
             self.pos += 1;
@@ -351,7 +386,9 @@ impl<'a> Decoder<'a> {
             }
             shift += 7;
             if shift >= 64 {
-                return Err(AfterburnerError::Host("v8.deserialize: varint overflow".into()));
+                return Err(AfterburnerError::Host(
+                    "v8.deserialize: varint overflow".into(),
+                ));
             }
         }
     }
@@ -461,9 +498,11 @@ impl<'a> Decoder<'a> {
                         V8Value::Int32(n) => n.to_string(),
                         V8Value::Uint32(n) => n.to_string(),
                         V8Value::Double(n) => n.to_string(),
-                        _ => return Err(AfterburnerError::Host(
-                            "v8.deserialize: object key must be string/number".into(),
-                        )),
+                        _ => {
+                            return Err(AfterburnerError::Host(
+                                "v8.deserialize: object key must be string/number".into(),
+                            ));
+                        }
                     };
                     entries.push((key_s, val));
                 }
@@ -501,9 +540,11 @@ impl<'a> Decoder<'a> {
                     let idx = match k {
                         V8Value::Uint32(n) => n,
                         V8Value::Int32(n) => n as u32,
-                        _ => return Err(AfterburnerError::Host(
-                            "v8.deserialize: sparse-array key must be number".into(),
-                        )),
+                        _ => {
+                            return Err(AfterburnerError::Host(
+                                "v8.deserialize: sparse-array key must be number".into(),
+                            ));
+                        }
                     };
                     entries.push((idx, v));
                 }
@@ -572,7 +613,11 @@ impl<'a> Decoder<'a> {
                         _ => {} // unknown subtag — skip
                     }
                 }
-                Ok(V8Value::Error { kind, message, stack })
+                Ok(V8Value::Error {
+                    kind,
+                    message,
+                    stack,
+                })
             }
             tag::BIGINT => {
                 let bitfield = self.read_varint()? as u32;
@@ -657,7 +702,10 @@ mod tests {
         let b = encode(&V8Value::String("hi".into())).unwrap();
         // [VERSION, 15, ONE_BYTE, 2, h, i]
         assert!(b.contains(&tag::ONE_BYTE_STRING));
-        assert_eq!(round_trip(V8Value::String("hi".into())), V8Value::String("hi".into()));
+        assert_eq!(
+            round_trip(V8Value::String("hi".into())),
+            V8Value::String("hi".into())
+        );
     }
 
     #[test]
@@ -665,7 +713,10 @@ mod tests {
         let s = "héllo 🦀";
         let b = encode(&V8Value::String(s.into())).unwrap();
         assert!(b.contains(&tag::UTF8_STRING));
-        assert_eq!(round_trip(V8Value::String(s.into())), V8Value::String(s.into()));
+        assert_eq!(
+            round_trip(V8Value::String(s.into())),
+            V8Value::String(s.into())
+        );
     }
 
     #[test]
@@ -682,7 +733,7 @@ mod tests {
         let v = V8Value::DenseArray(vec![
             V8Value::Int32(1),
             V8Value::String("two".into()),
-            V8Value::Double(3.14),
+            V8Value::Double(3.5),
         ]);
         assert_eq!(round_trip(v.clone()), v);
     }
@@ -707,7 +758,11 @@ mod tests {
 
     #[test]
     fn set_round_trips() {
-        let v = V8Value::Set(vec![V8Value::Int32(1), V8Value::Int32(2), V8Value::String("x".into())]);
+        let v = V8Value::Set(vec![
+            V8Value::Int32(1),
+            V8Value::Int32(2),
+            V8Value::String("x".into()),
+        ]);
         assert_eq!(round_trip(v.clone()), v);
     }
 
@@ -719,7 +774,10 @@ mod tests {
 
     #[test]
     fn regexp_round_trips_pattern_and_flags() {
-        let v = V8Value::RegExp { pattern: "a.b".into(), flags: 0b1010 };
+        let v = V8Value::RegExp {
+            pattern: "a.b".into(),
+            flags: 0b1010,
+        };
         assert_eq!(round_trip(v.clone()), v);
     }
 
@@ -752,7 +810,10 @@ mod tests {
 
     #[test]
     fn bigint_negative_round_trips() {
-        let v = V8Value::BigInt { negative: true, digits: vec![0x42, 0x99, 0x00] };
+        let v = V8Value::BigInt {
+            negative: true,
+            digits: vec![0x42, 0x99, 0x00],
+        };
         assert_eq!(round_trip(v.clone()), v);
     }
 
@@ -780,7 +841,10 @@ mod tests {
     fn deeply_nested_object_round_trips() {
         let mut v = V8Value::Int32(0);
         for i in 0..32 {
-            v = V8Value::Object(vec![("k".into(), v.clone()), ("i".into(), V8Value::Int32(i))]);
+            v = V8Value::Object(vec![
+                ("k".into(), v.clone()),
+                ("i".into(), V8Value::Int32(i)),
+            ]);
         }
         assert_eq!(round_trip(v.clone()), v);
     }
