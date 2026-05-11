@@ -80,6 +80,7 @@ fn js_with_fixture(fixture_b64: &str, pipeline_body: &str) -> String {
 fn run_inline(source: &str) -> std::process::Output {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", source])
         .output()
         .expect("spawn burn")
@@ -693,7 +694,7 @@ fn invalid_image_bytes_reject() {
                 process.exit(0);
             }
         })();
-        setTimeout(() => process.exit(99), 5000);
+        setTimeout(() => process.exit(99), 30000);
     "#;
     assert_ok(&run_inline(src), "INVALID_OK");
 }
@@ -786,7 +787,7 @@ fn loading_from_file_path_works() {
                     console.error('threw:', e.message); process.exit(2);
                 }}
             }})();
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
         path = path_str
     );

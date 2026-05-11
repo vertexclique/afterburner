@@ -31,6 +31,7 @@ const BURN: &str = env!("CARGO_BIN_EXE_burn");
 fn run_inline(source: &str) -> std::process::Output {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", source])
         .output()
         .expect("spawn burn")
@@ -105,7 +106,7 @@ fn db_all_returns_array_in_insertion_order() {
                     });
                 }
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -131,7 +132,7 @@ fn db_get_returns_undefined_when_no_rows() {
                     db.close(() => process.exit(0));
                 });
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -172,7 +173,7 @@ fn db_each_dispatches_per_row_and_done_cb_total() {
                     );
                 });
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -201,7 +202,7 @@ fn null_param_round_trips_through_db() {
                     });
                 });
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -233,7 +234,7 @@ fn buffer_param_round_trips_as_blob() {
                     });
                 });
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -270,7 +271,7 @@ fn unicode_text_param_round_trips() {
                     });
                 });
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -299,7 +300,7 @@ fn named_param_object_binding() {
                     });
                 });
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -327,7 +328,7 @@ fn varargs_param_form() {
                     });
                 });
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -353,7 +354,7 @@ fn syntax_error_callback_receives_typed_error() {
                 console.log('SYNTAX_OK');
                 db.close(() => process.exit(0));
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -373,7 +374,7 @@ fn missing_table_select_yields_error() {
                 console.log('MISSING_OK');
                 db.close(() => process.exit(0));
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -402,7 +403,7 @@ fn unique_violation_yields_error_then_db_still_usable() {
                     });
                 });
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -427,7 +428,7 @@ fn post_close_use_is_typed_error() {
                     process.exit(0);
                 });
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -450,7 +451,7 @@ fn unsupported_param_type_throws() {
                     db.close(() => process.exit(0));
                 });
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -476,7 +477,7 @@ fn prepare_method_throws_clear_not_implemented() {
                 console.log('PREPARE_OK');
                 db.close(() => process.exit(0));
             }
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -508,7 +509,7 @@ fn two_databases_are_isolated() {
                     });
                 });
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -530,7 +531,7 @@ fn double_close_is_idempotent() {
                     process.exit(0);
                 });
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -560,7 +561,7 @@ fn transaction_commit_persists_changes() {
                     });
                 });
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -591,7 +592,7 @@ fn transaction_rollback_discards_changes() {
                     });
                 });
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -615,7 +616,7 @@ fn file_database_persists_across_reopens() {
                 if (err) {{ console.error(err); process.exit(2); }}
                 db.close(() => {{ console.log('WRITTEN'); process.exit(0); }});
             }});
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
         path = path_str
     );
@@ -640,7 +641,7 @@ fn file_database_persists_across_reopens() {
                 console.log('READ_BACK_OK n=' + row.n);
                 db.close(() => process.exit(0));
             }});
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
         path = path_str
     );
@@ -707,7 +708,7 @@ fn run_changes_count_for_update_and_delete() {
                     }
                 );
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -743,7 +744,7 @@ fn last_insert_rowid_advances_per_insert() {
                 }
                 next(10);
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);

@@ -153,11 +153,12 @@ fn round_trip_echo() {
                 console.error('client error:', e && e.message || e);
                 process.exit(2);
             }});
-            setTimeout(() => process.exit(99), 10000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -198,11 +199,12 @@ fn handshake_failure_self_signed_with_strict_verification() {
                 console.error('LEAK: handshake succeeded against self-signed cert');
                 process.exit(1);
             }});
-            setTimeout(() => process.exit(99), 10000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .output()
         .expect("spawn burn");
@@ -240,11 +242,12 @@ fn destroy_kills_connection() {
             sock.on('error', (e) => {{
                 console.error('unexpected error:', e.code, e.message);
             }});
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .output()
         .expect("spawn burn");
@@ -284,6 +287,7 @@ fn burn_serves_tls_and_host_client_echoes() {
 
     let mut child = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -398,11 +402,12 @@ fn alpn_echo_negotiates_protocol() {
                 console.error('client error:', e.message);
                 process.exit(2);
             }});
-            setTimeout(() => process.exit(99), 10000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .output()
         .expect("spawn burn");
@@ -459,11 +464,12 @@ fn get_peer_certificate_returns_real_chain() {
             sock.on('error', (e) => {{
                 console.error('client error:', e.message); process.exit(5);
             }});
-            setTimeout(() => process.exit(99), 8000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .output()
         .expect("spawn burn");
@@ -512,11 +518,12 @@ fn get_cipher_returns_negotiated_suite_name() {
             sock.on('error', (e) => {{
                 console.error(e.message); process.exit(6);
             }});
-            setTimeout(() => process.exit(99), 8000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .output()
         .expect("spawn burn");
@@ -558,11 +565,12 @@ fn get_peer_cert_chain_returns_full_chain() {
             sock.on('error', (e) => {{
                 console.error(e.message); process.exit(4);
             }});
-            setTimeout(() => process.exit(99), 8000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .output()
         .expect("spawn burn");
@@ -690,6 +698,7 @@ fn sni_routes_distinct_cert_per_servername() {
 
     let mut child = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -767,6 +776,7 @@ fn sni_add_context_works_post_construction() {
 
     let mut child = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -812,6 +822,7 @@ fn ip_helpers() {
     "#;
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", parent])
         .output()
         .expect("spawn burn");

@@ -50,6 +50,7 @@ fn missing_target_on_path_errors_typed() {
     // CI sandboxes where npm genuinely isn't installed.
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .env("PATH", "/nonexistent-burn-b5")
         .args(["npm", "install", "express"])
         .stdout(Stdio::piped())
@@ -77,6 +78,7 @@ fn missing_pnpm_yarn_bun_npx_also_typed() {
     for target in &["pnpm", "yarn", "bun", "npx"] {
         let out = Command::new(BURN)
             .env("BURN_QUIET", "1")
+            .env("BURN_SHARDS", "2")
             .env("PATH", "/nonexistent-burn-b5")
             .args([target, "install"])
             .stdout(Stdio::piped())
@@ -98,6 +100,7 @@ fn missing_pnpm_yarn_bun_npx_also_typed() {
 fn unknown_first_arg_not_on_path_errors_typed() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .env("PATH", "/nonexistent-burn-b5")
         .arg("definitely_not_a_real_binary_73192")
         .stdout(Stdio::piped())
@@ -118,6 +121,7 @@ fn unknown_command_is_reported_before_any_exec() {
     // `could not exec noed: No such file or directory`.
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .env("PATH", "/nonexistent-burn-b5")
         .arg("noed")
         .stdout(Stdio::piped())
@@ -144,6 +148,7 @@ fn shim_depth_limit_surfaces_typed_error() {
     // refuse to spawn rather than fork-bomb.
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .env("BURN_SHIM_DEPTH", "8")
         .args(["npm", "install"])
         .stdout(Stdio::piped())
@@ -168,6 +173,7 @@ fn shim_depth_limit_ignores_garbage_values() {
     // invocation) rather than panicking or erroring out.
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .env("BURN_SHIM_DEPTH", "garbage")
         .env("PATH", "/nonexistent-burn-b5")
         .args(["npm", "install"])
@@ -220,6 +226,7 @@ fn arbitrary_path_binary_passes_through() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .env("PATH", &dir)
         .args([bin_name, "howdy"])
         .stdout(Stdio::piped())
@@ -250,6 +257,7 @@ fn existing_file_named_npm_wins_over_passthrough() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .current_dir(&dir)
         .arg("npm")
         .stdout(Stdio::piped())
@@ -305,6 +313,7 @@ fn shim_dir_node_shim_forwards_to_burn() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .env("PATH", &scratch)
         .arg("env")
         .stdout(Stdio::piped())
@@ -338,6 +347,7 @@ fn shim_dir_node_shim_forwards_to_burn() {
     // burn's eval path and print 42.
     let shim_out = Command::new(&shim_node)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-e", "console.log(6 * 7)"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -378,6 +388,7 @@ fn passthrough_exit_code_propagates() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .env("PATH", &dir)
         .arg(bin_name)
         .stdout(Stdio::piped())

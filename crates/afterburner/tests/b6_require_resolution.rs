@@ -49,6 +49,7 @@ fn scratch(label: &str) -> PathBuf {
 fn run_burn_in(cwd: &PathBuf, src: &str) -> std::process::Output {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .current_dir(cwd)
         .arg("-e")
         .arg(src)
@@ -61,6 +62,7 @@ fn run_burn_in(cwd: &PathBuf, src: &str) -> std::process::Output {
 fn run_burn_file(script: &PathBuf) -> std::process::Output {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg(script)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

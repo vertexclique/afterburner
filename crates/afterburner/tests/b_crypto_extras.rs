@@ -13,6 +13,7 @@ const BURN: &str = env!("CARGO_BIN_EXE_burn");
 fn run_inline(source: &str) -> std::process::Output {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg("-e")
         .arg(source)
@@ -102,15 +103,25 @@ fn crypto_fips_is_false() {
 }
 
 #[test]
-fn crypto_create_secret_key_throws_not_implemented() {
+fn crypto_create_secret_key_returns_key_object() {
+    // `crypto.createSecretKey` is implemented (returns a KeyObject of
+    // type 'secret'). Pin the working contract — `type === 'secret'`,
+    // `export({ format: 'buffer' })` round-trips the input bytes.
     let out = run_inline(
         r#"
         const crypto = require('crypto');
-        try { crypto.createSecretKey(Buffer.from('a-secret-key')); console.log('FAIL no-throw'); }
-        catch (e) { if (e.code === 'ERR_NOT_IMPLEMENTED') console.log('CSK-NI-OK'); else console.log('FAIL', e.code); }
+        const input = Buffer.from('a-secret-key');
+        const key = crypto.createSecretKey(input);
+        const roundTrip = key.export({ format: 'buffer' });
+        if (
+            key && key.type === 'secret' &&
+            Buffer.isBuffer(roundTrip) &&
+            roundTrip.equals(input)
+        ) console.log('CSK-OK');
+        else console.log('FAIL type=' + (key && key.type) + ' rt=' + (roundTrip && roundTrip.toString('utf8')));
         "#,
     );
-    assert_marker(&out, "CSK-NI-OK");
+    assert_marker(&out, "CSK-OK");
 }
 
 #[test]

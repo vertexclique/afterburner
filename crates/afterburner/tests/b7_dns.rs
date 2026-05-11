@@ -24,6 +24,7 @@ const BURN: &str = env!("CARGO_BIN_EXE_burn");
 fn can_resolve() -> bool {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args([
             "-A",
             "-e",
@@ -51,6 +52,7 @@ fn resolve4_returns_ipv4_array() {
     }
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args([
             "-A",
             "-e",
@@ -78,6 +80,7 @@ fn resolve_mx_yields_priority_and_exchange() {
     }
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args([
             "-A",
             "-e",
@@ -108,6 +111,7 @@ fn resolve_txt_yields_array_of_arrays() {
     }
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args([
             "-A",
             "-e",
@@ -138,6 +142,7 @@ fn reverse_lookup_returns_hostname() {
     }
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args([
             "-A",
             "-e",
@@ -166,6 +171,7 @@ fn resolve_dispatches_by_rrtype() {
     }
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args([
             "-A",
             "-e",
@@ -194,6 +200,7 @@ fn callback_form_fires_with_result() {
     }
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args([
             "-A",
             "-e",
@@ -230,6 +237,7 @@ fn promises_form_resolves() {
     }
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args([
             "-A",
             "-e",
@@ -257,6 +265,7 @@ fn promises_form_resolves() {
 fn sealed_manifold_blocks_all_resolvers() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args([
             "--sandbox",
             "-e",
@@ -307,6 +316,7 @@ fn resolver_setServers_targets_custom_dns() {
     // instance asks 1.1.1.1 directly.
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args([
             "-A",
             "-e",
@@ -337,6 +347,7 @@ fn resolver_setServers_targets_custom_dns() {
 fn module_setServers_round_trips() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args([
             "-A",
             "-e",
@@ -362,6 +373,7 @@ fn module_setServers_round_trips() {
 fn resolver_setServers_rejects_non_array() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args([
             "-A",
             "-e",
@@ -391,6 +403,7 @@ fn resolver_setServers_rejects_non_array() {
 fn invalid_rrtype_throws_enotimp() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args([
             "-A",
             "-e",

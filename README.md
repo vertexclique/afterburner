@@ -118,13 +118,13 @@ app: `require('express')` resolves the actual npm package out of
 |:------|:--------|
 | **`afterburner`**              | Facade: `Afterburner` + builder, `burn` binary, one ergonomic entry point |
 | **`afterburner-core`**         | `Combustor` trait, `Manifold`, `FuelGauge`, `BurnCache`, level-gated logging |
-| **`afterburner-ignite`**       | Native QuickJS via `rquickjs`, thread-local runtimes |
-| **`afterburner-wasi`**         | Wasmtime + Javy plugin sandbox with host-function imports, pooling allocator + InstancePre, bytecode cache |
+| **`afterburner-ignite`**       | Native JS engine, thread-local runtimes |
+| **`afterburner-wasi`**         | Wasmtime sandbox with host-function imports, pooling allocator + InstancePre, bytecode cache |
 | **`afterburner-node-compat`**  | `plenum.js` polyfill bundle + Rust-backed host impls (incl. bounded HTTP + DNS with per-call timeouts) |
 | **`afterburner-flow`**         | High-level `FlowEngine::load/execute/unload` for flow-style pipelines |
 | **`afterburner-adaptive`**     | Flying Start: native → WASM tier switch |
 | **`afterburner-thrust`**       | Multi-threaded scheduler: bounded per-worker queues + global injector, token-bucket admission, NUMA-aware steal-when-idle, graceful drain |
-| **`afterburner-plugin`**       | WASM-side Javy plugin (`wasm32-wasip1`) |
+| **`afterburner-plugin`**       | WASM-side runtime plugin (`wasm32-wasip1`) |
 
 ---
 

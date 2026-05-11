@@ -1269,9 +1269,14 @@ __register_module('crypto', function(module, exports, require) {
         e.code = 'ERR_CRYPTO_FIPS_UNAVAILABLE';
         throw e;
     };
+    // Node's `crypto.getFips()` returns 1/0 (number); `crypto.fips`
+    // is the boolean shorthand exposed since Node 0.12. Both are
+    // false on non-FIPS Node builds — we mirror that exactly so
+    // libraries that gate behaviour on either form see the same
+    // answer as in stock Node.
     exports.getFips = function() { return 0; };
     Object.defineProperty(exports, 'fips', {
-        get: function() { return 0; },
+        get: function() { return false; },
         set: function(v) { exports.setFips(!!v); },
         enumerable: true,
         configurable: true,

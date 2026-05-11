@@ -1120,7 +1120,7 @@ afterburner 0.1.1</pre>
         <div class="callout__icon">i</div>
         <div>
           <strong>Long-running daemons: the pool ceiling.</strong>
-          <p>The WASM-mode pooling allocator pre-reserves a per-instance virtual address range — <code>1 GiB</code> by default. Daemon-mode workloads (Express, Fastify, etc. that share a single QuickJS Store across many requests) can accumulate state across the whole listener lifetime and eventually touch this ceiling, even though the host has plenty of free RAM. Override with <code>BURN_MAX_LINEAR_MEMORY</code> at startup: <code>BURN_MAX_LINEAR_MEMORY=4G ./burn server.js</code> bumps the per-slot ceiling to 4 GiB (the wasm32 ABI maximum); <code>=128M</code> tightens it. <code>--memory &lt;N&gt;</code> sets a tighter per-call cap below this hard limit and is independent of <code>-A</code> (which only flips capability gates, not resource caps).</p>
+          <p>The WASM-mode pooling allocator pre-reserves a per-instance virtual address range — <code>1 GiB</code> by default. Daemon-mode workloads (Express, Fastify, etc. that share a single runtime store across many requests) can accumulate state across the whole listener lifetime and eventually touch this ceiling, even though the host has plenty of free RAM. Override with <code>BURN_MAX_LINEAR_MEMORY</code> at startup: <code>BURN_MAX_LINEAR_MEMORY=4G ./burn server.js</code> bumps the per-slot ceiling to 4 GiB (the wasm32 ABI maximum); <code>=128M</code> tightens it. <code>--memory &lt;N&gt;</code> sets a tighter per-call cap below this hard limit and is independent of <code>-A</code> (which only flips capability gates, not resource caps).</p>
         </div>
       </div>
 
@@ -1488,13 +1488,13 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
         <tbody>
           <tr><td><code>afterburner</code></td><td>Facade: <code>Afterburner</code> + builder, <code>burn</code> binary, one ergonomic entry point.</td></tr>
           <tr><td><code>afterburner-core</code></td><td><code>Combustor</code> trait, <code>Manifold</code>, <code>FuelGauge</code>, <code>BurnCache</code>, <code>BurnCacheBackend</code>, <code>StateStore</code>, <code>HostContext</code>, level-gated logging.</td></tr>
-          <tr><td><code>afterburner-ignite</code></td><td>Native QuickJS via <code>rquickjs</code>; thread-local runtimes for sub-millisecond ignition.</td></tr>
-          <tr><td><code>afterburner-wasi</code></td><td>Wasmtime + Javy plugin sandbox. Host-function imports, pooling allocator, <code>InstancePre</code> affinity, bytecode cache, daemon coordinators (net / tls / dgram / http).</td></tr>
+          <tr><td><code>afterburner-ignite</code></td><td>Native JS engine; thread-local runtimes for sub-millisecond ignition.</td></tr>
+          <tr><td><code>afterburner-wasi</code></td><td>Wasmtime sandbox. Host-function imports, pooling allocator, <code>InstancePre</code> affinity, bytecode cache, daemon coordinators (net / tls / dgram / http).</td></tr>
           <tr><td><code>afterburner-node-compat</code></td><td>Plenum polyfill bundle + Rust-backed host implementations. Bounded HTTP &amp; DNS with per-call timeouts. L3 shadows for <code>bcrypt</code>, <code>argon2</code>, <code>jsonwebtoken</code>, <code>sqlite3</code>, <code>sharp</code>.</td></tr>
           <tr><td><code>afterburner-flow</code></td><td><code>FlowEngine::load / execute / unload</code> + <code>register_bundle</code> for ES-module bundles.</td></tr>
           <tr><td><code>afterburner-adaptive</code></td><td>Flying Start: native to WASM tier switch on the second call.</td></tr>
           <tr><td><code>afterburner-thrust</code></td><td>Multi-threaded scheduler. Bounded per-worker Chase-Lev deques, token-bucket admission, steal-when-idle, graceful drain. Lock-free <code>HopscotchMap</code> + <code>kovan-channel</code> primitives.</td></tr>
-          <tr><td><code>afterburner-plugin</code></td><td>WASM-side Javy plugin (<code>wasm32-wasip1</code>). <code>include_bytes!</code>-baked into the binary at build time; Wizer pre-initialised for fast first-call ignition.</td></tr>
+          <tr><td><code>afterburner-plugin</code></td><td>WASM-side runtime plugin (<code>wasm32-wasip1</code>). <code>include_bytes!</code>-baked into the binary at build time; pre-initialised for fast first-call ignition.</td></tr>
         </tbody>
       </table></div>
 

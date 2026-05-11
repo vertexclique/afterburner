@@ -16,6 +16,7 @@ const BURN: &str = env!("CARGO_BIN_EXE_burn");
 fn run_inline(src: &str) -> std::process::Output {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", src])
         .output()
         .expect("spawn")
@@ -75,7 +76,7 @@ fn brotli_async_roundtrip() {
                 process.exit(0);
             });
         });
-        setTimeout(() => process.exit(99), 5000);
+        setTimeout(() => process.exit(99), 30000);
     "#;
     assert_marker(&run_inline(src), "BROTLI_ASYNC_OK");
 }

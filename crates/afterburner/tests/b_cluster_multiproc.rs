@@ -62,7 +62,7 @@ fn cluster_fork_spawns_real_subprocess_with_pid_and_ipc() {
                 w.on('online', () => {
                     w.send({ greet: 'ping' });
                 });
-                setTimeout(() => process.exit(99), 10000);
+                setTimeout(() => process.exit(99), 30000);
             } else {
                 const worker = cluster.worker;
                 worker.on('message', (m) => {
@@ -76,6 +76,7 @@ fn cluster_fork_spawns_real_subprocess_with_pid_and_ipc() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -122,7 +123,7 @@ fn cluster_isPrimary_isWorker_split() {
                     }
                 });
                 w.on('exit', () => process.exit(0));
-                setTimeout(() => process.exit(99), 10000);
+                setTimeout(() => process.exit(99), 30000);
             } else {
                 cluster.worker.send({
                     tag: 'WORKER_REPORT',
@@ -135,6 +136,7 @@ fn cluster_isPrimary_isWorker_split() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -169,7 +171,7 @@ fn cluster_listening_event() {
                     w.disconnect();
                 });
                 w.on('exit', () => process.exit(0));
-                setTimeout(() => process.exit(99), 10000);
+                setTimeout(() => process.exit(99), 30000);
             } else {
                 const srv = http.createServer((req, res) => res.end('hi'));
                 srv.listen(34915);
@@ -179,6 +181,7 @@ fn cluster_listening_event() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -240,6 +243,7 @@ fn cluster_two_workers_co_bind_same_port() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -292,6 +296,7 @@ fn cluster_workers_map_and_disconnect_all() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");

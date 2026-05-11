@@ -16,19 +16,55 @@
 #![cfg(feature = "bin")]
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 const BURN: &str = env!("CARGO_BIN_EXE_burn");
 
-static PORT_CTR: AtomicU16 = AtomicU16::new(0);
-
 fn pick_port() -> u16 {
-    let offset = PORT_CTR.fetch_add(1, Ordering::Relaxed);
-    let pid_tail = (std::process::id() & 0xFF) as u16;
-    49700 + ((pid_tail * 11 + offset * 19) % 5000)
+    // OS-assigned free port: bind to :0, take the kernel's choice, drop
+    // the listener. Robust across parallel test binaries (no hash collision
+    // possible) and across runs (no leaked zombie can hold a deterministic
+    // port we'd rebind to).
+    let l = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+    let p = l.local_addr().expect("local_addr").port();
+    drop(l);
+    p
+}
+
+/// Owns a spawned `burn` child and kills + reaps it on Drop — even
+/// when the surrounding test panics. Without this, an assertion that
+/// fires before the explicit `child.kill()` would leak a burn process
+/// holding its listening port, and the next test run that lands on
+/// the same port would talk to the zombie instead of its own server.
+struct ChildGuard(Option<Child>);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut c) = self.0.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
+impl ChildGuard {
+    fn new(c: Child) -> Self {
+        Self(Some(c))
+    }
+}
+
+impl std::ops::Deref for ChildGuard {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        self.0.as_ref().expect("child taken")
+    }
+}
+impl std::ops::DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut Child {
+        self.0.as_mut().expect("child taken")
+    }
 }
 
 fn wait_for_listener(port: u16, timeout: Duration) -> bool {
@@ -73,10 +109,14 @@ fn http_post(port: u16, path: &str, body: &str) -> String {
 }
 
 /// Spawn `burn -e <source>` with stdout/stderr piped. Returns the
-/// child handle for later cleanup.
+/// child handle for later cleanup. `BURN_SHARDS=2` caps per-subprocess
+/// resource use so several test binaries running in parallel don't
+/// individually fan out to `available_parallelism()` shards (36 on a
+/// developer box) and saturate the host.
 fn spawn_burn_inline(source: &str) -> Child {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg(source)
         .stdout(Stdio::piped())
@@ -96,7 +136,7 @@ fn burn_serves_hello_from_burn() {
         }}).listen({port}, () => console.log("listening"));
         "#
     );
-    let mut child = spawn_burn_inline(&source);
+    let _child = ChildGuard::new(spawn_burn_inline(&source));
     assert!(
         wait_for_listener(port, Duration::from_secs(15)),
         "burn listener didn't come up on :{port}"
@@ -105,10 +145,6 @@ fn burn_serves_hello_from_burn() {
     let resp = http_get(port, "/");
     assert!(resp.starts_with("HTTP/1.1 200"), "resp:\n{resp}");
     assert!(resp.contains("hello from burn"), "resp:\n{resp}");
-
-    // Cleanup.
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 #[test]
@@ -125,7 +161,7 @@ fn burn_server_echoes_method_and_path() {
         }}).listen({port});
         "#
     );
-    let mut child = spawn_burn_inline(&source);
+    let _child = ChildGuard::new(spawn_burn_inline(&source));
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
     let resp = http_get(port, "/test?q=1");
@@ -133,9 +169,6 @@ fn burn_server_echoes_method_and_path() {
     assert!(resp.contains("x-method: GET"), "resp:\n{resp}");
     assert!(resp.contains("x-url: /test?q=1"), "resp:\n{resp}");
     assert!(resp.contains("echo"), "resp:\n{resp}");
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 #[test]
@@ -177,7 +210,7 @@ fn incoming_message_emits_buffer_chunks() {
         }}).listen({port}, () => console.log("listening"));
         "#
     );
-    let mut child = spawn_burn_inline(&source);
+    let _child = ChildGuard::new(spawn_burn_inline(&source));
     assert!(
         wait_for_listener(port, Duration::from_secs(15)),
         "listener didn't bind on :{port}"
@@ -207,9 +240,6 @@ fn incoming_message_emits_buffer_chunks() {
         !resp.contains("\"type\":\"string\""),
         "chunk should not be string post-fix, got:\n{resp}"
     );
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 #[test]
@@ -238,16 +268,13 @@ fn body_parser_pattern_buffer_concat_succeeds() {
         }}).listen({port}, () => console.log("listening"));
         "#
     );
-    let mut child = spawn_burn_inline(&source);
+    let _child = ChildGuard::new(spawn_burn_inline(&source));
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
     let resp = http_post(port, "/", r#"{"a":1,"b":[2,3]}"#);
     assert!(resp.starts_with("HTTP/1.1 200"), "resp:\n{resp}");
     assert!(resp.contains("\"ok\":true"), "resp:\n{resp}");
     assert!(resp.contains("\"a\":1"), "resp:\n{resp}");
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 #[test]
@@ -256,6 +283,7 @@ fn burn_plain_script_exits_cleanly() {
     // mode detects no listeners and exits.
     let child = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg(r#"console.log("no listen")"#)
         .stdout(Stdio::piped())

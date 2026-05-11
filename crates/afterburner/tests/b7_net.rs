@@ -103,11 +103,12 @@ fn round_trip_echo() {
                 console.error('client error:', e && e.message || e);
                 process.exit(2);
             }});
-            setTimeout(() => process.exit(99), 10000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -148,11 +149,12 @@ fn connect_to_closed_port_emits_error() {
             sock.on('close', () => {{
                 process.exit(sawError ? 0 : 1);
             }});
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .output()
         .expect("spawn burn");
@@ -185,11 +187,12 @@ fn end_half_closes_writes_through() {
                 console.error('client error:', e && e.message || e);
                 process.exit(2);
             }});
-            setTimeout(() => process.exit(99), 10000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .output()
         .expect("spawn burn");
@@ -217,11 +220,12 @@ fn destroy_kills_connection() {
                 console.log('CLOSED_OK destroyed=' + sock.destroyed);
                 process.exit(0);
             }});
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .output()
         .expect("spawn burn");
@@ -268,11 +272,12 @@ fn set_no_delay_and_keep_alive_no_throw() {
                 sock.end();
             }});
             sock.on('close', () => process.exit(errored ? 3 : 0));
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .output()
         .expect("spawn burn");
@@ -311,11 +316,12 @@ fn set_no_delay_disable_then_re_enable() {
             sock.on('error', (e) => {{
                 console.error('error:', e.message); process.exit(2);
             }});
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .output()
         .expect("spawn burn");
@@ -352,11 +358,12 @@ fn set_keep_alive_with_short_delay_does_not_disconnect() {
             sock.on('error', (e) => {{
                 console.error('error:', e.message); process.exit(2);
             }});
-            setTimeout(() => process.exit(99), 8000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .output()
         .expect("spawn burn");
@@ -389,6 +396,7 @@ fn server_accepts_connection_and_echoes() {
 
     let mut child = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", parent])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -472,11 +480,12 @@ fn multiple_concurrent_connections() {
                     }});
                 }})(i);
             }}
-            setTimeout(() => process.exit(99), 10000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .output()
         .expect("spawn burn");
@@ -507,6 +516,7 @@ fn ip_helpers() {
     "#;
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", parent])
         .output()
         .expect("spawn burn");

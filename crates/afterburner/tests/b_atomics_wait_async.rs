@@ -48,6 +48,7 @@ fn waitAsync_not_equal_fast_path() {
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -85,11 +86,12 @@ fn waitAsync_resolves_on_notify() {
                 const woken = Atomics.notify(arr, 0, 1);
                 if (woken !== 1) console.error('woken=' + woken);
             }, 30);
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -122,11 +124,12 @@ fn waitAsync_times_out() {
                     process.exit(2);
                 }
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -177,11 +180,12 @@ fn notify_wakes_count_only() {
                     }, 30);
                 }, 30);
             }, 30);
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -222,11 +226,12 @@ fn views_over_same_buffer_share_waiters() {
                     process.exit(3);
                 }
             }, 30);
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");

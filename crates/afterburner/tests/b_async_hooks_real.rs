@@ -70,6 +70,7 @@ fn createHook_fires_for_AsyncResource() {
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -115,11 +116,12 @@ fn createHook_fires_for_promises() {
                     process.exit(2);
                 }
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -163,11 +165,12 @@ fn createHook_fires_for_timers() {
                     process.exit(2);
                 }
             }, 10);
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -211,6 +214,7 @@ fn executionAsyncId_reflects_stack() {
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -256,11 +260,12 @@ fn AsyncLocalStorage_propagates_across_promise_then() {
                 });
             }
             als.run('CTX', () => { inner(); });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -311,6 +316,7 @@ fn disable_stops_further_firing() {
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");

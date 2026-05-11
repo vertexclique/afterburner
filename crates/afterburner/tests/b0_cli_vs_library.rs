@@ -66,6 +66,7 @@ fn cli_banner_silenced_by_burn_quiet() {
     // banner regardless of whether the ack-marker is set.
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         // Isolated XDG so an existing marker on the host doesn't
         // mask a missing-silence bug.
         .env(

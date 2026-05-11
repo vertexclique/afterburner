@@ -14,6 +14,7 @@ const BURN: &str = env!("CARGO_BIN_EXE_burn");
 fn run_burn_eval(src: &str) -> std::process::Output {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg(src)
         .stdout(Stdio::piped())
@@ -306,6 +307,7 @@ fn shadow_wins_over_node_modules_jsonwebtoken() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .current_dir(&dir)
         .arg("-e")
         .arg(

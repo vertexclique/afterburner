@@ -55,6 +55,7 @@ fn wait_for_listener(port: u16, max: Duration) -> bool {
 fn spawn(source: &str) -> Child {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg(source)
         .stdout(Stdio::piped())
@@ -336,6 +337,7 @@ fn http2_create_server_is_constructable_and_loads_module() {
     // constants are present.
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg("-e")
         .arg(

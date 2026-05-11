@@ -18,6 +18,7 @@ const BURN: &str = env!("CARGO_BIN_EXE_burn");
 fn run_burn(source: &str) -> std::process::Output {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg("-e")
         .arg(source)

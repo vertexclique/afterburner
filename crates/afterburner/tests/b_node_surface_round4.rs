@@ -12,6 +12,7 @@ const BURN: &str = env!("CARGO_BIN_EXE_burn");
 fn run_inline(source: &str) -> std::process::Output {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg("-e")
         .arg(source)
@@ -153,6 +154,7 @@ fn import_meta_dirname_filename_url() {
     .unwrap();
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg(script.to_str().unwrap())
         .output()

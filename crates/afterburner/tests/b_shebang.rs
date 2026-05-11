@@ -47,6 +47,7 @@ fn run_script(dir: &Path, name: &str, contents: &[u8]) -> std::process::Output {
     f.write_all(contents).expect("write script");
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg(&path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -216,6 +217,7 @@ fn eval_mode_with_shebang_in_source() {
     // inline (curl | sh style) often retains the shebang. Tolerate.
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg("#!/usr/bin/env node\nconsole.log('eval-shebang-ok');\n")
         .stdout(Stdio::piped())
@@ -248,6 +250,7 @@ fn check_subcommand_accepts_shebang() {
     .unwrap();
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("check")
         .arg(&path)
         .stdout(Stdio::piped())

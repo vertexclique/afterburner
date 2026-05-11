@@ -29,6 +29,7 @@
 
 #![cfg(feature = "bin")]
 
+use serial_test::serial;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -49,6 +50,7 @@ fn scratch(label: &str) -> PathBuf {
 fn run_burn_in(cwd: &PathBuf, src: &str) -> std::process::Output {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .current_dir(cwd)
         .args(["-A", "-e", src])
         .stdout(Stdio::piped())
@@ -375,19 +377,41 @@ fn readdir_with_file_types_returns_dirents() {
 fn run_burn_capturing_log(cwd: &PathBuf, src: &str) -> std::process::Child {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        // Cap shards so 20+ parallel test subprocesses on a 36-core
+        // host don't each fan out to `available_parallelism()` shards
+        // and saturate the CPU before fs.watch can even register.
+        .env("BURN_SHARDS", "2")
         .current_dir(cwd)
         .args(["-A", "-e", src])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("spawn burn")
 }
 
+/// Poll for a marker file to appear under cross-binary CPU pressure
+/// burn cold-start can stretch past any fixed sleep budget. Returns the
+/// file contents (or empty string on timeout).
+fn poll_for_file(path: &std::path::Path, timeout: Duration) -> String {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(s) = fs::read_to_string(path)
+            && !s.is_empty()
+        {
+            return s;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    String::new()
+}
+
 #[test]
+#[serial]
 fn watch_emits_change_on_write() {
     let dir = scratch("watch_change");
     let target = dir.join("target.txt");
     let log = dir.join("events.log");
+    let ready = dir.join("ready.flag");
     fs::write(&target, b"v1").unwrap();
     let src = format!(
         r#"
@@ -396,20 +420,24 @@ fn watch_emits_change_on_write() {
             w.on('change', (kind, name) => {{
                 fs.writeFileSync({log}, kind + ':' + name + '\n', {{ flag: 'a' }});
             }});
+            // Signal watcher is registered. The test waits for this
+            // marker before mutating, which eliminates the cold-start
+            // race that a fixed sleep had.
+            fs.writeFileSync({ready}, 'ready');
         "#,
         d = serde_json::to_string(dir.to_str().unwrap()).unwrap(),
-        log = serde_json::to_string(log.to_str().unwrap()).unwrap()
+        log = serde_json::to_string(log.to_str().unwrap()).unwrap(),
+        ready = serde_json::to_string(ready.to_str().unwrap()).unwrap()
     );
     let mut child = run_burn_capturing_log(&dir, &src);
-    // Wait long enough for burn cold-start + watcher first poll start.
-    std::thread::sleep(Duration::from_secs(8));
+    assert!(
+        !poll_for_file(&ready, Duration::from_secs(45)).is_empty(),
+        "watcher never reported ready"
+    );
     fs::write(&target, b"v2").unwrap();
-    // Wait for the next poll to observe the change + flush.
-    std::thread::sleep(Duration::from_secs(2));
+    let contents = poll_for_file(&log, Duration::from_secs(15));
     let _ = child.kill();
     let _ = child.wait();
-
-    let contents = fs::read_to_string(&log).unwrap_or_default();
     assert!(
         contents.contains("change:target.txt") || contents.contains("rename:target.txt"),
         "expected change event on target.txt. log: {contents:?}"
@@ -417,10 +445,12 @@ fn watch_emits_change_on_write() {
 }
 
 #[test]
+#[serial]
 fn watch_emits_rename_on_create() {
     let dir = scratch("watch_create");
     let new_path = dir.join("new.txt");
     let log = dir.join("events.log");
+    let ready = dir.join("ready.flag");
     let src = format!(
         r#"
             const fs = require('fs');
@@ -430,22 +460,26 @@ fn watch_emits_rename_on_create() {
                     fs.writeFileSync({log}, 'CREATED\n', {{ flag: 'a' }});
                 }}
             }});
+            fs.writeFileSync({ready}, 'ready');
         "#,
         d = serde_json::to_string(dir.to_str().unwrap()).unwrap(),
-        log = serde_json::to_string(log.to_str().unwrap()).unwrap()
+        log = serde_json::to_string(log.to_str().unwrap()).unwrap(),
+        ready = serde_json::to_string(ready.to_str().unwrap()).unwrap()
     );
     let mut child = run_burn_capturing_log(&dir, &src);
-    std::thread::sleep(Duration::from_secs(8));
+    assert!(
+        !poll_for_file(&ready, Duration::from_secs(45)).is_empty(),
+        "watcher never reported ready"
+    );
     fs::write(&new_path, b"fresh").unwrap();
-    std::thread::sleep(Duration::from_secs(2));
+    let contents = poll_for_file(&log, Duration::from_secs(15));
     let _ = child.kill();
     let _ = child.wait();
-
-    let contents = fs::read_to_string(&log).unwrap_or_default();
     assert!(contents.contains("CREATED"), "log: {contents:?}");
 }
 
 #[test]
+#[serial]
 fn watch_close_stops_emissions() {
     // Close-immediately path doesn't depend on external writes;
     // the watcher is closed before the file is mutated, so no events
@@ -478,16 +512,22 @@ fn watch_close_stops_emissions() {
 }
 
 #[test]
+#[serial]
 fn watch_async_iterator() {
     let dir = scratch("watch_iter");
     let target = dir.join("a.txt");
     let log = dir.join("events.log");
+    let ready = dir.join("ready.flag");
     fs::write(&target, b"v1").unwrap();
     let src = format!(
         r#"
             const fs = require('fs');
             (async () => {{
                 const watcher = fs.promises.watch({d}, {{ interval: 200 }});
+                // Signal ready AFTER the watcher iterator is set up but
+                // before the first event lands; the for-await yields
+                // when the next change fires.
+                fs.writeFileSync({ready}, 'ready');
                 for await (const ev of watcher) {{
                     fs.writeFileSync({log}, ev.eventType + ':' + ev.filename + '\n', {{ flag: 'a' }});
                     break;
@@ -495,16 +535,18 @@ fn watch_async_iterator() {
             }})();
         "#,
         d = serde_json::to_string(dir.to_str().unwrap()).unwrap(),
-        log = serde_json::to_string(log.to_str().unwrap()).unwrap()
+        log = serde_json::to_string(log.to_str().unwrap()).unwrap(),
+        ready = serde_json::to_string(ready.to_str().unwrap()).unwrap()
     );
     let mut child = run_burn_capturing_log(&dir, &src);
-    std::thread::sleep(Duration::from_secs(8));
+    assert!(
+        !poll_for_file(&ready, Duration::from_secs(45)).is_empty(),
+        "watcher never reported ready"
+    );
     fs::write(&target, b"v2").unwrap();
-    std::thread::sleep(Duration::from_secs(2));
+    let contents = poll_for_file(&log, Duration::from_secs(15));
     let _ = child.kill();
     let _ = child.wait();
-
-    let contents = fs::read_to_string(&log).unwrap_or_default();
     assert!(
         contents.contains(":a.txt") || contents.contains("change") || contents.contains("rename"),
         "log: {contents:?}"
@@ -652,6 +694,7 @@ fn watch_outside_grant_emits_eacces() {
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .current_dir(&dir)
         .args(["--allow-fs", allowed.to_str().unwrap(), "-e", &src])
         .stdout(Stdio::piped())

@@ -88,6 +88,7 @@ fn ts_transpile_emits_source_mapping_url_in_output() {
     // through; verify this end-to-end works without crashes.
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg(target.to_str().unwrap())
         .stdout(Stdio::piped())
@@ -106,6 +107,7 @@ fn ts_transpile_emits_source_mapping_url_in_output() {
 fn module_set_source_maps_support_toggles_flag() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg("-e")
         .arg(
@@ -141,6 +143,7 @@ fn ts_file_with_imports_lowers_esm_with_source_map_intact() {
     // require resolution has to find ./helper.ts → load + transpile.
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg(entry.to_str().unwrap())
         .stdout(Stdio::piped())

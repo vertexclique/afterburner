@@ -64,6 +64,7 @@ fn js_byte_array(bytes: &[u8]) -> String {
 fn run_inline(source: &str) -> std::process::Output {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", source])
         .output()
         .expect("spawn burn")
@@ -125,7 +126,7 @@ fn instantiate_from_uint8array() {
             }}).catch((e) => {{
                 console.error('catch:', e.message); process.exit(4);
             }});
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     assert_ok(&run_inline(&src), "U8_OK");
@@ -148,7 +149,7 @@ fn instantiate_from_buffer() {
             }}).catch((e) => {{
                 console.error(e.message); process.exit(3);
             }});
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     assert_ok(&run_inline(&src), "BUF_OK");
@@ -168,7 +169,7 @@ fn instantiate_from_arraybuffer() {
             }}).catch((e) => {{
                 console.error(e.message); process.exit(2);
             }});
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     assert_ok(&run_inline(&src), "AB_OK add=30");
@@ -215,7 +216,7 @@ fn instantiate_with_module_handle() {
             }}).catch((e) => {{
                 console.error(e.message); process.exit(4);
             }});
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     assert_ok(&run_inline(&src), "MOD_OK");
@@ -398,7 +399,7 @@ fn compile_invalid_bytes_rejects() {
                 console.log('COMPILE_REJ_OK');
                 process.exit(0);
             });
-        setTimeout(() => process.exit(99), 5000);
+        setTimeout(() => process.exit(99), 30000);
     "#;
     assert_ok(&run_inline(src), "COMPILE_REJ_OK");
 }

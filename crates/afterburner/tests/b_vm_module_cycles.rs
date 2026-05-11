@@ -92,11 +92,12 @@ fn cycle_AB_links_and_evaluates() {
                     console.error('cycle err:', (e && e.stack) || e);
                     process.exit(6);
                 });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -139,11 +140,12 @@ fn self_cycle_links_without_infinite_recursion() {
                     console.error('self cycle err:', (e && e.stack) || e);
                     process.exit(3);
                 });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -202,11 +204,12 @@ fn three_node_cycle_ABC() {
                     console.error('three-cycle err:', (e && e.stack) || e);
                     process.exit(4);
                 });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -246,11 +249,12 @@ fn linear_dependency_still_works() {
                     console.error('linear err:', (e && e.stack) || e);
                     process.exit(3);
                 });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");

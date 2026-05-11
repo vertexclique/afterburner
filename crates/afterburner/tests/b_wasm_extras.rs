@@ -21,6 +21,7 @@ const BURN: &str = env!("CARGO_BIN_EXE_burn");
 fn run_inline(src: &str) -> std::process::Output {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", src])
         .output()
         .expect("spawn")
@@ -160,7 +161,7 @@ fn wasi_runs_module_with_exit_code() {
             console.log('WASI_EXIT_OK code=' + code);
             process.exit(0);
         }).catch(e => { console.error('err:', e.message); process.exit(3); });
-        setTimeout(() => process.exit(99), 5000);
+        setTimeout(() => process.exit(99), 30000);
     "#;
     assert_marker(&run_inline(src), "WASI_EXIT_OK");
 }

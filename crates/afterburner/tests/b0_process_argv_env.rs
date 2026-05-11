@@ -42,6 +42,7 @@ fn argv1_is_eval_marker_for_dash_e() {
 fn argv_captures_trailing_args() {
     let child = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg(r#"console.log(JSON.stringify(process.argv.slice(2)))"#)
         .arg("hello")
@@ -67,6 +68,7 @@ fn argv_after_double_dash_separator() {
     // strictly positional.
     let child = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg(r#"console.log(JSON.stringify(process.argv.slice(2)))"#)
         .arg("--")

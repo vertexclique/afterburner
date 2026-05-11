@@ -26,6 +26,7 @@ fn check_file(source: &str) -> std::process::Output {
     drop(f);
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("check")
         .arg(&path)
         .stdout(Stdio::piped())

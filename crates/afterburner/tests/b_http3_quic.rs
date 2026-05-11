@@ -45,6 +45,7 @@ fn gen_cert_pem() -> (String, String) {
 fn spawn_h3(source: &str) -> Child {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg(source)
         .stdout(Stdio::piped())
@@ -192,6 +193,7 @@ fn rt() -> tokio::runtime::Runtime {
 fn quic_module_loads_and_exposes_endpoint_class() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg("-e")
         .arg(
@@ -214,6 +216,7 @@ fn quic_module_loads_and_exposes_endpoint_class() {
 fn quic_endpoint_requires_cert_and_key() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg("-e")
         .arg(
@@ -380,6 +383,7 @@ fn h3_endpoint_close_releases_udp_port() {
 fn h3_endpoint_address_returns_bound_port() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg("-e")
         .arg(
@@ -412,6 +416,7 @@ fn h3_listen_on_busy_port_errors() {
     let (cert, key) = gen_cert_pem();
     let mut child = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg(format!(
             r#"
@@ -454,6 +459,7 @@ fn h3_listen_on_busy_port_errors() {
 fn h3_endpoint_extends_event_emitter() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg("-e")
         .arg(

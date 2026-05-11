@@ -39,6 +39,7 @@ fn tmp_dir(label: &str) -> std::path::PathBuf {
 fn burn_node_eval_prints_result() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["node", "-e", "console.log(1 + 2)"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -57,6 +58,7 @@ fn burn_node_eval_prints_result() {
 fn burn_node_eval_multiline() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args([
             "node",
             "-e",
@@ -74,6 +76,7 @@ fn burn_node_eval_multiline() {
 fn burn_node_eval_with_require() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args([
             "node",
             "-e",
@@ -91,6 +94,7 @@ fn burn_node_eval_with_require() {
 fn burn_node_eval_syntax_error_exits_nonzero() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["node", "-e", "function {{{ bad"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -109,6 +113,7 @@ fn burn_node_runs_script_file() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("node")
         .arg(&script)
         .stdout(Stdio::piped())
@@ -130,6 +135,7 @@ fn burn_node_runs_script_file() {
 fn burn_node_nonexistent_script_errors() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["node", "/tmp/burn_b4_does_not_exist_99999.js"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -146,6 +152,7 @@ fn burn_node_script_exit_code_propagates() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("node")
         .arg(&script)
         .stdout(Stdio::piped())
@@ -167,6 +174,7 @@ fn burn_node_script_exit_code_propagates() {
 fn burn_node_passes_trailing_args() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["node", "-e", "console.log(process.argv.slice(2).join(','))"])
         .args(["a", "b", "c"])
         .stdout(Stdio::piped())
@@ -181,6 +189,7 @@ fn burn_node_passes_trailing_args() {
 fn burn_node_argv0_is_burn() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["node", "-e", "console.log(process.argv[0])"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -198,6 +207,7 @@ fn burn_node_argv1_is_script_label() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("node")
         .arg(&script)
         .stdout(Stdio::piped())
@@ -219,6 +229,7 @@ fn burn_node_argv1_is_script_label() {
 fn burn_node_eval_argv1_is_eval_marker() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["node", "-e", "console.log(process.argv[1])"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -240,6 +251,7 @@ fn burn_node_file_trailing_args_in_argv() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("node")
         .arg(&script)
         .args(["x", "y"])
@@ -259,6 +271,7 @@ fn burn_node_file_trailing_args_in_argv() {
 fn burn_node_no_args_is_error() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("node")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -282,6 +295,7 @@ fn existing_file_named_node_wins_over_passthrough() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .current_dir(&dir)
         .arg("node")
         .stdout(Stdio::piped())
@@ -304,6 +318,7 @@ fn path_qualified_node_bypasses_passthrough() {
     // `burn ./node` should try to read the file `./node`, not pass-through.
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("./node")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

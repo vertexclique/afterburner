@@ -21,19 +21,43 @@
 #![cfg(feature = "bin")]
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 const BURN: &str = env!("CARGO_BIN_EXE_burn");
 
-static PORT_CTR: AtomicU16 = AtomicU16::new(0);
-
 fn pick_port() -> u16 {
-    let offset = PORT_CTR.fetch_add(1, Ordering::Relaxed);
-    let pid_tail = (std::process::id() & 0xFF) as u16;
-    51100 + ((pid_tail * 13 + offset * 23) % 5000)
+    let l = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+    let p = l.local_addr().expect("local_addr").port();
+    drop(l);
+    p
+}
+
+struct ChildGuard(Option<Child>);
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut c) = self.0.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+impl ChildGuard {
+    fn new(c: Child) -> Self {
+        Self(Some(c))
+    }
+}
+impl std::ops::Deref for ChildGuard {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        self.0.as_ref().expect("child taken")
+    }
+}
+impl std::ops::DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut Child {
+        self.0.as_mut().expect("child taken")
+    }
 }
 
 fn wait_for_listener(port: u16, timeout: Duration) -> bool {
@@ -61,6 +85,7 @@ fn http_get(port: u16, path: &str) -> String {
 fn spawn_burn(source: &str) -> Child {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg("-e")
         .arg(source)
@@ -86,7 +111,7 @@ fn precompiled_daemon_serves_canonical_request() {
         console.log('listening');
         "#
     );
-    let mut child = spawn_burn(&src);
+    let _child = ChildGuard::new(spawn_burn(&src));
     assert!(
         wait_for_listener(port, Duration::from_secs(15)),
         "burn listener didn't bind on :{port}"
@@ -98,9 +123,6 @@ fn precompiled_daemon_serves_canonical_request() {
         resp.contains("precompiled-ok-/probe"),
         "missing body marker:\n{resp}"
     );
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 #[test]
@@ -126,7 +148,7 @@ fn precompiled_daemon_preserves_argv_env() {
         }}).listen({port});
         "#
     );
-    let mut child = spawn_burn(&src);
+    let _child = ChildGuard::new(spawn_burn(&src));
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
     let resp = http_get(port, "/");
@@ -147,9 +169,6 @@ fn precompiled_daemon_preserves_argv_env() {
         resp.contains("\"cwd\":\"/"),
         "cwd missing or empty:\n{resp}"
     );
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 #[test]
@@ -177,7 +196,7 @@ fn precompiled_daemon_async_handler_round_trips() {
         }}).listen({port});
         "#
     );
-    let mut child = spawn_burn(&src);
+    let _child = ChildGuard::new(spawn_burn(&src));
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
     for path in &["/a", "/b", "/c"] {
@@ -189,9 +208,6 @@ fn precompiled_daemon_async_handler_round_trips() {
             "path {path} missing {needle}:\n{resp}"
         );
     }
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 #[test]
@@ -215,6 +231,7 @@ fn precompile_propagates_user_syntax_errors_with_nonzero_exit() {
     //     the invoke call) so users can find the issue
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg("-e")
         .arg("function broken( { /* unclosed paren */")
@@ -239,35 +256,39 @@ fn precompiled_daemon_console_log_reaches_stdout() {
     // daemon-init `console.log` must produce stdout in both source
     // and bytecode paths. Validates that stdout capture is wired
     // through the bytecode dispatch identically.
+    //
+    // The script self-exits after the listener is up so the burn
+    // subprocess gets to flush its block-buffered stdout to the pipe.
+    // Earlier versions used `child.kill()` after `wait_for_listener`
+    // which SIGKILLed the process before the buffer was flushed —
+    // race-prone (~80% miss rate) on hosts where the pipe path is
+    // fully buffered.
     let port = pick_port();
     let src = format!(
         r#"
         console.log('startup-marker');
         const http = require('http');
         http.createServer((_req, res) => res.end('ok')).listen({port});
+        // Bind happens above; give the listener a moment to publish
+        // then exit cleanly so stdout flushes before the pipe closes.
+        setTimeout(() => process.exit(0), 100);
         "#
     );
-    let mut child = Command::new(BURN)
+    let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg("-e")
         .arg(&src)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .output()
         .expect("spawn burn");
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
-
-    // Pull early stdout (the listener bind happens after console.log
-    // so by now it's been flushed).
-    let stdout_handle = child.stdout.take().expect("stdout pipe");
-    let _ = child.kill();
-    let _ = child.wait();
-    let mut buf = String::new();
-    let mut stdout_handle = stdout_handle;
-    let _ = stdout_handle.read_to_string(&mut buf);
+    assert!(out.status.success(), "burn exited non-zero: {:?}", out.status);
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        buf.contains("startup-marker"),
-        "console.log lost in precompiled init path: {buf:?}"
+        stdout.contains("startup-marker"),
+        "console.log lost in precompiled init path. stdout={stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }

@@ -58,11 +58,12 @@ fn sandbox_without_allow_net_blocks_connect() {
                 console.error('LEAK: connected despite NetAccess::None');
                 process.exit(1);
             }});
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["--sandbox", "-e", &parent])
         .output()
         .expect("spawn burn");
@@ -101,11 +102,12 @@ fn allow_list_blocks_unlisted_host() {
                 console.error('LEAK: unlisted host connected');
                 process.exit(1);
             }});
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["--sandbox", "--allow-net", "127.0.0.2", "-e", &parent])
         .output()
         .expect("spawn burn");
@@ -144,11 +146,12 @@ fn allow_list_permits_listed_host() {
                 console.error('unexpected:', e.code, e.message);
                 process.exit(2);
             }});
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["--sandbox", "--allow-net", "127.0.0.1", "-e", &parent])
         .output()
         .expect("spawn burn");

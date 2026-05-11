@@ -17,6 +17,7 @@ const BURN: &str = env!("CARGO_BIN_EXE_burn");
 fn run_inline(source: &str) -> std::process::Output {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", source])
         .output()
         .expect("spawn burn")
@@ -30,6 +31,7 @@ fn run_inline(source: &str) -> std::process::Output {
 fn run_inline_no_color(source: &str) -> std::process::Output {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .env("NO_COLOR", "1")
         .env_remove("FORCE_COLOR")
         .env_remove("COLORTERM")

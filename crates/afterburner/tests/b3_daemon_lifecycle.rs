@@ -26,6 +26,7 @@ const BURN: &str = env!("CARGO_BIN_EXE_burn");
 fn process_exit_zero_from_script() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg("console.log('before'); process.exit(0);")
         .stdout(Stdio::piped())
@@ -49,6 +50,7 @@ fn process_exit_zero_from_script() {
 fn process_exit_nonzero_from_script() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg("console.log('exiting'); process.exit(42);")
         .stdout(Stdio::piped())
@@ -77,6 +79,7 @@ fn process_exit_nonzero_from_script() {
 fn process_exit_without_arg_is_zero() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg("process.exit();")
         .stdout(Stdio::piped())
@@ -102,6 +105,7 @@ fn setinterval_keeps_daemon_alive() {
     // the runtime alive).
     let mut child = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg(
             r#"
@@ -145,6 +149,7 @@ fn settimeout_nonzero_delay_fires() {
     let start = Instant::now();
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg(
             r#"
@@ -187,6 +192,7 @@ fn unref_timer_lets_daemon_exit() {
     let start = Instant::now();
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg(
             r#"
@@ -231,6 +237,7 @@ fn clearinterval_lets_daemon_exit() {
     let start = Instant::now();
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg(
             r#"
@@ -270,14 +277,13 @@ fn clearinterval_lets_daemon_exit() {
 #[serial]
 fn process_exit_from_http_handler() {
     use std::io::{Read, Write};
-    use std::net::{SocketAddr, TcpStream};
-    use std::sync::atomic::{AtomicU16, Ordering as AtOrd};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
 
-    static PORT_CTR: AtomicU16 = AtomicU16::new(0);
     fn pick_port() -> u16 {
-        let offset = PORT_CTR.fetch_add(1, AtOrd::Relaxed);
-        let pid_tail = (std::process::id() & 0xFF) as u16;
-        50200 + ((pid_tail * 7 + offset * 13) % 3000)
+        let l = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let p = l.local_addr().expect("local_addr").port();
+        drop(l);
+        p
     }
 
     let port = pick_port();
@@ -292,6 +298,7 @@ fn process_exit_from_http_handler() {
     );
     let mut child = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg(&source)
         .stdout(Stdio::piped())
@@ -333,6 +340,7 @@ fn process_exit_from_http_handler() {
 fn process_exit_emits_exit_event() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg(
             r#"
@@ -364,6 +372,7 @@ fn cleartimeout_prevents_fire() {
     let start = Instant::now();
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg(
             r#"
@@ -404,6 +413,7 @@ fn settimeout_zero_delay_does_not_keep_daemon_alive() {
     let start = Instant::now();
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg(
             r#"
@@ -438,6 +448,7 @@ fn settimeout_zero_delay_does_not_keep_daemon_alive() {
 fn ref_after_unref_keeps_alive() {
     let mut child = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg(
             r#"

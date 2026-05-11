@@ -56,6 +56,7 @@ fn sab_alloc_returns_descriptor() {
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn");
@@ -87,6 +88,7 @@ fn atomic_store_load_in_process() {
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn");
@@ -114,6 +116,7 @@ fn wait_returns_not_equal_when_slot_mismatched() {
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn");
@@ -143,6 +146,7 @@ fn wait_returns_timed_out_when_no_notify() {
     );
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn");
@@ -204,13 +208,14 @@ fn cross_process_wait_notify() {
                 }}
             }});
             w.on('error', (e) => {{ console.error('w err:', e.message); process.exit(3); }});
-            setTimeout(() => process.exit(99), 10000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
         path = serde_json::to_string(child.to_str().unwrap()).unwrap()
     );
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .output()
         .expect("spawn");

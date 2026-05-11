@@ -64,6 +64,7 @@ fn fresh_project(name: &str) -> PathBuf {
 fn run_burn_in(dir: &PathBuf, args: &[&str]) -> std::process::Output {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .current_dir(dir)
         .args(args)
         .stdout(Stdio::piped())
@@ -161,6 +162,7 @@ fn npm_install_express_then_serve_works() {
     // Spawn server in background; give it time to start; curl; kill.
     let mut child = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .current_dir(&dir)
         .args(["-A", script.to_str().unwrap()])
         .stdout(Stdio::piped())

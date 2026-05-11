@@ -39,6 +39,7 @@ fn scratch(label: &str) -> PathBuf {
 fn spawn_burn_silent(cwd: &PathBuf, src: &str) -> std::process::Child {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .current_dir(cwd)
         .args(["-A", "-e", src])
         .stdout(Stdio::null())
@@ -66,10 +67,22 @@ fn bind_and_address_round_trip() {
         log = serde_json::to_string(log.to_str().unwrap()).unwrap()
     );
     let mut child = spawn_burn_silent(&dir, &src);
-    std::thread::sleep(Duration::from_secs(8));
+    // Poll for the log file rather than sleep a fixed budget — under
+    // cross-binary CPU pressure burn cold-start can stretch past any
+    // hard-coded duration.
+    let mut contents = String::new();
+    for _ in 0..100 {
+        std::thread::sleep(Duration::from_millis(300));
+        if let Ok(s) = fs::read_to_string(&log)
+            && !s.is_empty()
+        {
+            contents = s;
+            break;
+        }
+    }
     let _ = child.kill();
     let _ = child.wait();
-    let contents = fs::read_to_string(&log).expect("log file");
+    assert!(!contents.is_empty(), "log file never produced");
     let addr: serde_json::Value = serde_json::from_str(&contents).expect("addr JSON");
     assert_eq!(addr["address"], "127.0.0.1");
     assert!(addr["port"].as_u64().unwrap() > 0, "port: {}", addr["port"]);

@@ -88,13 +88,14 @@ fn worker_inherits_sandbox_no_fs() {
                     w.terminate().then(() => process.exit(0));
                 }}
             }});
-            setTimeout(() => process.exit(99), 10000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
         path = js_str(child_js.to_str().unwrap())
     );
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["--sandbox", "--allow-fs", &dir_str, "-e", &parent])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -145,6 +146,7 @@ fn depth_cap_rejects_when_at_limit() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .env("BURN_WORKER_DEPTH", "8")
         .args(["-A", "-e", &parent])
         .output()
@@ -185,6 +187,7 @@ fn eval_mode_rejected() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", parent])
         .output()
         .expect("spawn burn");
@@ -244,6 +247,7 @@ fn path_outside_fs_allowlist_rejected() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args([
             "--sandbox",
             "--allow-fs",

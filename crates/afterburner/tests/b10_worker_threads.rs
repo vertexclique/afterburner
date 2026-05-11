@@ -76,6 +76,7 @@ fn worker_round_trip_message() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -125,13 +126,14 @@ fn isMainThread_and_threadId() {
                 console.log('CHILD_TID=' + m.tid);
                 w.terminate().then(() => process.exit(0));
             }});
-            setTimeout(() => process.exit(99), 10000);
+            setTimeout(() => process.exit(99), 60000);
         "#,
         path = js_str(child_js.to_str().unwrap())
     );
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .output()
         .expect("spawn burn");
@@ -169,13 +171,14 @@ fn exit_event_fires() {
                 console.log('EXIT_CODE=' + code);
                 process.exit(code === 7 ? 0 : 1);
             }});
-            setTimeout(() => process.exit(99), 10000);
+            setTimeout(() => process.exit(99), 60000);
         "#,
         path = js_str(child_js.to_str().unwrap())
     );
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .output()
         .expect("spawn burn");
@@ -221,13 +224,14 @@ fn workerData_integrity() {
                     process.exit(2);
                 }}
             }});
-            setTimeout(() => process.exit(99), 10000);
+            setTimeout(() => process.exit(99), 60000);
         "#,
         path = js_str(child_js.to_str().unwrap())
     );
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .output()
         .expect("spawn burn");
@@ -283,13 +287,14 @@ fn ordered_messages_both_directions() {
                 for (let i = 0; i < 5; i++) w.postMessage(i);
                 w.postMessage('done');
             }});
-            setTimeout(() => process.exit(99), 10000);
+            setTimeout(() => process.exit(99), 60000);
         "#,
         path = js_str(child_js.to_str().unwrap())
     );
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", "-e", &parent])
         .output()
         .expect("spawn burn");

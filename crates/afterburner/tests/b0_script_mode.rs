@@ -23,6 +23,7 @@ const BURN: &str = env!("CARGO_BIN_EXE_burn");
 fn run_burn_script(source: &str, extra_flags: &[&str]) -> std::process::Output {
     let mut child = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(extra_flags)
         .arg("-e")
         .arg(source)
@@ -184,6 +185,7 @@ fn cli_piped_stdin_not_expected_in_script_mode() {
     // If we pipe stdin here, it should be ignored cleanly.
     let mut child = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg(r#"console.log("script ignores stdin")"#)
         .stdin(Stdio::piped())

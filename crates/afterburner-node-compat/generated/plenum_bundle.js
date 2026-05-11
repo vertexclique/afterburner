@@ -3887,9 +3887,14 @@ __register_module('crypto', function(module, exports, require) {
         e.code = 'ERR_CRYPTO_FIPS_UNAVAILABLE';
         throw e;
     };
+    // Node's `crypto.getFips()` returns 1/0 (number); `crypto.fips`
+    // is the boolean shorthand exposed since Node 0.12. Both are
+    // false on non-FIPS Node builds — we mirror that exactly so
+    // libraries that gate behaviour on either form see the same
+    // answer as in stock Node.
     exports.getFips = function() { return 0; };
     Object.defineProperty(exports, 'fips', {
-        get: function() { return 0; },
+        get: function() { return false; },
         set: function(v) { exports.setFips(!!v); },
         enumerable: true,
         configurable: true,
@@ -7273,6 +7278,25 @@ function __plenum_install_http(moduleName) {
                     });
                     return server;
                 }
+                // Node semantics: a SECOND `.listen(port)` on the same
+                // port within the SAME process emits EADDRINUSE on the
+                // second Server. The multi-shard daemon's shared-listener
+                // mode collapses cross-shard rejoins onto the first
+                // server_id, which is correct for multi-shard init; but
+                // a within-process re-listen has to fail. We track per-
+                // process port ownership in JS so the second call to
+                // `.listen(port)` from the same Store emits 'error' /
+                // EADDRINUSE without touching the host arbiter.
+                if (!globalThis.__ab_http_ports_owned) globalThis.__ab_http_ports_owned = {};
+                if (Object.prototype.hasOwnProperty.call(globalThis.__ab_http_ports_owned, port)) {
+                    queueMicrotask(function() {
+                        var err = new Error('listen EADDRINUSE: address already in use :::' + port);
+                        err.code = 'EADDRINUSE';
+                        err.port = port;
+                        server.emit('error', err);
+                    });
+                    return server;
+                }
                 var id = globalThis.__host_http_listen(port);
                 if (id <= 0) {
                     // B2b: -1 = no daemon (EACCES), -2 = EADDRINUSE,
@@ -7288,6 +7312,7 @@ function __plenum_install_http(moduleName) {
                     });
                     return server;
                 }
+                globalThis.__ab_http_ports_owned[port] = id;
                 server._serverId = id;
                 server._port = port;
 
@@ -7329,6 +7354,17 @@ function __plenum_install_http(moduleName) {
                 var id = server._serverId;
                 if (id && globalThis.__ab_http_handlers) {
                     delete globalThis.__ab_http_handlers[id];
+                }
+                // Release the per-process port ownership so a fresh
+                // `.listen(port)` on the same port succeeds. Match-on-
+                // id to avoid clearing ownership a sibling Server holds
+                // (shared-listener mode in multi-shard pools).
+                if (
+                    server._port != null
+                    && globalThis.__ab_http_ports_owned
+                    && globalThis.__ab_http_ports_owned[server._port] === id
+                ) {
+                    delete globalThis.__ab_http_ports_owned[server._port];
                 }
                 // B2b: release the port so a subsequent `.listen(port)`
                 // on the same port succeeds. No-op if the host import

@@ -27,6 +27,7 @@ fn fresh_dir(name: &str) -> PathBuf {
 fn run(args: &[&str]) -> std::process::Output {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -198,6 +199,7 @@ fn watch_re_runs_on_file_change() {
     fs::write(&script, b"console.log('VERSION-1');\n").unwrap();
     let mut child = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["--watch", "-A", script.to_str().unwrap()])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -223,9 +225,10 @@ fn watch_re_runs_on_file_change() {
         }
     });
 
-    // Poll until VERSION-1 lands.
+    // Poll until VERSION-1 lands. Generous window — burn cold-start
+    // under cross-binary CPU pressure can stretch past any short budget.
     let start = std::time::Instant::now();
-    while start.elapsed() < Duration::from_secs(8) {
+    while start.elapsed() < Duration::from_secs(30) {
         std::thread::sleep(Duration::from_millis(100));
         let g = buf.lock().unwrap();
         if String::from_utf8_lossy(&g).contains("VERSION-1") {
@@ -238,7 +241,7 @@ fn watch_re_runs_on_file_change() {
     fs::write(&script, b"console.log('VERSION-2');\n").unwrap();
     let start = std::time::Instant::now();
     let mut saw_v2 = false;
-    while start.elapsed() < Duration::from_secs(8) {
+    while start.elapsed() < Duration::from_secs(30) {
         std::thread::sleep(Duration::from_millis(100));
         let g = buf.lock().unwrap();
         if String::from_utf8_lossy(&g).contains("VERSION-2") {

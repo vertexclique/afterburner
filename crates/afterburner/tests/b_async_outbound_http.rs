@@ -18,13 +18,13 @@
 #![cfg(feature = "bin")]
 
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 const BURN: &str = env!("CARGO_BIN_EXE_burn");
 
 fn run_inline(source: &str) -> std::process::Output {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg("-e")
         .arg(source)
@@ -117,30 +117,38 @@ fn parallel_fetches_complete_concurrently() {
     // Three concurrent fetches should take roughly the time of one
     // round-trip — proof the host side dispatches each on its own
     // Tokio task instead of serialising them on the wasm thread.
-    // We don't assert wall-clock (network jitter), but we assert
-    // every Promise resolves with status 200, which fails fast if
-    // the dispatcher serialises.
-    let started = Instant::now();
+    // The JS side self-times the parallel-fetch window (excluding
+    // burn cold-start) and prints the elapsed millis. Measuring
+    // outside burn would conflate cold-start time with dispatch
+    // time and flake under cross-binary CPU pressure.
     let out = run_inline(
         r#"
         async function main() {
             const urls = ['http://example.com/', 'http://example.org/', 'http://example.net/'];
+            const t0 = Date.now();
             const r = await Promise.all(urls.map(u => fetch(u).then(x => x.status)));
+            const elapsed = Date.now() - t0;
             console.log('STATUSES', r.join(','));
+            console.log('FETCH_MS', elapsed);
         }
         main().catch(e => { console.log('FAIL:', e.message); process.exit(1); });
         "#,
     );
     assert_marker(&out, "STATUSES 200,200,200");
-    // Sanity: under serial dispatch (3 round-trips × ~300ms each =
-    // ~1s + overhead) the total would push past 3s on a healthy
-    // network. We give a generous 6s ceiling so CI flakes don't
-    // fail the assertion, but any structural regression to serial
-    // dispatch would blow past it.
+    // Under serial dispatch (3 round-trips × ~300ms each) the total
+    // would push past 1s. Parallel dispatch is bounded by the slowest
+    // single fetch (~300-500ms on a healthy network). 4s is a generous
+    // ceiling that still catches a structural regression to serial
+    // dispatch (which would be 3-15s depending on network latency).
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let fetch_ms: u64 = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("FETCH_MS "))
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or_else(|| panic!("FETCH_MS missing from stdout:\n{stdout}"));
     assert!(
-        started.elapsed() < Duration::from_secs(6),
-        "parallel fetches took too long; possible regression to serial dispatch ({:?})",
-        started.elapsed()
+        fetch_ms < 4000,
+        "parallel fetches took too long; possible regression to serial dispatch ({fetch_ms}ms)"
     );
 }
 

@@ -51,6 +51,7 @@ fn run_script(dir: &Path, name: &str, contents: &[u8]) -> std::process::Output {
     f.write_all(contents).expect("write script");
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg(&path)
         .stdout(Stdio::piped())
@@ -338,6 +339,7 @@ fn require_resolves_subpath_imports_from_package_json() {
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg(pkg_dir.join("index.js"))
         .stdout(Stdio::piped())
@@ -364,6 +366,7 @@ fn require_subpath_imports_throws_named_error_when_unknown() {
     .unwrap();
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg(pkg_dir.join("index.js"))
         .stdout(Stdio::piped())

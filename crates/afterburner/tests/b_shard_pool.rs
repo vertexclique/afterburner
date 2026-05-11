@@ -26,20 +26,56 @@
 
 #![cfg(feature = "bin")]
 
+// All tests in this file spawn long-lived `burn` subprocesses that
+// cold-start `available_parallelism()` shards (the daemon's
+// auto-detected shard count). On a 36-core host that's 36 wasmtime
+// instances per subprocess; running 20 of these tests in parallel
+// oversubscribes the CPU until every listener-bind times out. The
+// `#[serial]` annotations below pin the shard-pool suite to a single
+// active subprocess at a time so the timing assertions stay valid.
+use serial_test::serial;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 const BURN: &str = env!("CARGO_BIN_EXE_burn");
 
-static PORT_CTR: AtomicU16 = AtomicU16::new(0);
-
 fn pick_port() -> u16 {
-    let offset = PORT_CTR.fetch_add(1, Ordering::Relaxed);
-    let pid_tail = (std::process::id() & 0xFF) as u16;
-    52000 + ((pid_tail * 17 + offset * 31) % 5000)
+    let l = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+    let p = l.local_addr().expect("local_addr").port();
+    drop(l);
+    p
+}
+
+/// RAII wrapper for spawned `burn` children. Kills + reaps on Drop —
+/// even when the surrounding test panics. Existing `child.kill()` /
+/// `child.try_wait()` / `child.stderr.take()` etc. continue to work
+/// via DerefMut to the inner Child.
+struct ChildGuard(Option<Child>);
+impl ChildGuard {
+    fn new(c: Child) -> Self {
+        Self(Some(c))
+    }
+}
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut c) = self.0.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+impl std::ops::Deref for ChildGuard {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        self.0.as_ref().expect("child taken")
+    }
+}
+impl std::ops::DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut Child {
+        self.0.as_mut().expect("child taken")
+    }
 }
 
 fn wait_for_listener(port: u16, timeout: Duration) -> bool {
@@ -71,6 +107,14 @@ fn extract_body(resp: &str) -> &str {
 fn spawn_burn_with_inline(source: &str) -> Child {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
+        // Cap shards at 2 by default — enough to exercise the multi-
+        // shard code paths (RR distribution, per-shard state isolation,
+        // shared bind) without burning N=36 wasmtime instances per
+        // subprocess. Tests that need a specific count (BURN_SHARDS=4
+        // / =1 / =0) set it via their own `.env()` which overrides
+        // this default.
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg("-e")
         .arg(source)
@@ -83,6 +127,7 @@ fn spawn_burn_with_inline(source: &str) -> Child {
 // ---- 1. Listener binds once ---------------------------------------
 
 #[test]
+#[serial]
 fn shard_pool_listener_binds_once_no_eaddrinuse() {
     // With multiple shards each running daemon-init that calls
     // `app.listen(port)`, only ONE shard's bind reaches the kernel.
@@ -99,7 +144,7 @@ fn shard_pool_listener_binds_once_no_eaddrinuse() {
         }});
         "#
     );
-    let mut child = spawn_burn_with_inline(&src);
+    let mut child = ChildGuard::new(spawn_burn_with_inline(&src));
     assert!(
         wait_for_listener(port, Duration::from_secs(15)),
         "listener didn't bind on :{port}"
@@ -121,6 +166,7 @@ fn shard_pool_listener_binds_once_no_eaddrinuse() {
 // ---- 2. Round-robin distribution ---------------------------------
 
 #[test]
+#[serial]
 fn shard_pool_round_robin_distributes_requests() {
     // The auto-detected shard count (= available_parallelism()) is
     // ≥ 1 on every box. We hit /counter many times and verify the
@@ -140,7 +186,7 @@ fn shard_pool_round_robin_distributes_requests() {
         }}).listen({port});
         "#
     );
-    let mut child = spawn_burn_with_inline(&src);
+    let mut child = ChildGuard::new(spawn_burn_with_inline(&src));
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
     // Send N requests where N = max(shard count we expect, 4).
@@ -174,6 +220,7 @@ fn shard_pool_round_robin_distributes_requests() {
 // ---- 3. Per-shard state isolation ---------------------------------
 
 #[test]
+#[serial]
 fn shard_pool_per_shard_state_isolation() {
     // Two requests in quick succession should USUALLY land on
     // different shards (RR + N≥2). Each shard's `counter` starts
@@ -196,13 +243,21 @@ fn shard_pool_per_shard_state_isolation() {
         }}).listen({port});
         "#
     );
-    let mut child = spawn_burn_with_inline(&src);
+    let mut child = ChildGuard::new(spawn_burn_with_inline(&src));
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
-    // Hit it many times, count occurrences of "1".
+    // Send enough requests that, regardless of how many shards the host
+    // auto-detects (`available_parallelism()`), at least one shard is
+    // guaranteed to handle multiple — i.e. requests > shards. We scale
+    // off the host's parallelism so a 64-core box doesn't fail this
+    // invariant the way a fixed 32-request loop did on a 36-core host.
+    let par = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+    let req_count = (par * 4).max(64);
     let mut ones = 0;
     let mut ge2 = 0;
-    for _ in 0..32 {
+    for _ in 0..req_count {
         let resp = http_get(port, "/");
         let body = extract_body(&resp);
         if body == "1" {
@@ -214,14 +269,14 @@ fn shard_pool_per_shard_state_isolation() {
     // At least 2 occurrences of "1" prove per-shard state (each
     // shard independently increments from 0). And ge2 ≥ 1 proves
     // some shard handled multiple requests (i.e., we have multi-
-    // request distribution, not 32 fresh Stores).
+    // request distribution, not N fresh Stores).
     assert!(
         ones >= 2,
-        "expected ≥2 fresh counters across 32 reqs, got {ones} (ge2={ge2})"
+        "expected ≥2 fresh counters across {req_count} reqs, got {ones} (ge2={ge2})"
     );
     assert!(
         ge2 >= 1,
-        "expected ≥1 shard to handle multiple requests, got 0 (ones={ones})"
+        "expected ≥1 shard to handle multiple requests, got 0 (ones={ones}, par={par})"
     );
 
     let _ = child.kill();
@@ -231,6 +286,7 @@ fn shard_pool_per_shard_state_isolation() {
 // ---- 4. Sandbox boundary preserved per-shard ----------------------
 
 #[test]
+#[serial]
 fn shard_pool_sandbox_denies_on_every_shard() {
     // Run a daemon with `--sandbox` (capabilities sealed): every
     // shard should refuse `process.env.HOME` and surface
@@ -247,8 +303,9 @@ fn shard_pool_sandbox_denies_on_every_shard() {
         }}).listen({port});
         "#
     );
-    let mut child = Command::new(BURN)
+    let mut child = ChildGuard::new(Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("--sandbox")
         .arg("--allow-net")
         .arg("*")
@@ -257,7 +314,7 @@ fn shard_pool_sandbox_denies_on_every_shard() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn burn");
+        .expect("spawn burn"));
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
     // Hit every shard (32 requests across N shards).
@@ -277,6 +334,7 @@ fn shard_pool_sandbox_denies_on_every_shard() {
 // ---- 5. Capability-allowed env propagates to every shard ----------
 
 #[test]
+#[serial]
 fn shard_pool_allow_env_visible_on_every_shard() {
     let port = pick_port();
     let src = format!(
@@ -287,8 +345,9 @@ fn shard_pool_allow_env_visible_on_every_shard() {
         }}).listen({port});
         "#
     );
-    let mut child = Command::new(BURN)
+    let mut child = ChildGuard::new(Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .env("SHARD_TEST_VAR", "shared-secret")
         .arg("--sandbox")
         .arg("--allow-net")
@@ -300,7 +359,7 @@ fn shard_pool_allow_env_visible_on_every_shard() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn burn");
+        .expect("spawn burn"));
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
     // Check enough requests that we land on every shard.
@@ -320,12 +379,14 @@ fn shard_pool_allow_env_visible_on_every_shard() {
 // ---- 6. Init failure surfaces non-zero exit -----------------------
 
 #[test]
+#[serial]
 fn shard_pool_init_failure_exits_nonzero() {
     // A syntactically-broken script fails at init in every shard.
     // The pool must detect the failure and exit non-zero — it
     // must NOT silently continue with the surviving shards.
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg("-e")
         .arg("function broken( { /* unclosed paren */")
@@ -353,12 +414,14 @@ fn shard_pool_init_failure_exits_nonzero() {
 // ---- 7. Plain-script (no listeners) exits cleanly -----------------
 
 #[test]
+#[serial]
 fn shard_pool_plain_script_exits_zero_no_listeners() {
     // No `.listen()`, no `setInterval` — pool reports
     // `any_has_refs() == false` after init, the CLI's main-thread
     // wait loop sees that and exits cleanly.
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg("-e")
         .arg("console.log('hi from plain script')")
@@ -386,6 +449,7 @@ fn shard_pool_plain_script_exits_zero_no_listeners() {
 // ---- 8. Async handler works on every shard ------------------------
 
 #[test]
+#[serial]
 fn shard_pool_async_handler_returns_correct_body() {
     // Verify async handlers (Promise + await) work across shards.
     // Each shard's QuickJS instance runs the same async handler
@@ -401,7 +465,7 @@ fn shard_pool_async_handler_returns_correct_body() {
         }}).listen({port});
         "#
     );
-    let mut child = spawn_burn_with_inline(&src);
+    let mut child = ChildGuard::new(spawn_burn_with_inline(&src));
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
     for path in &["/foo", "/bar", "/baz"] {
@@ -418,6 +482,7 @@ fn shard_pool_async_handler_returns_correct_body() {
 // ---- 9. Concurrent requests don't deadlock or smuggle -------------
 
 #[test]
+#[serial]
 fn shard_pool_concurrent_requests_complete() {
     // Hit the daemon with concurrent requests from multiple
     // threads. Validates: (a) the dispatcher RR + per-shard
@@ -435,7 +500,7 @@ fn shard_pool_concurrent_requests_complete() {
         }}).listen({port});
         "#
     );
-    let mut child = spawn_burn_with_inline(&src);
+    let mut child = ChildGuard::new(spawn_burn_with_inline(&src));
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
     let mut handles = Vec::new();
@@ -465,6 +530,7 @@ fn shard_pool_concurrent_requests_complete() {
 // ---- 10. BURN_SHARDS=1 forces single-shard semantics --------------
 
 #[test]
+#[serial]
 fn shard_pool_burn_shards_one_forces_single_shard() {
     // BURN_SHARDS=1 reduces the pool to one shard. With one shard
     // the per-shard counter IS the global counter, so we get
@@ -480,8 +546,9 @@ fn shard_pool_burn_shards_one_forces_single_shard() {
         }}).listen({port});
         "#
     );
-    let mut child = Command::new(BURN)
+    let mut child = ChildGuard::new(Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .env("BURN_SHARDS", "1")
         .arg("-A")
         .arg("-e")
@@ -489,7 +556,7 @@ fn shard_pool_burn_shards_one_forces_single_shard() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn burn");
+        .expect("spawn burn"));
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
     // 5 sequential requests must produce 1, 2, 3, 4, 5 — strict
@@ -512,6 +579,7 @@ fn shard_pool_burn_shards_one_forces_single_shard() {
 // ---- 11. BURN_SHARDS=4 spawns exactly 4 shards --------------------
 
 #[test]
+#[serial]
 fn shard_pool_burn_shards_four_spawns_four() {
     // BURN_SHARDS=4 fixes the pool size at 4 regardless of host
     // cores. We verify by sending 4 requests in parallel: with a
@@ -532,8 +600,9 @@ fn shard_pool_burn_shards_four_spawns_four() {
         }}).listen({port});
         "#
     );
-    let mut child = Command::new(BURN)
+    let mut child = ChildGuard::new(Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .env("BURN_SHARDS", "4")
         .arg("-A")
         .arg("-e")
@@ -541,7 +610,7 @@ fn shard_pool_burn_shards_four_spawns_four() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn burn");
+        .expect("spawn burn"));
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
     // First 4 sequential requests RR across 4 shards → all "1".
@@ -575,6 +644,7 @@ fn shard_pool_burn_shards_four_spawns_four() {
 // ---- 12. BURN_SHARDS=0 falls back to auto-detect ------------------
 
 #[test]
+#[serial]
 fn shard_pool_burn_shards_zero_falls_back() {
     // BURN_SHARDS=0 is invalid (must be ≥ 1). The CLI logs a
     // warning and falls back to auto-detect. The script still
@@ -586,7 +656,7 @@ fn shard_pool_burn_shards_zero_falls_back() {
         http.createServer((_req, res) => res.end('ok')).listen({port});
         "#
     );
-    let mut child = Command::new(BURN)
+    let mut child = ChildGuard::new(Command::new(BURN)
         // Don't set BURN_QUIET — we want to capture the warning.
         .env("BURN_SHARDS", "0")
         .arg("-A")
@@ -595,7 +665,7 @@ fn shard_pool_burn_shards_zero_falls_back() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn burn");
+        .expect("spawn burn"));
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
     // The daemon serves normally despite the bad env var.
@@ -624,6 +694,7 @@ fn shard_pool_burn_shards_zero_falls_back() {
 // ---- 13. BURN_SHARDS garbage falls back to auto-detect ------------
 
 #[test]
+#[serial]
 fn shard_pool_burn_shards_garbage_falls_back() {
     // Non-numeric BURN_SHARDS is invalid; same fallback path as
     // BURN_SHARDS=0.
@@ -634,8 +705,9 @@ fn shard_pool_burn_shards_garbage_falls_back() {
         http.createServer((_req, res) => res.end('ok')).listen({port});
         "#
     );
-    let mut child = Command::new(BURN)
+    let mut child = ChildGuard::new(Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .env("BURN_SHARDS", "not-a-number")
         .arg("-A")
         .arg("-e")
@@ -643,7 +715,7 @@ fn shard_pool_burn_shards_garbage_falls_back() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn burn");
+        .expect("spawn burn"));
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
     let resp = http_get(port, "/");
@@ -656,6 +728,7 @@ fn shard_pool_burn_shards_garbage_falls_back() {
 // ---- 14. BURN_SHARDS over-cap clamps to MAX_SHARDS ----------------
 
 #[test]
+#[serial]
 fn shard_pool_burn_shards_overlimit_clamped() {
     // BURN_SHARDS=999 exceeds the 128 cap; the CLI clamps it.
     // The cap matches Wasmtime's pooling-allocator slot count;
@@ -670,8 +743,9 @@ fn shard_pool_burn_shards_overlimit_clamped() {
         http.createServer((_req, res) => res.end('ok')).listen({port});
         "#
     );
-    let mut child = Command::new(BURN)
+    let mut child = ChildGuard::new(Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .env("BURN_SHARDS", "999")
         .arg("-A")
         .arg("-e")
@@ -679,7 +753,7 @@ fn shard_pool_burn_shards_overlimit_clamped() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn burn");
+        .expect("spawn burn"));
     assert!(
         wait_for_listener(port, Duration::from_secs(30)),
         "daemon must start even at clamped-max shard count"
@@ -696,6 +770,7 @@ fn shard_pool_burn_shards_overlimit_clamped() {
 // ---- 15. Raw TCP server multi-shard compatibility -----------------
 
 #[test]
+#[serial]
 fn shard_pool_net_listener_does_not_eaddrinuse() {
     // Pre-fix, every shard tried to bind the same port and shards
     // 1..N-1 returned EADDRINUSE, killing daemon-init. Post-fix,
@@ -713,7 +788,7 @@ fn shard_pool_net_listener_does_not_eaddrinuse() {
         server.listen({port}, '127.0.0.1');
         "#
     );
-    let mut child = spawn_burn_with_inline(&src);
+    let mut child = ChildGuard::new(spawn_burn_with_inline(&src));
 
     // Wait for the kernel listener to be reachable (the owner shard
     // bound it). A pre-fix run would have hit EADDRINUSE on
@@ -741,6 +816,7 @@ fn shard_pool_net_listener_does_not_eaddrinuse() {
 // ---- 16. UDP socket multi-shard compatibility ---------------------
 
 #[test]
+#[serial]
 fn shard_pool_dgram_socket_does_not_eaddrinuse() {
     // Same contract as TCP: every shard's `dgram.createSocket()
     // .bind(port)` would have collided pre-fix. Post-fix, only the
@@ -758,7 +834,7 @@ fn shard_pool_dgram_socket_does_not_eaddrinuse() {
         // Keep the daemon alive via the open socket.
         "#
     );
-    let mut child = spawn_burn_with_inline(&src);
+    let mut child = ChildGuard::new(spawn_burn_with_inline(&src));
     // Give the daemon a moment to spin up and bind. UDP doesn't
     // have a "listener accept" probe like TCP, so we just wait
     // briefly and verify the process is still alive (no init crash).
@@ -796,6 +872,7 @@ fn shard_pool_dgram_socket_does_not_eaddrinuse() {
 // it returns None, draining any duplicates. This test guards the
 // fix.
 #[test]
+#[serial]
 fn shard_pool_shared_claims_owner_then_follower() {
     // White-box: hit the SharedPortClaims arbiter directly via
     // multiple racing threads to confirm exactly one wins per port.
@@ -845,6 +922,7 @@ fn shard_pool_shared_claims_owner_then_follower() {
 // ---- 18. Library API: threaded_auto() picks reasonable worker count
 
 #[test]
+#[serial]
 fn threaded_auto_picks_available_parallelism() {
     // The `Afterburner::builder().threaded_auto()` library
     // method is the programmatic equivalent of the daemon's
@@ -877,6 +955,7 @@ fn threaded_auto_picks_available_parallelism() {
 // ---- 19. Library API: BURN_SHARDS honored by threaded_auto() ------
 
 #[test]
+#[serial]
 fn threaded_auto_honors_burn_shards_env() {
     // `threaded_auto()` reads BURN_SHARDS the same way the daemon
     // does, so an operator can pin a worker count without
@@ -923,6 +1002,7 @@ fn threaded_auto_honors_burn_shards_env() {
 // ---- 20. Process.exit propagates through pool to host -------------
 
 #[test]
+#[serial]
 fn shard_pool_process_exit_propagates() {
     // `process.exit(code)` from any shard must exit the host
     // with that code (single-shard semantics preserved).
@@ -930,6 +1010,7 @@ fn shard_pool_process_exit_propagates() {
     // listener is bound) is the easiest case to test.
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg("-e")
         .arg("process.exit(42)")

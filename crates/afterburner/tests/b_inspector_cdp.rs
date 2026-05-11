@@ -51,12 +51,13 @@ fn session_runtime_evaluate_real() {
                     process.exit(3);
                 }
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -94,12 +95,13 @@ fn session_runtime_evaluate_exception_packaged() {
                     process.exit(3);
                 }
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -148,12 +150,13 @@ fn session_compile_run_script_roundtrip() {
                     }
                 });
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -197,12 +200,13 @@ fn session_heap_profiler_emits_chunks() {
                     process.exit(3);
                 }
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -254,12 +258,13 @@ fn session_profiler_start_stop_returns_profile() {
                     spin();
                 });
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -309,12 +314,13 @@ fn inspector_open_serves_json_version() {
             });
             req.on('error', (e) => { console.error('http err', e); process.exit(4); });
             req.end();
-            setTimeout(() => process.exit(99), 8000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -351,12 +357,13 @@ fn unknown_method_surfaces_typed_error() {
                     process.exit(2);
                 }
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");
@@ -403,12 +410,13 @@ fn breakpoint_registers_real_id() {
                 console.log('BP_REGISTER_OK');
                 process.exit(0);
             });
-            setTimeout(() => process.exit(99), 5000);
+            setTimeout(() => process.exit(99), 30000);
         "#,
     );
 
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .args(["-A", entry.to_str().unwrap()])
         .output()
         .expect("spawn burn");

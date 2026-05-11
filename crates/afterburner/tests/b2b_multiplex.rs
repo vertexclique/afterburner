@@ -19,21 +19,44 @@
 
 use serial_test::serial;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 const BURN: &str = env!("CARGO_BIN_EXE_burn");
 
-static PORT_CTR: AtomicU16 = AtomicU16::new(0);
 fn pick_port() -> u16 {
-    // Widely-separated per-test ports avoid collisions across parallel
-    // test files. pid-spread + linear offset so reruns of the same
-    // test don't all bunch up on one port.
-    let offset = PORT_CTR.fetch_add(1, Ordering::Relaxed);
-    let pid_tail = (std::process::id() & 0xFF) as u16;
-    51200 + ((pid_tail * 11 + offset * 17) % 3000)
+    // OS-assigned ephemeral port — robust across parallel test binaries.
+    let l = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+    let p = l.local_addr().expect("local_addr").port();
+    drop(l);
+    p
+}
+
+struct ChildGuard(Option<Child>);
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut c) = self.0.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+impl ChildGuard {
+    fn new(c: Child) -> Self {
+        Self(Some(c))
+    }
+}
+impl std::ops::Deref for ChildGuard {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        self.0.as_ref().expect("child taken")
+    }
+}
+impl std::ops::DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut Child {
+        self.0.as_mut().expect("child taken")
+    }
 }
 
 fn wait_for_listener(port: u16, deadline: Duration) -> bool {
@@ -59,9 +82,10 @@ fn http_get(port: u16) -> Option<String> {
     Some(out)
 }
 
-fn spawn_script(src: &str) -> std::process::Child {
+fn spawn_script(src: &str) -> Child {
     Command::new(BURN)
         .env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
         .arg("-e")
         .arg(src)
         .stdout(Stdio::piped())
@@ -127,7 +151,7 @@ fn two_listeners_on_different_ports_route_independently() {
         http.createServer((_req, res) => {{ res.end('B:{port_b}'); }}).listen({port_b});
         "#
     );
-    let mut child = spawn_script(&src);
+    let _child = ChildGuard::new(spawn_script(&src));
     assert!(
         wait_for_listener(port_a, Duration::from_secs(15)),
         "listener A should come up on {port_a}"
@@ -147,9 +171,6 @@ fn two_listeners_on_different_ports_route_independently() {
         resp_b.contains(&format!("B:{port_b}")),
         "B response wrong: {resp_b}"
     );
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 // ---- close releases the port --------------------------------------------
