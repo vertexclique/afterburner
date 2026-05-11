@@ -15,6 +15,7 @@
 
 #![cfg(feature = "bin")]
 
+use serial_test::serial;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
@@ -126,6 +127,7 @@ fn spawn_burn_inline(source: &str) -> Child {
 }
 
 #[test]
+#[serial]
 fn burn_serves_hello_from_burn() {
     let port = pick_port();
     let source = format!(
@@ -148,6 +150,7 @@ fn burn_serves_hello_from_burn() {
 }
 
 #[test]
+#[serial]
 fn burn_server_echoes_method_and_path() {
     let port = pick_port();
     let source = format!(
@@ -172,6 +175,7 @@ fn burn_server_echoes_method_and_path() {
 }
 
 #[test]
+#[serial]
 fn incoming_message_emits_buffer_chunks() {
     // Phase 0 / Gap D regression: real Node `IncomingMessage` emits
     // `Buffer` chunks unless `setEncoding` was called. body-parser /
@@ -243,6 +247,7 @@ fn incoming_message_emits_buffer_chunks() {
 }
 
 #[test]
+#[serial]
 fn body_parser_pattern_buffer_concat_succeeds() {
     // The exact pattern body-parser uses internally: collect chunks,
     // `Buffer.concat`, parse JSON. Without Gap D, `Buffer.concat`
@@ -278,6 +283,7 @@ fn body_parser_pattern_buffer_concat_succeeds() {
 }
 
 #[test]
+#[serial]
 fn burn_plain_script_exits_cleanly() {
     // A script with no `.listen()` should exit 0 quickly — daemon
     // mode detects no listeners and exits.
