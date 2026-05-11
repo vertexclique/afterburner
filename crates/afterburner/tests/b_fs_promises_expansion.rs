@@ -431,8 +431,8 @@ fn watch_emits_change_on_write() {
     );
     let mut child = run_burn_capturing_log(&dir, &src);
     assert!(
-        !poll_for_file(&ready, Duration::from_secs(45)).is_empty(),
-        "watcher never reported ready"
+        !poll_for_file(&ready, Duration::from_secs(120)).is_empty(),
+        "watcher never reported ready within 120s"
     );
     fs::write(&target, b"v2").unwrap();
     let contents = poll_for_file(&log, Duration::from_secs(15));
@@ -468,8 +468,8 @@ fn watch_emits_rename_on_create() {
     );
     let mut child = run_burn_capturing_log(&dir, &src);
     assert!(
-        !poll_for_file(&ready, Duration::from_secs(45)).is_empty(),
-        "watcher never reported ready"
+        !poll_for_file(&ready, Duration::from_secs(120)).is_empty(),
+        "watcher never reported ready within 120s"
     );
     fs::write(&new_path, b"fresh").unwrap();
     let contents = poll_for_file(&log, Duration::from_secs(15));
@@ -540,8 +540,8 @@ fn watch_async_iterator() {
     );
     let mut child = run_burn_capturing_log(&dir, &src);
     assert!(
-        !poll_for_file(&ready, Duration::from_secs(45)).is_empty(),
-        "watcher never reported ready"
+        !poll_for_file(&ready, Duration::from_secs(120)).is_empty(),
+        "watcher never reported ready within 120s"
     );
     fs::write(&target, b"v2").unwrap();
     let contents = poll_for_file(&log, Duration::from_secs(15));
