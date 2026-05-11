@@ -188,19 +188,25 @@ fn http2_get_default_settings_returns_node_defaults() {
 }
 
 #[test]
-fn http2_create_secure_server_listen_throws_typed_error() {
+fn http2_create_secure_server_returns_listenable_server() {
+    // `http2.createSecureServer` delegates to createServer (TLS
+    // termination happens daemon-side via ALPN). The returned Server
+    // exposes `.listen` / `.close` / `.on('request', …)` like the
+    // cleartext http2 server. Pin the working surface — earlier
+    // rounds threw `ERR_HTTP2_NOT_IMPLEMENTED`; that's no longer the
+    // case once `createSecureServer` was wired through.
     let out = run_inline(
         r#"
         const http2 = require('http2');
         const srv = http2.createSecureServer();
-        try {
-            srv.listen(0);
-            console.log('FAIL no-throw');
-        } catch (e) {
-            if (e.code === 'ERR_HTTP2_NOT_IMPLEMENTED') console.log('SERVER-NOT-IMPL-OK');
-            else console.log('FAIL', e.code);
-        }
+        if (
+            srv &&
+            typeof srv.listen === 'function' &&
+            typeof srv.close === 'function' &&
+            typeof srv.on === 'function'
+        ) console.log('SERVER-OK');
+        else console.log('FAIL shape');
         "#,
     );
-    assert_marker(&out, "SERVER-NOT-IMPL-OK");
+    assert_marker(&out, "SERVER-OK");
 }
