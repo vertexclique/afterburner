@@ -1418,27 +1418,54 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
         <div class="compat"><span class="ck ck--ok">✓</span>sharp</div>
       </div>
 
-      <h3>Surface-only (loads, throws clear errors at runtime)</h3>
+      <h3>Real implementations (host-backed, fully wired)</h3>
+      <p>These ship as production-grade builds, not surface stubs:</p>
       <div class="compat-grid">
-        <div class="compat"><span class="ck ck--gated">~</span>http2</div>
-        <div class="compat"><span class="ck ck--gated">~</span>cluster</div>
-        <div class="compat"><span class="ck ck--gated">~</span>inspector</div>
-        <div class="compat"><span class="ck ck--gated">~</span>readline</div>
-        <div class="compat"><span class="ck ck--gated">~</span>repl</div>
-        <div class="compat"><span class="ck ck--gated">~</span>trace_events</div>
-        <div class="compat"><span class="ck ck--gated">~</span>wasi</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>http2</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>http3 / quic</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>cluster</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>inspector (CDP)</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>readline</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>repl</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>trace_events</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>wasi (preview1)</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>node:test</div>
+        <div class="compat"><span class="ck ck--ok">✓</span>node:sqlite</div>
       </div>
-      <p><code>http2</code> throws <code>ERR_HTTP2_NOT_IMPLEMENTED</code> on connect; HTTP/1.1 over TLS via <code>https</code> covers the canonical case. The <code>cluster</code> module's master + worker fork model isn't implemented, but the multi-core throughput it was meant to deliver is built into the daemon: <strong>burn runs HTTP servers across all your CPUs out of the box</strong>, same per-request-state model <code>cluster</code> users already plan around. Native <code>.node</code> addons cannot load inside the sandbox; for the popular ones, use the L3 shadows above.</p>
+      <ul>
+        <li><strong>http2</strong> — real H1+H2 inbound on one listener via hyper-util auto-detect. Outbound H1/H2 too.</li>
+        <li><strong>http3 / QUIC</strong> — real <code>node:quic</code> + <code>http3</code> behind the <code>http3</code> cargo feature, backed by <code>quinn</code> + <code>h3</code>.</li>
+        <li><strong>cluster</strong> — real per-CPU multi-process workers (worker_threads subprocesses + SO_REUSEPORT accept-balance). <code>cluster.workers</code> tracked, real OS pids, IPC, <code>'listening'</code>/<code>'fork'</code>/<code>'exit'</code> events.</li>
+        <li><strong>inspector</strong> — real Chrome DevTools Protocol server. WebSocket + <code>/json/version</code> discovery. <code>Runtime.evaluate</code>, <code>HeapProfiler.takeHeapSnapshot</code>, <code>Profiler.start/stop</code>, <code>Debugger.setBreakpointByUrl</code> with source-level statement instrumentation gated on <code>BURN_DEBUGGER_INSTRUMENT=1</code>.</li>
+        <li><strong>wasi</strong> — real <code>wasi.start(module)</code> via <code>wasmtime-wasi</code>'s preview1 bridge. <code>proc_exit</code> code surfaced as the return value.</li>
+      </ul>
 
       <h3>Node 26 surface roadmap</h3>
-      <p>The surface above is in place. Remaining work fills in newer-Node APIs within those modules and the last few standalone APIs from Node 22–26:</p>
+      <p>The original "out of scope" engine ceilings are all closed. Status as of the latest commit:</p>
       <div class="table-scroll"><table class="doc-table">
         <thead><tr><th>Band</th><th>Items</th></tr></thead>
         <tbody>
-          <tr><td><strong>Shipped</strong></td><td>Full Node 26 stdlib surface. <code>burn npm install</code> end-to-end. Real <code>require('express')</code>. <code>worker_threads</code>, raw <code>net</code> / <code>tls</code> / <code>dgram</code>, TLS SNI multi-cert, async outbound HTTP, TS-strip + ESM lower.</td></tr>
-          <tr><td><strong>Next</strong></td><td><code>node:test</code>, <code>node:sqlite</code>, Permission Model surface, <code>--watch</code>, <code>--env-file</code>, <code>--require</code>/<code>--import</code>, <code>WebSocket</code> client, <code>fs.watch</code>, pnpm/yarn corepack chunked imports.</td></tr>
-          <tr><td><strong>Then</strong></td><td>Full <code>crypto.subtle</code>, <code>URLPattern</code>, <code>FormData</code> / <code>Blob</code> / <code>File</code>, <code>EventSource</code>, <code>BroadcastChannel</code>, <code>CompressionStream</code>, <code>module.register</code>, zstd, <code>import.meta.dirname</code>, source maps, ES2024 set methods + <code>Promise.withResolvers</code>.</td></tr>
-          <tr><td><strong>Out of scope</strong></td><td>Native <code>.node</code> addons, <code>cluster</code> child-fork model (multi-core HTTP throughput is built into daemon mode — see "Daemon mode runs across all your CPUs" above), full <code>async_hooks</code> hook firing, <code>vm.SourceTextModule</code>, listening sockets in JS (host owns the listener).</td></tr>
+          <tr><td><strong>Shipped</strong></td><td>Full Node 22–26 stdlib surface. Cross-process <code>Atomics.wait</code>/<code>notify</code> on <code>SharedArrayBuffer</code> (mmap + futex). <code>async_hooks.createHook</code> fires through native <code>await</code> via AST rewrite. <code>vm.SourceTextModule</code> with cyclic graphs + live-binding imports. Real <code>WebAssembly.Memory.grow</code>, standalone <code>Memory</code>/<code>Table</code>/<code>Global</code>, <code>compileStreaming</code>/<code>instantiateStreaming</code>. <code>cluster</code>, <code>inspector</code> (CDP), <code>node:test</code>, <code>node:sqlite</code>, <code>node:quic</code>, <code>node:wasi</code>, <code>worker_threads</code>, raw <code>net</code>/<code>tls</code>/<code>dgram</code>, async outbound HTTP, TS-strip + ESM lower with live bindings, Iterator helpers (Stage 3), <code>Promise.try</code>, brotli/zstd codecs, <code>BroadcastChannel</code>, <code>CompressionStream</code>/<code>DecompressionStream</code>, <code>URLPattern</code>-style routing via web_compat, source maps via inline data-URLs.</td></tr>
+          <tr><td><strong>Sandbox-by-design</strong></td><td>See <a href="#sandbox-security-omissions">Sandbox security omissions</a>.</td></tr>
+          <tr><td><strong>Engine-bounded</strong></td><td>Native <code>.node</code> addons cannot load (use the L3 shadows above). JS-side ownership of OS listening sockets (host owns the listener — JS gets the event stream).</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3 id="sandbox-security-omissions"><span class="anchor">#</span>Sandbox security omissions</h3>
+      <p>The runtime <strong>intentionally refuses</strong> the following APIs because they would let user JS escape the capability sandbox. Each refusal throws a typed, Node-shaped error so existing code fails fast rather than mis-running.</p>
+      <div class="table-scroll"><table class="doc-table">
+        <thead><tr><th>API</th><th>Refusal mode</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><td><code>process.chdir(dir)</code></td><td>throws <code>Error('process.chdir is not supported')</code></td><td>Working-directory mutation breaks the per-call <code>Manifold</code> fs allow-list — paths resolved relative to <code>cwd</code> would migrate outside the granted roots.</td></tr>
+          <tr><td><code>process.setuid</code> / <code>setgid</code> / <code>seteuid</code> / <code>setegid</code> / <code>setgroups</code></td><td>throws <code>{code: 'EPERM'}</code></td><td>Identity drop/elevation bypasses the host's effective UID. The runtime cannot grant the kernel something it doesn't have itself, and a successful syscall here would lie to the caller.</td></tr>
+          <tr><td><code>new Worker(code, { eval: true })</code></td><td>throws <code>Error("eval: true not supported")</code></td><td>Compiling an arbitrary string into a fresh JS realm sidesteps the per-script transpile + fs allow-list checks. <code>new Worker(path)</code> (real file on disk) remains the supported shape and gives the same parallelism.</td></tr>
+          <tr><td><code>process.binding(name)</code></td><td>throws <code>Error("process.binding is not supported")</code></td><td>Node's private internals API. Userland code that depends on it is non-portable; legitimate use cases all have a <code>node:&lt;module&gt;</code> equivalent.</td></tr>
+          <tr><td><code>Atomics.wait</code> (sync) on non-shared buffers</td><td>throws <code>TypeError("requires a SharedArrayBuffer-backed view")</code></td><td>Blocking on a non-shared buffer is a guaranteed deadlock in the single-threaded JS realm. The shared-buffer path is real (futex-backed cross-process) and goes through the host instead of trapping the realm.</td></tr>
+          <tr><td><code>Debugger.setBreakpointByUrl</code> when <code>BURN_DEBUGGER_INSTRUMENT</code> is unset</td><td>registers the breakpoint but never fires</td><td>Always-on source-level instrumentation adds one fn-call per statement. Gating it behind an env var keeps the production hot path zero-overhead; the inspector listener still accepts the command so external tools don't see a hard "not implemented".</td></tr>
+          <tr><td><code>setTimeout(fn, delay&gt;0)</code> outside daemon mode</td><td>throws <code>Error("not supported in this sandbox")</code></td><td>One-shot script mode (<code>burn script.js</code> with no listeners) has no event loop to drive timers. <code>setTimeout(fn, 0)</code> still fires via the microtask queue; non-zero needs daemon mode (which the CLI enters automatically once a listener or worker is created).</td></tr>
+          <tr><td><code>require('./x.ts')</code> without the <code>ts</code> cargo feature</td><td>throws <code>Error("Loading 'x.ts' requires the `ts` cargo feature")</code></td><td>TypeScript strip-transpile pulls in <code>oxc</code> (~3 MiB of compile cost). The feature is opt-in so embedders that only run plain JS don't pay it. Build with <code>--features ts</code> to enable.</td></tr>
+          <tr><td><code>node:quic</code> / <code>http3</code> without the <code>http3</code> cargo feature</td><td>throws on <code>QuicEndpoint</code> construction</td><td>QUIC pulls in <code>quinn</code> + <code>h3</code> (~3 MiB). Build with <code>--features http3</code>.</td></tr>
+          <tr><td>Native <code>.node</code> addons (<code>require('./binding.node')</code>)</td><td>throws at require-time</td><td>Native addons bypass the WASM sandbox entirely — they're arbitrary code from disk linked into the host process. For the popular ones (bcrypt, argon2, jsonwebtoken, sqlite3, sharp) burn ships pure-Rust shadows under the same npm-facing API.</td></tr>
         </tbody>
       </table></div>
 

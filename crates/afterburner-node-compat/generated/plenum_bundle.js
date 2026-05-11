@@ -5380,6 +5380,36 @@ __register_module('events', function(module, exports, require) {
         if (req.signal && req.signal.aborted) {
             return Promise.reject(req.signal.reason || new Error('Aborted'));
         }
+        // Resolve `blob:burn/...` URLs against the local blob URL
+        // registry (populated by `URL.createObjectURL(blob)`). No
+        // network capability needed since the bytes are already
+        // in-memory.
+        if (req.url && req.url.indexOf('blob:') === 0
+            && typeof globalThis.__ab_resolve_blob_url === 'function') {
+            var blob = globalThis.__ab_resolve_blob_url(req.url);
+            if (!blob) {
+                return Promise.reject(new TypeError(
+                    'fetch: blob URL ' + req.url + ' has been revoked or never existed'
+                ));
+            }
+            return blob.arrayBuffer().then(function(buf) {
+                var bytes = new Uint8Array(buf);
+                var b64;
+                try {
+                    var Buf = globalThis.Buffer || require('buffer').Buffer;
+                    b64 = Buf.from(bytes).toString('base64');
+                } catch (_) { b64 = null; }
+                var resp = new Response('', {
+                    status: 200,
+                    url: req.url,
+                    bodyB64: b64,
+                });
+                if (blob.type) {
+                    resp.headers.set('content-type', blob.type);
+                }
+                return resp;
+            });
+        }
         if (typeof globalThis.__host_http_request !== 'function') {
             return Promise.reject(new Error('fetch: net capability not granted'));
         }
@@ -20670,8 +20700,41 @@ __register_module('wasi', function(module, exports, require) {
                 try { return new globalThis.URL(href, base); }
                 catch (_) { return null; }
             };
-            globalThis.URL.createObjectURL = function() { throw new Error('URL.createObjectURL not supported'); };
-            globalThis.URL.revokeObjectURL = function() {};
+            // ----- URL.createObjectURL / revokeObjectURL (Node 20+) -----
+            //
+            // Maps a Blob / File to a `blob:burn/<uuid>` URL. The
+            // mapping lives in a global registry; `fetch(blob:burn/...)`
+            // (and other consumers via `globalThis.__ab_resolve_blob_url`)
+            // can resolve back to the original Blob's bytes.
+            // `revokeObjectURL` drops the registry entry.
+            if (!globalThis.__ab_blob_url_registry) {
+                globalThis.__ab_blob_url_registry = Object.create(null);
+            }
+            var _blobUrlReg = globalThis.__ab_blob_url_registry;
+            var _blobUrlSeq = 0;
+            globalThis.URL.createObjectURL = function(blob) {
+                if (!blob || typeof blob.arrayBuffer !== 'function') {
+                    throw new TypeError(
+                        'URL.createObjectURL: argument must be a Blob / File'
+                    );
+                }
+                // Deterministic id space — counter + pid keeps URLs
+                // unique within a single process; `fetch` consumers
+                // look this up by exact string match.
+                var pid = (typeof process !== 'undefined' && process.pid) | 0;
+                var id = 'burn-' + pid + '-' + (++_blobUrlSeq);
+                var url = 'blob:burn/' + id;
+                _blobUrlReg[url] = blob;
+                return url;
+            };
+            globalThis.URL.revokeObjectURL = function(url) {
+                if (typeof url === 'string') delete _blobUrlReg[url];
+            };
+            // Exposed for the fetch polyfill — given a `blob:burn/...`
+            // URL, return the underlying Blob or undefined.
+            globalThis.__ab_resolve_blob_url = function(url) {
+                return _blobUrlReg[url];
+            };
 
             globalThis.URLSearchParams = function URLSearchParams(init) {
                 this._pairs = [];

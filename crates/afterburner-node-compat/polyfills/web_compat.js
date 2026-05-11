@@ -2174,8 +2174,41 @@
                 try { return new globalThis.URL(href, base); }
                 catch (_) { return null; }
             };
-            globalThis.URL.createObjectURL = function() { throw new Error('URL.createObjectURL not supported'); };
-            globalThis.URL.revokeObjectURL = function() {};
+            // ----- URL.createObjectURL / revokeObjectURL (Node 20+) -----
+            //
+            // Maps a Blob / File to a `blob:burn/<uuid>` URL. The
+            // mapping lives in a global registry; `fetch(blob:burn/...)`
+            // (and other consumers via `globalThis.__ab_resolve_blob_url`)
+            // can resolve back to the original Blob's bytes.
+            // `revokeObjectURL` drops the registry entry.
+            if (!globalThis.__ab_blob_url_registry) {
+                globalThis.__ab_blob_url_registry = Object.create(null);
+            }
+            var _blobUrlReg = globalThis.__ab_blob_url_registry;
+            var _blobUrlSeq = 0;
+            globalThis.URL.createObjectURL = function(blob) {
+                if (!blob || typeof blob.arrayBuffer !== 'function') {
+                    throw new TypeError(
+                        'URL.createObjectURL: argument must be a Blob / File'
+                    );
+                }
+                // Deterministic id space — counter + pid keeps URLs
+                // unique within a single process; `fetch` consumers
+                // look this up by exact string match.
+                var pid = (typeof process !== 'undefined' && process.pid) | 0;
+                var id = 'burn-' + pid + '-' + (++_blobUrlSeq);
+                var url = 'blob:burn/' + id;
+                _blobUrlReg[url] = blob;
+                return url;
+            };
+            globalThis.URL.revokeObjectURL = function(url) {
+                if (typeof url === 'string') delete _blobUrlReg[url];
+            };
+            // Exposed for the fetch polyfill — given a `blob:burn/...`
+            // URL, return the underlying Blob or undefined.
+            globalThis.__ab_resolve_blob_url = function(url) {
+                return _blobUrlReg[url];
+            };
 
             globalThis.URLSearchParams = function URLSearchParams(init) {
                 this._pairs = [];
