@@ -11,6 +11,7 @@
 
 #![cfg(all(feature = "bin", feature = "http3", feature = "ts"))]
 
+use serial_test::serial;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -190,6 +191,7 @@ fn rt() -> tokio::runtime::Runtime {
 // ---- module surface -------------------------------------------------
 
 #[test]
+#[serial]
 fn quic_module_loads_and_exposes_endpoint_class() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
@@ -213,6 +215,7 @@ fn quic_module_loads_and_exposes_endpoint_class() {
 }
 
 #[test]
+#[serial]
 fn quic_endpoint_requires_cert_and_key() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
@@ -240,6 +243,7 @@ fn quic_endpoint_requires_cert_and_key() {
 // ---- end-to-end H3 wire ---------------------------------------------
 
 #[test]
+#[serial]
 fn h3_endpoint_completes_quic_handshake() {
     let port = pick_port();
     let (cert, key) = gen_cert_pem();
@@ -264,6 +268,7 @@ fn h3_endpoint_completes_quic_handshake() {
 }
 
 #[test]
+#[serial]
 fn h3_endpoint_serves_real_request_round_trip() {
     let port = pick_port();
     let (cert, key) = gen_cert_pem();
@@ -295,6 +300,7 @@ fn h3_endpoint_serves_real_request_round_trip() {
 }
 
 #[test]
+#[serial]
 fn h3_endpoint_status_code_round_trips() {
     let port = pick_port();
     let (cert, key) = gen_cert_pem();
@@ -325,6 +331,7 @@ fn h3_endpoint_status_code_round_trips() {
 }
 
 #[test]
+#[serial]
 fn h3_endpoint_body_streams_chunked_writes() {
     let port = pick_port();
     let (cert, key) = gen_cert_pem();
@@ -357,6 +364,7 @@ fn h3_endpoint_body_streams_chunked_writes() {
 }
 
 #[test]
+#[serial]
 fn h3_endpoint_close_releases_udp_port() {
     let port = pick_port();
     let (cert, key) = gen_cert_pem();
@@ -380,6 +388,7 @@ fn h3_endpoint_close_releases_udp_port() {
 }
 
 #[test]
+#[serial]
 fn h3_endpoint_address_returns_bound_port() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
@@ -403,6 +412,7 @@ fn h3_endpoint_address_returns_bound_port() {
 // ---- error paths ----------------------------------------------------
 
 #[test]
+#[serial]
 fn h3_listen_on_busy_port_errors() {
     // Hold the UDP port from the test harness so the H3 listener's
     // QUIC bind hits EADDRINUSE. We pick a SEPARATE port for the
@@ -456,6 +466,7 @@ fn h3_listen_on_busy_port_errors() {
 }
 
 #[test]
+#[serial]
 fn h3_endpoint_extends_event_emitter() {
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
