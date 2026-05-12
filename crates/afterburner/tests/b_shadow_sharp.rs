@@ -720,7 +720,11 @@ fn input_must_be_buffer_or_path() {
 
 #[test]
 #[serial]
-fn deferred_methods_throw_clear_error() {
+fn composite_queues_and_round_trips_through_pipeline() {
+    // `composite(layers)` queues the op and is part of the
+    // chainable surface; the rust shadow executes it on the
+    // pipeline run. Empty `layers` is a no-op overlay set —
+    // toBuffer() resolves with the unchanged base image.
     let src = r#"
         const sharp = require('sharp');
         const { Buffer } = require('buffer');
@@ -728,18 +732,27 @@ fn deferred_methods_throw_clear_error() {
             'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==',
             'base64'
         );
-        try {
-            sharp(png).composite([]);
-            console.error('expected throw'); process.exit(3);
-        } catch (e) {
-            if (!/composite.*not implemented/i.test(e.message)) {
-                console.error('wrong msg:', e.message); process.exit(4);
+        (async () => {
+            try {
+                const chain = sharp(png).composite([]);
+                if (typeof chain.toBuffer !== 'function') {
+                    console.error('composite did not return chainable');
+                    process.exit(2);
+                }
+                const out = await chain.toBuffer();
+                if (!Buffer.isBuffer(out) || out.length === 0) {
+                    console.error('toBuffer empty / non-buffer:', typeof out, out && out.length);
+                    process.exit(3);
+                }
+                console.log('COMPOSITE_OK');
+                process.exit(0);
+            } catch (e) {
+                console.error('threw:', e && e.message);
+                process.exit(4);
             }
-            console.log('DEFERRED_OK');
-            process.exit(0);
-        }
+        })();
     "#;
-    assert_ok(&run_inline(src), "DEFERRED_OK");
+    assert_ok(&run_inline(src), "COMPOSITE_OK");
 }
 
 #[test]
