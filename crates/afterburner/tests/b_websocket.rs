@@ -6,12 +6,12 @@
 //!    canonical readyState constants, accepts events, encodes /
 //!    decodes frames correctly. No network — pure JS exercise.
 //!
-//! 2. **Round-trip tests** (`#[ignore]` until explicitly run): a
-//!    hand-rolled Rust WebSocket echo server runs as a thread inside
-//!    the Rust test process, bound to `127.0.0.1:<dynamic>`. burn
-//!    connects via the WebSocket polyfill, sends frames, reads echo,
-//!    closes. Uses workspace `sha1` + `base64` deps for the
-//!    handshake — no `tungstenite` / external WebSocket lib needed.
+//! 2. **Round-trip tests**: a hand-rolled Rust WebSocket echo server
+//!    runs as a thread inside the Rust test process, bound to
+//!    `127.0.0.1:<dynamic>`. burn connects via the WebSocket polyfill,
+//!    sends frames, reads echo, closes. Uses workspace `sha1` +
+//!    `base64` deps for the handshake — no `tungstenite` / external
+//!    WebSocket lib needed.
 
 #![cfg(feature = "bin")]
 
@@ -235,7 +235,6 @@ fn run_echo_server(port: u16) {
 }
 
 #[test]
-#[ignore = "spawns an in-process echo server; run explicitly with --ignored"]
 fn websocket_text_round_trip_against_local_echo() {
     let port = pick_port();
     let server = thread::Builder::new()
@@ -265,7 +264,6 @@ fn websocket_text_round_trip_against_local_echo() {
 }
 
 #[test]
-#[ignore = "spawns an in-process echo server; run explicitly with --ignored"]
 fn websocket_binary_round_trip_with_arraybuffer() {
     let port = pick_port();
     let server = thread::Builder::new()
