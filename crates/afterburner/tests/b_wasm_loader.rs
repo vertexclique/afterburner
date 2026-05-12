@@ -467,35 +467,55 @@ fn unsatisfied_imports_link_error() {
 
 #[test]
 #[serial]
-fn instantiate_streaming_rejects_clearly() {
+fn instantiate_streaming_with_response_resolves() {
+    // `WebAssembly.instantiateStreaming(Promise<Response>, imports)`
+    // is now implemented end-to-end: it awaits the Response, reads
+    // the bytes via the same path as `instantiate(buffer)`, and
+    // resolves to `{ module, instance }`. Earlier rounds rejected
+    // with "streaming not supported"; the surface is wired now.
     let src = r#"
-        WebAssembly.instantiateStreaming(null, null)
-            .then(() => { console.error('expected reject'); process.exit(2); })
-            .catch((e) => {
-                if (!/streaming.*not supported/i.test(e.message)) {
-                    console.error('wrong msg:', e.message); process.exit(3);
+        // Minimal 8-byte wasm module: magic + version, no sections.
+        const bytes = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+        const resp = new Response(bytes, { headers: { 'content-type': 'application/wasm' } });
+        WebAssembly.instantiateStreaming(Promise.resolve(resp), {})
+            .then((result) => {
+                if (
+                    result &&
+                    result.module instanceof WebAssembly.Module &&
+                    result.instance instanceof WebAssembly.Instance
+                ) {
+                    console.log('STREAMING_OK');
+                    process.exit(0);
                 }
-                console.log('STREAMING_OK');
-                process.exit(0);
+                console.error('wrong result shape:', Object.keys(result || {}).join(','));
+                process.exit(3);
+            })
+            .catch((e) => {
+                console.error('rejected:', e && e.message); process.exit(4);
             });
-        setTimeout(() => process.exit(99), 3000);
+        setTimeout(() => process.exit(99), 30000);
     "#;
     assert_ok(&run_inline(src), "STREAMING_OK");
 }
 
 #[test]
 #[serial]
-fn standalone_memory_construction_throws() {
+fn standalone_memory_construction_yields_buffer() {
+    // `new WebAssembly.Memory({ initial: N })` is now a real
+    // standalone Memory backed by host-side wasmtime::Memory.
+    // `.buffer` returns an ArrayBuffer of `initial * 64KB` bytes.
     let src = r#"
-        try {
-            new WebAssembly.Memory({ initial: 1 });
-            console.error('expected throw'); process.exit(2);
-        } catch (e) {
-            if (!/standalone construction/i.test(e.message)) {
-                console.error('wrong msg:', e.message); process.exit(3);
-            }
-            console.log('STANDALONE_MEM_OK');
+        const mem = new WebAssembly.Memory({ initial: 1 });
+        if (!(mem instanceof WebAssembly.Memory)) {
+            console.error('not a Memory'); process.exit(2);
         }
+        if (!(mem.buffer instanceof ArrayBuffer)) {
+            console.error('buffer not ArrayBuffer:', typeof mem.buffer); process.exit(3);
+        }
+        if (mem.buffer.byteLength !== 65536) {
+            console.error('wrong byteLength:', mem.buffer.byteLength); process.exit(4);
+        }
+        console.log('STANDALONE_MEM_OK');
     "#;
     assert_ok(&run_inline(src), "STANDALONE_MEM_OK");
 }

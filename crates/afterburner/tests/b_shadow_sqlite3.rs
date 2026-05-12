@@ -461,23 +461,28 @@ fn unsupported_param_type_throws() {
 
 #[test]
 #[serial]
-fn prepare_method_throws_clear_not_implemented() {
+fn prepare_method_returns_statement_handle() {
+    // `db.prepare(sql)` now returns a real Statement with
+    // `.run/.all/.get/.finalize`. Earlier rounds surfaced
+    // ERR_NOT_IMPLEMENTED; the surface is wired now.
     let out = run_inline(
         r#"
             const sqlite3 = require('sqlite3');
             const db = new sqlite3.Database(':memory:');
-            try {
-                db.prepare('SELECT 1');
-                console.error('expected throw');
-                process.exit(2);
-            } catch (e) {
-                if (!/not implemented/i.test(e.message)) {
-                    console.error('wrong msg:', e.message); process.exit(3);
-                }
-                console.log('PREPARE_OK');
-                db.close(() => process.exit(0));
+            const stmt = db.prepare('SELECT 1 AS one');
+            const okShape =
+                stmt &&
+                typeof stmt.run === 'function' &&
+                typeof stmt.all === 'function' &&
+                typeof stmt.get === 'function' &&
+                typeof stmt.finalize === 'function';
+            if (!okShape) {
+                console.error('wrong shape:', stmt && Object.keys(stmt).join(','));
+                process.exit(3);
             }
-            setTimeout(() => process.exit(99), 30000);
+            console.log('PREPARE_OK');
+            stmt.finalize(function() { db.close(function() { process.exit(0); }); });
+            setTimeout(function() { process.exit(99); }, 30000);
         "#,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);

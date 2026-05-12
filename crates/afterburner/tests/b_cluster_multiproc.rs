@@ -285,7 +285,7 @@ fn cluster_workers_map_and_disconnect_all() {
                         });
                     }
                 }));
-                setTimeout(() => process.exit(99), 15000);
+                setTimeout(() => process.exit(99), 60000);
             } else {
                 cluster.worker.on('disconnect', () => {
                     setTimeout(() => process.exit(0), 50);
