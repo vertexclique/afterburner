@@ -13,6 +13,7 @@
 
 use serial_test::serial;
 use std::io::Write;
+use std::net::TcpListener;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
@@ -23,6 +24,16 @@ fn write_temp(dir: &TempDir, name: &str, source: &str) -> std::path::PathBuf {
     let mut f = std::fs::File::create(&path).expect("create temp file");
     f.write_all(source.as_bytes()).expect("write");
     path
+}
+
+/// Reserve an ephemeral port by binding/dropping a `TcpListener`. The
+/// kernel can in theory reuse the port between the drop and the worker
+/// `bind()`, but for serial tests on `127.0.0.1` the window is short
+/// enough that this beats the previous hard-coded port that collided
+/// with any prior `bind 0` in the same cargo run.
+fn pick_free_port() -> u16 {
+    let l = TcpListener::bind("127.0.0.1:0").expect("bind to find free port");
+    l.local_addr().expect("local_addr").port()
 }
 
 /// `cluster.fork()` returns a real worker; `Worker.process.pid` is non-zero
@@ -158,25 +169,28 @@ fn cluster_isPrimary_isWorker_split() {
 #[serial]
 fn cluster_listening_event() {
     let dir = TempDir::new().expect("tempdir");
+    let port = pick_free_port();
     let entry = write_temp(
         &dir,
         "listen.js",
-        r#"
+        &format!(
+            r#"
             const cluster = require('cluster');
             const http = require('http');
-            if (cluster.isPrimary) {
+            if (cluster.isPrimary) {{
                 const w = cluster.fork();
-                cluster.on('listening', (worker, addr) => {
+                cluster.on('listening', (worker, addr) => {{
                     console.log('LISTENING port=' + addr.port);
                     w.disconnect();
-                });
+                }});
                 w.on('exit', () => process.exit(0));
                 setTimeout(() => process.exit(99), 30000);
-            } else {
+            }} else {{
                 const srv = http.createServer((req, res) => res.end('hi'));
-                srv.listen(34915);
-            }
+                srv.listen({port});
+            }}
         "#,
+        ),
     );
 
     let out = Command::new(BURN)
@@ -207,38 +221,41 @@ fn cluster_listening_event() {
 #[serial]
 fn cluster_two_workers_co_bind_same_port() {
     let dir = TempDir::new().expect("tempdir");
+    let port = pick_free_port();
     let entry = write_temp(
         &dir,
         "cobind.js",
-        r#"
+        &format!(
+            r#"
             const cluster = require('cluster');
             const http = require('http');
-            if (cluster.isPrimary) {
+            if (cluster.isPrimary) {{
                 let onlineCount = 0;
                 let listeningCount = 0;
                 const workers = [cluster.fork(), cluster.fork()];
-                cluster.on('listening', (w, addr) => {
+                cluster.on('listening', (w, addr) => {{
                     listeningCount++;
-                    if (listeningCount === 2) {
+                    if (listeningCount === 2) {{
                         console.log('BOTH_LISTENING port=' + addr.port);
                         workers.forEach(x => x.disconnect());
-                    }
-                });
+                    }}
+                }});
                 let exits = 0;
-                cluster.on('exit', () => {
+                cluster.on('exit', () => {{
                     exits++;
                     if (exits === 2) process.exit(0);
-                });
+                }});
                 setTimeout(() => process.exit(99), 15000);
-            } else {
+            }} else {{
                 const srv = http.createServer((req, res) => res.end('hi'));
-                srv.on('error', (e) => {
+                srv.on('error', (e) => {{
                     console.error('LISTEN_FAIL=' + e.code + ' rc=' + (e.errno || ''));
                     process.exit(2);
-                });
-                srv.listen(34917);
-            }
+                }});
+                srv.listen({port});
+            }}
         "#,
+        ),
     );
 
     let out = Command::new(BURN)
@@ -255,9 +272,10 @@ fn cluster_two_workers_co_bind_same_port() {
         "status={:?}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}",
         out.status.code()
     );
+    let expected = format!("BOTH_LISTENING port={port}");
     assert!(
-        stdout.contains("BOTH_LISTENING port=34917"),
-        "expected both workers to bind 34917 via SO_REUSEPORT.\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+        stdout.contains(&expected),
+        "expected both workers to bind {port} via SO_REUSEPORT.\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
     );
 }
 
