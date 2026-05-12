@@ -72,11 +72,13 @@ fn memory_bomb_capped() {
         ..FuelGauge::default()
     };
     let err = c.thrust(&id, &json!(null), &limits).unwrap_err();
-    // Could surface as MemoryLimit (wasmtime ResourceLimiter),
-    // FuelExhausted (if we run out first), or WasmTrap (QuickJS
-    // allocation failure becoming an uncaught exception). All three are
-    // acceptable — what matters is that execution *terminates* with a
-    // typed error rather than growing without bound.
+    // Could surface as MemoryLimit (wasmtime ResourceLimiter at
+    // runtime growth), FuelExhausted (if we run out first), Timeout,
+    // WasmTrap (QuickJS allocation failure becoming an uncaught
+    // exception), OR Engine (wasmtime's pooling-allocator pre-instantiate
+    // rejects when the plugin's minimum memory size exceeds the
+    // FuelGauge cap). All five are acceptable — what matters is that
+    // the runaway script never gets to actually run unbounded.
     assert!(
         matches!(
             err,
@@ -84,6 +86,7 @@ fn memory_bomb_capped() {
                 | AfterburnerError::FuelExhausted
                 | AfterburnerError::Timeout
                 | AfterburnerError::WasmTrap(_)
+                | AfterburnerError::Engine(_)
         ),
         "expected termination error; got {err:?}"
     );

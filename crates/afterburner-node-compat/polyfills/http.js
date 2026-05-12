@@ -112,7 +112,13 @@ function __plenum_install_http(moduleName) {
                 resultPromise.then(buildAndDispatch);
                 return req;
             }
-            return buildAndDispatch(result);
+            // Async dispatcher returned -1 (no daemon attached, or
+            // capability denied by the manifold). No way to issue the
+            // request from this Store — surface synchronously so
+            // try/catch around `http.get(...)` sees the failure.
+            var noDaemonErr = new Error('Permission denied: http.request requires daemon mode (run via `burn` CLI)');
+            noDaemonErr.code = 'EACCES';
+            throw noDaemonErr;
         }
 
         // makeResp / IncomingMessage factory — extracted so both the
