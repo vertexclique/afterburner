@@ -12217,14 +12217,17 @@ __register_module('perf_hooks', function(module, exports, require) {
             emit: function() { return false; },
             cork: function() {}, uncork: function() {}, end: function() {},
             // Color depth + hasColors honour NO_COLOR / FORCE_COLOR /
-            // TERM the same way `tty.WriteStream.prototype` does, but
-            // first respect `isTTY` — Node returns false from
-            // `hasColors()` on a non-TTY stdout regardless of the
-            // colour environment, because chalk/signale gate on isTTY
-            // first.
+            // TERM the same way `tty.WriteStream.prototype` does. The
+            // non-TTY default is false (chalk/signale gate on isTTY),
+            // BUT `FORCE_COLOR` overrides — that's the documented
+            // escape hatch for piping into colour-aware consumers
+            // (e.g. `node script.js | less -R`).
             getColorDepth: function() { return require('tty').WriteStream.prototype.getColorDepth(); },
             hasColors: function(count) {
-                if (this.isTTY !== true) return false;
+                var env = (typeof process !== 'undefined' && process.env) || {};
+                var forced = env.FORCE_COLOR != null && env.FORCE_COLOR !== ''
+                    && env.FORCE_COLOR !== '0' && env.FORCE_COLOR !== 'false';
+                if (this.isTTY !== true && !forced) return false;
                 return require('tty').WriteStream.prototype.hasColors(count);
             },
             clearLine: function() {}, clearScreenDown: function() {}, cursorTo: function() {},
