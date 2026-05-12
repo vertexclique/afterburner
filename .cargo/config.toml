@@ -1,0 +1,11 @@
+# Workspace-wide cargo defaults.
+#
+# `RUST_TEST_THREADS = "1"` keeps cargo test single-threaded so local
+# runs mirror CI (`.github/workflows/ci.yml` invokes cargo test with
+# `--test-threads=1`). Many integration tests spawn long-lived `burn`
+# subprocesses that fan out to multiple wasmtime shards; running them
+# in parallel oversubscribes CPU and flakes timing assertions on
+# developer boxes with high core counts. Override per-invocation with
+# `RUST_TEST_THREADS=N cargo test` if you really need parallelism.
+[env]
+RUST_TEST_THREADS = "1"
