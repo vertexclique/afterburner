@@ -1573,6 +1573,27 @@ fn wrap_http(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         )
         .map_err(link_err)?;
 
+    // Non-daemon builds still need to satisfy the wasm import — the
+    // plugin .wasm is a single artifact and declares the import
+    // unconditionally. Returning -1 tells the JS shim to fall back to
+    // the synchronous `host_http_request` path, matching the
+    // "no-daemon-attached" branch above.
+    #[cfg(not(feature = "daemon"))]
+    linker
+        .func_wrap(
+            NS,
+            "host_http_request_async",
+            |_: Caller<'_, HostState>,
+             _method_ptr: i32,
+             _method_len: i32,
+             _url_ptr: i32,
+             _url_len: i32,
+             _body_ptr: i32,
+             _body_len: i32|
+             -> i64 { -1 },
+        )
+        .map_err(link_err)?;
+
     Ok(())
 }
 
