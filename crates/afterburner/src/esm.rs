@@ -22,7 +22,7 @@
 //! * `export { a } from 'Y'` / `export * from 'Y'` /
 //!   `export * as Ns from 'Y'` (re-export)
 //!
-//! Explicitly **out of scope**:
+//! Explicitly **not handled by this rewriter**:
 //!
 //! * Dynamic `import()` — needs async resolution; use
 //!   `require()` directly when you need it at runtime.

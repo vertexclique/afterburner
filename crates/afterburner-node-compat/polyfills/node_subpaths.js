@@ -815,7 +815,7 @@ __register_module('test/reporters', function(module, exports, require) {
     // event stream into. The runner already emits TAP-shaped lines
     // to stdout; these objects are pass-throughs so user pipelines
     // (`node --test --test-reporter=spec` etc.) compose without
-    // crashing. Format-conversion is a follow-up.
+    // crashing. Format-conversion lands when a real consumer needs it.
     module.exports = {
         spec: passthrough,
         tap: passthrough,

@@ -147,7 +147,7 @@ fn ts_strips_generic_parameters() {
 //
 // Non-const enums emit runtime objects. oxc's strip-only mode preserves
 // that emission (the enum object exists at runtime). const enums are
-// out of scope under isolatedModules semantics, matching what esbuild
+// not erased under isolatedModules semantics — matching what esbuild
 // / swc do.
 
 #[test]
@@ -303,9 +303,9 @@ fn syntax_error_reports_filename() {
 // where `./lib.ts` exists. This is what most TS projects do when
 // compiled via `tsc` / `esbuild` — relative imports don't carry the
 // source extension. Our B6 require resolver walks the extension
-// ladder; adding `.ts` / `.mts` / `.cts` to it is future work (listed
-// in the B8/B6 follow-ups). For now this test documents the current
-// behavior: the `.js` ladder works when a `.js` sibling exists.
+// ladder; adding `.ts` / `.mts` / `.cts` to it is future work. For
+// now this test documents the current behavior: the `.js` ladder
+// works when a `.js` sibling exists.
 
 #[test]
 fn require_js_sibling_from_ts_entry_works() {

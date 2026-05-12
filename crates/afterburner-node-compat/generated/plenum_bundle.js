@@ -2016,8 +2016,7 @@ __register_module('child_process', function(module, exports, require) {
     // child inline and dispatch events / callbacks on a microtask so
     // the canonical Node patterns (`.on('exit', …)`, `exec(cmd, cb)`)
     // work as expected. Real concurrent subprocess execution would
-    // need a Tokio-backed coordinator like the outbound HTTP path
-    // — that's a structural follow-up.
+    // need a Tokio-backed coordinator like the outbound HTTP path.
     var EventEmitter = require('events');
 
     function _bufferOf(text) {
@@ -7411,8 +7410,8 @@ function __plenum_install_http(moduleName) {
             };
 
             // Symbol.asyncDispose (Node 20+) — `await using server =
-            // http.createServer(...)` calls this when the binding goes
-            // out of scope. Wraps `close()` in a Promise.
+            // http.createServer(...)` calls this when the binding
+            // leaves the enclosing block. Wraps `close()` in a Promise.
             server[Symbol.asyncDispose] = function() {
                 return new Promise(function(resolve) {
                     server.close(function() { resolve(); });
@@ -11009,7 +11008,7 @@ __register_module('test/reporters', function(module, exports, require) {
     // event stream into. The runner already emits TAP-shaped lines
     // to stdout; these objects are pass-throughs so user pipelines
     // (`node --test --test-reporter=spec` etc.) compose without
-    // crashing. Format-conversion is a follow-up.
+    // crashing. Format-conversion lands when a real consumer needs it.
     module.exports = {
         spec: passthrough,
         tap: passthrough,
@@ -11225,7 +11224,8 @@ __register_module('os', function(module, exports, require) {
 
 // ---- path.js ----
 // path — POSIX subset. Good enough for the overwhelming majority of
-// server-side and ETL scripts; win32 path handling is out of scope.
+// server-side and ETL scripts; the sandbox uses posix paths so win32
+// semantics aren't part of this surface.
 
 __register_module('path', function(module, exports, require) {
     var SEP = '/';
@@ -16054,9 +16054,9 @@ __register_module('tls', function(module, exports, require) {
     /// Return the leaf peer certificate, shaped close enough to Node
     /// for the common assertions:
     ///   { raw: Buffer, fingerprint256: '...' }
-    /// Subject/issuer parsing requires full ASN.1 — out of scope for
-    /// the minimum subset; callers needing those fields can parse
-    /// `raw` themselves.
+    /// Subject/issuer parsing requires full ASN.1 decoding; the
+    /// minimum subset doesn't include it — callers needing those
+    /// fields can parse `raw` themselves.
     TLSSocket.prototype.getPeerCertificate = function(detailed) {
         var chain = this._peerCertChainB64 || [];
         if (chain.length === 0) return {};
@@ -16933,7 +16933,7 @@ __register_module('util', function(module, exports, require) {
 
     exports.deprecate = function(fn, _msg) { return fn; };
 
-    // util.types — deferred to the full `util/types` module so the
+    // util.types delegates to the full `util/types` module so the
     // surface stays in one place and `require('util').types` returns
     // the same object as `require('util/types')`. The ALL ~40
     // type-test methods (`isFloat64Array`, `isAnyArrayBuffer`, etc.)

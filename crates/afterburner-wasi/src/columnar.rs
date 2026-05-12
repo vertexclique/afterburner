@@ -154,9 +154,9 @@ impl ColumnDtype {
     }
 
     /// True if the dtype is implemented in the current Afterburner
-    /// version. Decimal128 / Uuid / Interval (16-byte fixed) remain
-    /// Phase-2 deferred; everything else (numerics + temporal +
-    /// Utf8 / Bytea / Jsonb) ships from Phase 1.5 onward.
+    /// version. Decimal128 / Uuid / Interval (16-byte fixed) are
+    /// reserved for a later phase; everything else (numerics +
+    /// temporal + Utf8 / Bytea / Jsonb) ships from Phase 1.5 onward.
     pub fn is_phase1_supported(self) -> bool {
         !matches!(
             self,
@@ -874,13 +874,13 @@ mod tests {
         ] {
             assert!(d.is_phase1_supported(), "{:?} should be supported", d);
         }
-        // 16-byte fixed reserved-but-deferred for Phase 2.
+        // 16-byte fixed dtypes are reserved for a later phase.
         for d in [
             ColumnDtype::Decimal128,
             ColumnDtype::Uuid,
             ColumnDtype::Interval,
         ] {
-            assert!(!d.is_phase1_supported(), "{:?} should be deferred", d);
+            assert!(!d.is_phase1_supported(), "{:?} should be unsupported", d);
         }
     }
 

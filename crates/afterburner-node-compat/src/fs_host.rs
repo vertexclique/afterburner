@@ -222,7 +222,7 @@ fn cp_recursive_resolved(src: &Path, dst: &Path, force: bool) -> std::io::Result
 
 /// Directory entry returned by [`opendir_sync`] / `readdirSync({withFileTypes:
 /// true})`. Carries enough info for `Dirent` to expose `isFile`/`isDirectory`/
-/// `isSymbolicLink` without a follow-up stat per entry.
+/// `isSymbolicLink` without an extra per-entry stat call.
 #[derive(Debug, Clone)]
 pub struct DirEntry {
     pub name: String,

@@ -14,7 +14,7 @@
 //! * Chained pipelines
 //! * `toBuffer` / `toFile` / `metadata` terminal operations
 //! * Error paths: invalid input, unsupported op params, missing
-//!   format, file-write failures, deferred-method errors
+//!   format, file-write failures, unsupported-method errors
 
 #![cfg(feature = "shadow-sharp")]
 

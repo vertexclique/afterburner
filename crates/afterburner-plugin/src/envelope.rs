@@ -151,8 +151,8 @@ pub fn wrap_user_source_with_input_global(user: &str) -> String {
 /// `__AB_GET_INPUT__` + `JSON.parse` / `JSON.stringify` to stdout.
 ///
 /// Synchronous in Phase 1 — the dispatcher throws a clean error if
-/// the user UDF returns a Promise. Async columnar UDFs are deferred
-/// to Phase 1.5+. The vast majority of analytical columnar UDFs are
+/// the user UDF returns a Promise. Async columnar UDFs land in
+/// Phase 1.5+. The vast majority of analytical columnar UDFs are
 /// pure compute and sync, so this is the right default.
 pub fn wrap_user_source_columnar(user: &str) -> String {
     let user = normalize_leading_hashbang(user);

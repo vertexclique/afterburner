@@ -697,7 +697,7 @@ mod tests {
         let r = s.exec(id, "NOT VALID SQL");
         assert!(matches!(r, Err(AfterburnerError::Host(_))));
         // Connection still alive after an error — verify by running
-        // a follow-up command that should succeed.
+        // a subsequent command that should succeed.
         s.exec(id, "CREATE TABLE t (n INTEGER)").expect("recover");
         s.close(id).expect("close");
     }

@@ -14,8 +14,8 @@
 //! with a generous floor: `≥ 800 thrusts/sec per worker`. Beating that
 //! consistently means the scheduler stack (workers + steal +
 //! admission) hasn't regressed; missing it means something below the
-//! scheduler got worse. The 100 K/sec ambition lives as a follow-up
-//! task that lands with the pooling allocator work.
+//! scheduler got worse. The 100 K/sec ambition lands together with
+//! the pooling allocator work.
 //!
 //! ### Tiers
 //!

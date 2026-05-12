@@ -1,5 +1,6 @@
 // path — POSIX subset. Good enough for the overwhelming majority of
-// server-side and ETL scripts; win32 path handling is out of scope.
+// server-side and ETL scripts; the sandbox uses posix paths so win32
+// semantics aren't part of this surface.
 
 __register_module('path', function(module, exports, require) {
     var SEP = '/';

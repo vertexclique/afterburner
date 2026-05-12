@@ -22,14 +22,13 @@
 //!   module asks for them, using `wasmtime-wasi`'s preview1 shim
 //!   (no host filesystem access — the WASI ctx is sealed).
 //!
-//! ## Out of scope for v1
+//! ## Not part of v1
 //!
 //! * **User-defined JS imports.** Modules that import functions
 //!   from arbitrary JS namespaces (e.g. emscripten's `env.*`) won't
 //!   instantiate — bridging JS callbacks back through wasmtime is
-//!   non-trivial and lands in a follow-up. v1 surfaces a clear
-//!   `import not satisfied: <name>` error so callers know which
-//!   piece is missing.
+//!   non-trivial. v1 surfaces a clear `import not satisfied: <name>`
+//!   error so callers know which piece is missing.
 //! * **Tables / Globals.** Polyfill stubs them; not exposed yet.
 //! * **`compileStreaming` / `instantiateStreaming`.** No `Response`
 //!   in burn (no DOM); callers fetch bytes manually first.

@@ -147,9 +147,8 @@ mod watch {
     /// for an interactive workflow without taking a host-watcher
     /// dependency. Running the script is synchronous here — daemon
     /// mode exits naturally when listeners close, and we re-loop.
-    /// Tracking transitive `require()` dependencies is a follow-up;
-    /// today we re-run on entry-script change only, which matches
-    /// Node's pre-22 default.
+    /// We re-run on entry-script change only, matching Node's pre-22
+    /// default; transitive `require()` tracking can land later.
     pub(super) fn run_with_watch(cli: &Cli, path: &Path, user_args: &[String]) -> Result<()> {
         let mut last_mtime = mtime_of(path);
         // Fire the script once immediately.

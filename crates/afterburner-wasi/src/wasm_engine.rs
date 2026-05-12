@@ -1437,10 +1437,11 @@ mod tests {
 
     #[test]
     fn thrust_columnar_phase1_unsupported_dtype_clean_error() {
-        // Decimal128 is reserved-but-deferred for Phase 2; passing it
-        // must surface a clean Engine error from `encode_batch`, not
-        // a guest-side trap. Catches a regression where the
-        // unsupported-dtype guard is bypassed.
+        // Decimal128 is reserved for a later phase; the current
+        // runtime rejects it at the boundary. Passing it must surface
+        // a clean Engine error from `encode_batch`, not a guest-side
+        // trap. Catches a regression where the unsupported-dtype
+        // guard is bypassed.
         use crate::columnar::{ColumnDtype, ColumnRef, ColumnarBatch};
         let c = make_combustor();
         let id = c

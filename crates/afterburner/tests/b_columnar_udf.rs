@@ -5,8 +5,8 @@
 //! `encode_batch` → `BurnCache::execute_columnar_bytes` → wasm host
 //! import → JS polyfill TypedArray view → user UDF → reply blob →
 //! `decode_batch` → `ColumnarOutput`. Ten cases covering numeric
-//! dtypes, edge sizes, lifecycle, and the Phase-1 reserved-but-deferred
-//! dtypes.
+//! dtypes, edge sizes, lifecycle, and the Phase-1 reserved-but-
+//! unsupported dtypes.
 //!
 //! Sandbox / capability-gate / fresh-per-call invariants are verified
 //! by the existing `b_*` integration suite running alongside; these

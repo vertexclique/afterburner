@@ -50,8 +50,8 @@
 //!   for warning. Custom CA PEM bytes (`ca:`) are honored.
 //! * **Server** — the polyfill passes `cert` and `key` PEM strings;
 //!   we parse them with `rustls-pemfile` and build a single-cert
-//!   `ServerConfig`. SNI / multi-cert routing is out of scope for
-//!   the minimum viable subset.
+//!   `ServerConfig`. SNI / multi-cert routing isn't part of the
+//!   minimum viable subset.
 
 use afterburner_core::{Manifold, NetAccess};
 use kovan_channel::flavors::bounded::{

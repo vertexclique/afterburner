@@ -129,12 +129,10 @@ impl DaemonHttpOutbound {
         let to = timeout.unwrap_or(self.default_timeout);
 
         // Spawn a blocking task — the underlying http_host::request is
-        // a synchronous reqwest call (we don't have an async fetcher
-        // ready yet). Tokio's `spawn_blocking` dispatches to its
-        // dedicated blocking pool so the reactor doesn't stall.
-        // Using spawn_blocking + a sync impl is the right pragmatic
-        // shape: a follow-up can swap the inner call to `reqwest::get`
-        // (fully async) without changing the channel or the JS side.
+        // a synchronous reqwest call. Tokio's `spawn_blocking`
+        // dispatches to its dedicated blocking pool so the reactor
+        // doesn't stall. Swapping the inner call for an async
+        // `reqwest::get` would not change the channel or the JS side.
         self.runtime.spawn(async move {
             let event = match tokio::task::spawn_blocking(move || {
                 http_host::request(

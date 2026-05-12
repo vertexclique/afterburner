@@ -453,8 +453,8 @@ function __plenum_install_http(moduleName) {
             };
 
             // Symbol.asyncDispose (Node 20+) — `await using server =
-            // http.createServer(...)` calls this when the binding goes
-            // out of scope. Wraps `close()` in a Promise.
+            // http.createServer(...)` calls this when the binding
+            // leaves the enclosing block. Wraps `close()` in a Promise.
             server[Symbol.asyncDispose] = function() {
                 return new Promise(function(resolve) {
                     server.close(function() { resolve(); });

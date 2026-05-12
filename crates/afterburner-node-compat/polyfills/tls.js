@@ -342,9 +342,9 @@ __register_module('tls', function(module, exports, require) {
     /// Return the leaf peer certificate, shaped close enough to Node
     /// for the common assertions:
     ///   { raw: Buffer, fingerprint256: '...' }
-    /// Subject/issuer parsing requires full ASN.1 — out of scope for
-    /// the minimum subset; callers needing those fields can parse
-    /// `raw` themselves.
+    /// Subject/issuer parsing requires full ASN.1 decoding; the
+    /// minimum subset doesn't include it — callers needing those
+    /// fields can parse `raw` themselves.
     TLSSocket.prototype.getPeerCertificate = function(detailed) {
         var chain = this._peerCertChainB64 || [];
         if (chain.length === 0) return {};

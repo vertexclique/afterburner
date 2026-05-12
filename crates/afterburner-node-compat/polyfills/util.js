@@ -133,7 +133,7 @@ __register_module('util', function(module, exports, require) {
 
     exports.deprecate = function(fn, _msg) { return fn; };
 
-    // util.types — deferred to the full `util/types` module so the
+    // util.types delegates to the full `util/types` module so the
     // surface stays in one place and `require('util').types` returns
     // the same object as `require('util/types')`. The ALL ~40
     // type-test methods (`isFloat64Array`, `isAnyArrayBuffer`, etc.)
