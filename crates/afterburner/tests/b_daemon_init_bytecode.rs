@@ -290,7 +290,11 @@ fn precompiled_daemon_console_log_reaches_stdout() {
         .stderr(Stdio::piped())
         .output()
         .expect("spawn burn");
-    assert!(out.status.success(), "burn exited non-zero: {:?}", out.status);
+    assert!(
+        out.status.success(),
+        "burn exited non-zero: {:?}",
+        out.status
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("startup-marker"),

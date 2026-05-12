@@ -303,18 +303,20 @@ fn shard_pool_sandbox_denies_on_every_shard() {
         }}).listen({port});
         "#
     );
-    let mut child = ChildGuard::new(Command::new(BURN)
-        .env("BURN_QUIET", "1")
-        .env("BURN_SHARDS", "2")
-        .arg("--sandbox")
-        .arg("--allow-net")
-        .arg("*")
-        .arg("-e")
-        .arg(&src)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn burn"));
+    let mut child = ChildGuard::new(
+        Command::new(BURN)
+            .env("BURN_QUIET", "1")
+            .env("BURN_SHARDS", "2")
+            .arg("--sandbox")
+            .arg("--allow-net")
+            .arg("*")
+            .arg("-e")
+            .arg(&src)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn burn"),
+    );
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
     // Hit every shard (32 requests across N shards).
@@ -345,21 +347,23 @@ fn shard_pool_allow_env_visible_on_every_shard() {
         }}).listen({port});
         "#
     );
-    let mut child = ChildGuard::new(Command::new(BURN)
-        .env("BURN_QUIET", "1")
-        .env("BURN_SHARDS", "2")
-        .env("SHARD_TEST_VAR", "shared-secret")
-        .arg("--sandbox")
-        .arg("--allow-net")
-        .arg("*")
-        .arg("--allow-env")
-        .arg("SHARD_TEST_VAR")
-        .arg("-e")
-        .arg(&src)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn burn"));
+    let mut child = ChildGuard::new(
+        Command::new(BURN)
+            .env("BURN_QUIET", "1")
+            .env("BURN_SHARDS", "2")
+            .env("SHARD_TEST_VAR", "shared-secret")
+            .arg("--sandbox")
+            .arg("--allow-net")
+            .arg("*")
+            .arg("--allow-env")
+            .arg("SHARD_TEST_VAR")
+            .arg("-e")
+            .arg(&src)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn burn"),
+    );
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
     // Check enough requests that we land on every shard.
@@ -546,17 +550,19 @@ fn shard_pool_burn_shards_one_forces_single_shard() {
         }}).listen({port});
         "#
     );
-    let mut child = ChildGuard::new(Command::new(BURN)
-        .env("BURN_QUIET", "1")
-        .env("BURN_SHARDS", "2")
-        .env("BURN_SHARDS", "1")
-        .arg("-A")
-        .arg("-e")
-        .arg(&src)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn burn"));
+    let mut child = ChildGuard::new(
+        Command::new(BURN)
+            .env("BURN_QUIET", "1")
+            .env("BURN_SHARDS", "2")
+            .env("BURN_SHARDS", "1")
+            .arg("-A")
+            .arg("-e")
+            .arg(&src)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn burn"),
+    );
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
     // 5 sequential requests must produce 1, 2, 3, 4, 5 — strict
@@ -600,17 +606,19 @@ fn shard_pool_burn_shards_four_spawns_four() {
         }}).listen({port});
         "#
     );
-    let mut child = ChildGuard::new(Command::new(BURN)
-        .env("BURN_QUIET", "1")
-        .env("BURN_SHARDS", "2")
-        .env("BURN_SHARDS", "4")
-        .arg("-A")
-        .arg("-e")
-        .arg(&src)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn burn"));
+    let mut child = ChildGuard::new(
+        Command::new(BURN)
+            .env("BURN_QUIET", "1")
+            .env("BURN_SHARDS", "2")
+            .env("BURN_SHARDS", "4")
+            .arg("-A")
+            .arg("-e")
+            .arg(&src)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn burn"),
+    );
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
     // First 4 sequential requests RR across 4 shards → all "1".
@@ -656,16 +664,18 @@ fn shard_pool_burn_shards_zero_falls_back() {
         http.createServer((_req, res) => res.end('ok')).listen({port});
         "#
     );
-    let mut child = ChildGuard::new(Command::new(BURN)
-        // Don't set BURN_QUIET — we want to capture the warning.
-        .env("BURN_SHARDS", "0")
-        .arg("-A")
-        .arg("-e")
-        .arg(&src)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn burn"));
+    let mut child = ChildGuard::new(
+        Command::new(BURN)
+            // Don't set BURN_QUIET — we want to capture the warning.
+            .env("BURN_SHARDS", "0")
+            .arg("-A")
+            .arg("-e")
+            .arg(&src)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn burn"),
+    );
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
     // The daemon serves normally despite the bad env var.
@@ -705,17 +715,19 @@ fn shard_pool_burn_shards_garbage_falls_back() {
         http.createServer((_req, res) => res.end('ok')).listen({port});
         "#
     );
-    let mut child = ChildGuard::new(Command::new(BURN)
-        .env("BURN_QUIET", "1")
-        .env("BURN_SHARDS", "2")
-        .env("BURN_SHARDS", "not-a-number")
-        .arg("-A")
-        .arg("-e")
-        .arg(&src)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn burn"));
+    let mut child = ChildGuard::new(
+        Command::new(BURN)
+            .env("BURN_QUIET", "1")
+            .env("BURN_SHARDS", "2")
+            .env("BURN_SHARDS", "not-a-number")
+            .arg("-A")
+            .arg("-e")
+            .arg(&src)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn burn"),
+    );
     assert!(wait_for_listener(port, Duration::from_secs(15)));
 
     let resp = http_get(port, "/");
@@ -743,17 +755,19 @@ fn shard_pool_burn_shards_overlimit_clamped() {
         http.createServer((_req, res) => res.end('ok')).listen({port});
         "#
     );
-    let mut child = ChildGuard::new(Command::new(BURN)
-        .env("BURN_QUIET", "1")
-        .env("BURN_SHARDS", "2")
-        .env("BURN_SHARDS", "999")
-        .arg("-A")
-        .arg("-e")
-        .arg(&src)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn burn"));
+    let mut child = ChildGuard::new(
+        Command::new(BURN)
+            .env("BURN_QUIET", "1")
+            .env("BURN_SHARDS", "2")
+            .env("BURN_SHARDS", "999")
+            .arg("-A")
+            .arg("-e")
+            .arg(&src)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn burn"),
+    );
     assert!(
         wait_for_listener(port, Duration::from_secs(30)),
         "daemon must start even at clamped-max shard count"
