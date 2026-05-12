@@ -473,29 +473,38 @@ fn instantiate_streaming_with_response_resolves() {
     // the bytes via the same path as `instantiate(buffer)`, and
     // resolves to `{ module, instance }`. Earlier rounds rejected
     // with "streaming not supported"; the surface is wired now.
-    let src = r#"
-        // Minimal 8-byte wasm module: magic + version, no sections.
-        const bytes = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
-        const resp = new Response(bytes, { headers: { 'content-type': 'application/wasm' } });
-        WebAssembly.instantiateStreaming(Promise.resolve(resp), {})
-            .then((result) => {
-                if (
-                    result &&
-                    result.module instanceof WebAssembly.Module &&
-                    result.instance instanceof WebAssembly.Instance
-                ) {
-                    console.log('STREAMING_OK');
-                    process.exit(0);
-                }
-                console.error('wrong result shape:', Object.keys(result || {}).join(','));
-                process.exit(3);
-            })
-            .catch((e) => {
-                console.error('rejected:', e && e.message); process.exit(4);
-            });
-        setTimeout(() => process.exit(99), 30000);
-    "#;
-    assert_ok(&run_inline(src), "STREAMING_OK");
+    //
+    // We feed it a real (`add`-exporting) module so the host-side
+    // wasm parser is happy — wasmtime rejects the bare 8-byte magic-
+    // and-version module that the WAT/wasm spec calls "minimum
+    // valid". Same `add_wasm()` helper the other tests use.
+    let bytes_js = js_byte_array(&add_wasm());
+    let src = format!(
+        r#"
+            const bytes = new Uint8Array({bytes_js});
+            const resp = new Response(bytes, {{ headers: {{ 'content-type': 'application/wasm' }} }});
+            WebAssembly.instantiateStreaming(Promise.resolve(resp), {{}})
+                .then((result) => {{
+                    if (
+                        result &&
+                        result.module instanceof WebAssembly.Module &&
+                        result.instance instanceof WebAssembly.Instance &&
+                        typeof result.instance.exports.add === 'function' &&
+                        result.instance.exports.add(2, 3) === 5
+                    ) {{
+                        console.log('STREAMING_OK');
+                        process.exit(0);
+                    }}
+                    console.error('wrong result shape:', Object.keys(result || {{}}).join(','));
+                    process.exit(3);
+                }})
+                .catch((e) => {{
+                    console.error('rejected:', e && e.message); process.exit(4);
+                }});
+            setTimeout(() => process.exit(99), 30000);
+        "#
+    );
+    assert_ok(&run_inline(&src), "STREAMING_OK");
 }
 
 #[test]

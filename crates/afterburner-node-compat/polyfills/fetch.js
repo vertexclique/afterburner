@@ -163,10 +163,29 @@
 
     function Response(body, init) {
         init = init || {};
-        // Body storage: prefer `bodyB64` (authoritative bytes) if
-        // provided, fall back to `body` string (lossy-utf8 text view).
-        this._bodyText = body != null ? String(body) : '';
+        // Body storage: prefer `_bodyB64` (authoritative raw bytes)
+        // for any binary input, fall back to `_bodyText` for strings.
+        // `String(uint8array)` yields `"0,97,115,…"` and corrupts
+        // downstream binary consumers (e.g. `WebAssembly.instantiateStreaming(new Response(bytes))`),
+        // so detect ArrayBuffer / TypedArray / Buffer up-front and
+        // base64-encode the raw bytes.
+        this._bodyText = '';
         this._bodyB64 = init.bodyB64 || null;
+        if (body != null && this._bodyB64 === null) {
+            var Buf = globalThis.Buffer || require('buffer').Buffer;
+            if (body instanceof ArrayBuffer) {
+                this._bodyB64 = Buf.from(new Uint8Array(body)).toString('base64');
+            } else if (ArrayBuffer.isView(body)) {
+                // Uint8Array / DataView / other typed arrays — copy the
+                // underlying bytes (respecting byteOffset / length).
+                var u8 = new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+                this._bodyB64 = Buf.from(u8).toString('base64');
+            } else if (Buf.isBuffer && Buf.isBuffer(body)) {
+                this._bodyB64 = body.toString('base64');
+            } else {
+                this._bodyText = String(body);
+            }
+        }
         this.status = init.status !== undefined ? init.status : 200;
         this.statusText = init.statusText || '';
         this.ok = this.status >= 200 && this.status < 300;
