@@ -37,8 +37,16 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
         Function::new(
             ctx.clone(),
             |ctx: Ctx<'_>, path: String, encoding: Option<String>| {
-                let bytes = active_manifold::with(|m| fs_host::read_file_sync(&path, m))
-                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                // Match the WASM plugin's error contract: on host
+                // error, return a `__HOST_ERR__:<msg>` string so the
+                // polyfill's `checkHostError` can rethrow with the
+                // right `e.code` (EACCES / ENOENT). Throwing a native
+                // QuickJS Exception here would bypass that mapping
+                // and leave `e.code` undefined.
+                let bytes = match active_manifold::with(|m| fs_host::read_file_sync(&path, m)) {
+                    Ok(b) => b,
+                    Err(e) => return Ok(format!("__HOST_ERR__:{e}")),
+                };
                 match encoding
                     .as_deref()
                     .unwrap_or("utf8")

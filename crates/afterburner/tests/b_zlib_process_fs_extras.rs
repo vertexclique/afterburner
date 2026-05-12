@@ -70,17 +70,25 @@ fn zlib_crc32_chains_with_seed() {
 }
 
 #[test]
-fn zlib_brotli_compress_async_returns_error() {
+fn zlib_brotli_compress_async_round_trips() {
+    // `zlib.brotliCompress` + `brotliDecompress` are real now —
+    // earlier rounds returned `ERR_BROTLI_INVALID_PARAM` as a stub.
+    // Pin the working contract: compressed bytes decompress to input.
     let out = run_inline(
         r#"
         const zlib = require('zlib');
-        zlib.brotliCompress('hello', (err, _out) => {
-            if (err && err.code === 'ERR_BROTLI_INVALID_PARAM') console.log('BR-ERR-OK');
-            else console.log('FAIL', err && err.code);
+        zlib.brotliCompress('hello world', (err, compressed) => {
+            if (err) { console.log('FAIL compress:', err.message); return; }
+            zlib.brotliDecompress(compressed, (e2, plain) => {
+                if (e2) { console.log('FAIL decompress:', e2.message); return; }
+                const s = Buffer.isBuffer(plain) ? plain.toString('utf8') : String(plain);
+                if (s === 'hello world') console.log('BR-OK');
+                else console.log('FAIL roundtrip:', JSON.stringify(s));
+            });
         });
         "#,
     );
-    assert_marker(&out, "BR-ERR-OK");
+    assert_marker(&out, "BR-OK");
 }
 
 #[test]
