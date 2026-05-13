@@ -18,13 +18,16 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
-  # Keep network-flaky DNS tests bounded.
-  RUST_TEST_THREADS: 4
+  # `--test-threads=1` is the CI contract (see .cargo/config.toml).
+  # Many integration tests spawn long-lived `burn` subprocesses; running
+  # them in parallel oversubscribes CPU and flakes timing assertions.
+  RUST_TEST_THREADS: 1
 
 jobs:
   fmt:
     name: cargo fmt
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -36,6 +39,7 @@ jobs:
   clippy:
     name: cargo clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -53,46 +57,287 @@ jobs:
       - name: clippy (afterburner with release-cli features)
         run: cargo clippy -p afterburner --all-targets --features release-cli -- -D warnings
 
-  test:
-    name: cargo test (x86_64-linux)
-    # Tests run on a single target — x86_64 Linux. The runtime is
-    # platform-portable but the test surface gets long, and CI minutes
-    # add up; macOS / Windows test coverage is paid for at release
-    # time by the multi-target build matrix in release.yml. If a
-    # platform-specific bug reproduces, add a one-off job here.
+  # ---------------------------------------------------------------
+  # Workspace-wide library tests (no `bin` feature).
+  # Exercises the library API surface across every crate — the path
+  # downstream `cargo install afterburner` users compile against.
+  # ---------------------------------------------------------------
+  test-lib-workspace:
+    name: test / lib-workspace
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: wasm32-wasip1
           rustflags: ''
-      - name: Install libclang
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+      - run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
       - uses: Swatinem/rust-cache@v2
-      - name: cargo test (default features, library-only)
-        # `bin` is NOT in default features, so any test using
-        # `env!("CARGO_BIN_EXE_burn")` is `#![cfg(feature = "bin")]`-
-        # gated and skipped here. Default-features pass exists to
-        # catch breakage in the library API surface (the path that
-        # downstream `cargo install afterburner` users compile).
+        with:
+          key: lib-workspace
+      - name: cargo test (workspace, default features)
         run: cargo test --workspace --no-fail-fast -- --test-threads=1
-      - name: cargo test (bin + all-shadows + ts)
-        # Full-feature pass: includes the integration tests that spawn
-        # the `burn` CLI as a subprocess (b7_*, b10_*, b_wasm_loader,
-        # b_node_compat_round2, b_shadow_*, b8/b9 ts+esm pipelines).
-        run: cargo test -p afterburner --features "bin all-shadows ts" --no-fail-fast -- --test-threads=1
+
+  # ---------------------------------------------------------------
+  # CLI architectural matrix.
+  # Each tier is one independent layer of the `burn` runtime; tests
+  # within a tier share polyfills + host code, so a tier-scoped
+  # failure points to one subsystem instead of being lost in a
+  # 6-hour serial monolith.
+  # ---------------------------------------------------------------
+  test-cli:
+    name: test / ${{ matrix.tier }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # CLI scaffolding: argv/env, mode dispatch, shebang, callsites,
+          # cli-vs-library parity. Smallest subprocess cost per test.
+          - tier: cli-entry
+            features: 'bin'
+            tests: >-
+              --test b0_check
+              --test b0_cli_vs_library
+              --test b0_process_argv_env
+              --test b0_script_mode
+              --test b_cli_parity
+              --test b_shebang
+              --test b_callsite_api
+              --test b_module_internals
+              --test b_process_getters
+              --test b_process_stdio
+              --test b_process_report
+            timeout: 25
+
+          # Module resolution + TS strip + ESM pipeline. Only tier that
+          # needs `ts` (oxc adds ~3 MiB to the binary so isolate the cost).
+          - tier: cli-modules-ts
+            features: 'bin ts'
+            tests: >-
+              --test b1_require_resolution
+              --test b6_require_resolution
+              --test b8_typescript
+              --test b9_esm
+              --test b_sourcemaps
+            timeout: 25
+
+          # Daemon lifecycle + multi-shard pool — the historically
+          # flakiest tier (b_shard_pool's wait_for_listening cluster).
+          # 45-min timeout absorbs cold-start variance.
+          - tier: cli-daemon-core
+            features: 'bin'
+            tests: >-
+              --test b2_http_server
+              --test b2b_multiplex
+              --test b3_daemon_lifecycle
+              --test b_shard_pool
+              --test b_cluster_multiproc
+              --test b_daemon_init_bytecode
+              --test b4_passthrough
+              --test b5_shim
+            timeout: 45
+
+          # Full network protocol stack. `http3` brings in QUIC; only
+          # this tier needs it (every other tier ignores quinn/h3).
+          - tier: cli-network
+            features: 'bin http3'
+            tests: >-
+              --test b7_dgram
+              --test b7_dns
+              --test b7_net
+              --test b7_net_security
+              --test b7_tls
+              --test b7_tls_security
+              --test b_http2_client
+              --test b_http2_server
+              --test b_http3_quic
+              --test b_websocket
+              --test b_eventsource
+              --test b_tls_check_server_identity
+              --test b_tls_defaults
+              --test b_async_outbound_http
+              --test b_request_fields
+              --test b_dns_resolveany_execfilesync
+              --test b_http_header_validators
+              --test b_fetch_extras
+            timeout: 35
+
+          # Node compat I/O layer: fs / streams / buffer / events / zlib.
+          # Shared fs_host + stream polyfills — failures localize here.
+          - tier: cli-node-io
+            features: 'bin'
+            tests: >-
+              --test b_fs_classes
+              --test b_fs_promises_expansion
+              --test b_stream_dual_shape
+              --test b_stream_static_probes
+              --test b_buffer_extras
+              --test b_buffer_isutf8_test_mock
+              --test b_events_add_abort_listener
+              --test b_events_buffer_stream_extras
+              --test b_zlib_brotli
+              --test b_zlib_process_fs_extras
+              --test b_zlib_streaming
+              --test b_uint8array_codec
+              --test b_filereader_sqlite_constants
+            timeout: 35
+
+          # Node compat runtime: globals / util / intl / iterators /
+          # web globals / performance / process-level.
+          - tier: cli-node-runtime
+            features: 'bin'
+            tests: >-
+              --test b_node26_extras
+              --test b_node26_surface
+              --test b_node_compat_round2
+              --test b_node_compat_round3
+              --test b_node_surface_round4
+              --test b_node_test_runner
+              --test b_intl_and_clone
+              --test b_iterator_helpers
+              --test b_async_iterator_global
+              --test b_scheduler_dispose_stack
+              --test b_symbol_dispose
+              --test b_blob_url
+              --test b_random_bytes_inspect_custom
+              --test b_json_rawjson_readline
+              --test b_util_system_errors_callsites_diff
+              --test b_request_response_bytes_crypto_globals
+              --test b_web_globals
+              --test b_web_streams
+              --test b_performance_observer
+              --test b_performance_user_timing
+              --test b_os_dirs
+              --test b_os_timers_extras
+              --test b_v8_serialize_compat
+              --test b_abort_signal_any
+              --test b_atomics
+              --test b_async_hooks_real
+              --test b_async_hooks_await
+              --test b_vm_module_records
+              --test b_vm_measure_worker_untransferable
+            timeout: 40
+
+          # WASM loader + node:vm + cross-process atomics.
+          # Shares the wasm-loader host code; failures here implicate
+          # the wasmtime layer (rare since plugin is pre-Wizered).
+          - tier: cli-wasm-vm
+            features: 'bin'
+            tests: >-
+              --test b_wasm_loader
+              --test b_wasm_memory_grow
+              --test b_wasm_extras
+              --test b_atomics_wait_async
+              --test b_atomics_wait_xprocess
+              --test b_vm_module_cycles
+            timeout: 30
+
+          # webcrypto + subtle. Independent polyfill surface — isolated
+          # so `aes` / `ring` / `sha2` bumps validate against just this
+          # tier.
+          - tier: cli-crypto
+            features: 'bin'
+            tests: >-
+              --test b_crypto_extras
+              --test b_crypto_extras_round5
+              --test b_crypto_random_extras
+              --test b_crypto_stream_extras
+              --test b_subtle_crypto
+              --test b_subtle_full
+            timeout: 25
+
+          # child_process spawn + worker_threads + sandbox boundary.
+          # Tests here spawn nested subprocesses (subprocess-of-
+          # subprocess), so isolate the resource pressure.
+          - tier: cli-process-child
+            features: 'bin'
+            tests: >-
+              --test b_child_process_async
+              --test b10_security
+              --test b10_worker_threads
+            timeout: 25
+
+          # CDP / inspector / debugger handshake. The slowest cold-
+          # start (debugger negotiation); isolated so flakes here
+          # don't tax shared tiers.
+          - tier: cli-inspector
+            features: 'bin'
+            tests: >-
+              --test b_inspector_cdp
+              --test b_debugger_breakpoint
+            timeout: 25
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-wasip1
+          rustflags: ''
+      - run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.tier }}
+      - name: cargo test (${{ matrix.tier }})
+        run: |
+          cargo test -p afterburner \
+            --features "${{ matrix.features }}" \
+            ${{ matrix.tests }} \
+            --no-fail-fast -- --test-threads=1
+
+  # ---------------------------------------------------------------
+  # Shadow integration matrix.
+  # Each shadow pulls its own native dep (rusqlite / image+
+  # fast_image_resize / bcrypt / argon2 / jsonwebtoken). Fully
+  # independent build caches keep dependabot bumps from cascading.
+  # ---------------------------------------------------------------
+  test-cli-shadows:
+    name: test / cli-shadows-${{ matrix.shadow }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shadow: bcrypt
+            timeout: 20
+          - shadow: argon2
+            timeout: 20
+          - shadow: jsonwebtoken
+            timeout: 20
+          - shadow: sqlite3
+            timeout: 45
+          - shadow: sharp
+            timeout: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-wasip1
+          rustflags: ''
+      - run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: shadow-${{ matrix.shadow }}
+      - name: cargo test (shadow-${{ matrix.shadow }})
+        run: |
+          cargo test -p afterburner \
+            --features "bin ts shadow-${{ matrix.shadow }}" \
+            --test b_shadow_${{ matrix.shadow }} \
+            --no-fail-fast -- --test-threads=1
 
   doc:
     name: cargo doc
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ''
-      - name: Install libclang
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+      - run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
       - uses: Swatinem/rust-cache@v2
       - name: cargo doc (no deps)
         # Don't gate CI on broken intra-doc links — they're warnings
@@ -103,14 +348,14 @@ jobs:
   plugin-rebuild:
     name: plugin .wasm reproducible build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: wasm32-wasip1
           rustflags: ''
-      - name: Install libclang
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+      - run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
       - name: Install Binaryen (wasm-opt)
         # 129 ships the `--llvm-memory-copy-fill-lowering` and
         # `--llvm-nontrapping-fptoint-lowering` flags that the plugin
