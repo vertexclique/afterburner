@@ -142,7 +142,7 @@ rusqlite = { version = "0.32", default-features = false, features = ["bundled"] 
 image = { version = "0.25", default-features = false, features = [
     "png", "jpeg", "webp", "gif", "bmp",
 ] }
-fast_image_resize = { version = "5", features = ["image"] }
+fast_image_resize = { version = "6", features = ["image"] }
 
 # B7 dns — `hickory-resolver` (formerly trust-dns-resolver) is the
 # canonical pure-Rust async DNS resolver. We use it synchronously
