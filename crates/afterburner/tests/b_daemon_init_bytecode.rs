@@ -20,68 +20,14 @@
 
 #![cfg(feature = "bin")]
 
+mod common;
+
+use common::{ChildGuard, http_get, pick_port, wait_for_listener};
 use serial_test::serial;
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const BURN: &str = env!("CARGO_BIN_EXE_burn");
-
-fn pick_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    let p = l.local_addr().expect("local_addr").port();
-    drop(l);
-    p
-}
-
-struct ChildGuard(Option<Child>);
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if let Some(mut c) = self.0.take() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-    }
-}
-impl ChildGuard {
-    fn new(c: Child) -> Self {
-        Self(Some(c))
-    }
-}
-impl std::ops::Deref for ChildGuard {
-    type Target = Child;
-    fn deref(&self) -> &Child {
-        self.0.as_ref().expect("child taken")
-    }
-}
-impl std::ops::DerefMut for ChildGuard {
-    fn deref_mut(&mut self) -> &mut Child {
-        self.0.as_mut().expect("child taken")
-    }
-}
-
-fn wait_for_listener(port: u16, timeout: Duration) -> bool {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    false
-}
-
-fn http_get(port: u16, path: &str) -> String {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
-    stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
-    let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
-    stream.write_all(req.as_bytes()).expect("write");
-    let mut resp = String::new();
-    stream.read_to_string(&mut resp).expect("read");
-    resp
-}
 
 fn spawn_burn(source: &str) -> Child {
     Command::new(BURN)

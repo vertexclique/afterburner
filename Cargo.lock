@@ -81,6 +81,7 @@ dependencies = [
  "http",
  "http-body-util",
  "image",
+ "kovan-channel",
  "oxc",
  "quinn",
  "rcgen",

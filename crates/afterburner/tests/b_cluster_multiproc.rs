@@ -11,9 +11,11 @@
 //!    `server.listen(...)`.
 //! 6. `cluster.on('exit', ...)` fires when a worker terminates.
 
+mod common;
+
+use common::pick_port as pick_free_port;
 use serial_test::serial;
 use std::io::Write;
-use std::net::TcpListener;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
@@ -24,16 +26,6 @@ fn write_temp(dir: &TempDir, name: &str, source: &str) -> std::path::PathBuf {
     let mut f = std::fs::File::create(&path).expect("create temp file");
     f.write_all(source.as_bytes()).expect("write");
     path
-}
-
-/// Reserve an ephemeral port by binding/dropping a `TcpListener`. The
-/// kernel can in theory reuse the port between the drop and the worker
-/// `bind()`, but for serial tests on `127.0.0.1` the window is short
-/// enough that this beats the previous hard-coded port that collided
-/// with any prior `bind 0` in the same cargo run.
-fn pick_free_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").expect("bind to find free port");
-    l.local_addr().expect("local_addr").port()
 }
 
 /// `cluster.fork()` returns a real worker; `Worker.process.pid` is non-zero

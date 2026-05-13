@@ -33,95 +33,38 @@
 // oversubscribes the CPU until every listener-bind times out. The
 // `#[serial]` annotations below pin the shard-pool suite to a single
 // active subprocess at a time so the timing assertions stay valid.
+
+mod common;
+
+use common::{
+    ChildGuard, extract_body, http_get, listening_marker_js, pick_port, spawn_and_wait_listening,
+};
 use serial_test::serial;
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::io::Read;
+use std::net::TcpStream;
+use std::process::Command;
+use std::time::Duration;
 
 const BURN: &str = env!("CARGO_BIN_EXE_burn");
 
-fn pick_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    let p = l.local_addr().expect("local_addr").port();
-    drop(l);
-    p
-}
+// Cold-spawn budget for `burn` + 2-shard wasmtime + plugin .wasm
+// instantiation. Empirically ~30s on GH Actions 4-vCPU runners with
+// cold cache; 60s gives 2× margin without making real failures slow.
+const READY_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// RAII wrapper for spawned `burn` children. Kills + reaps on Drop —
-/// even when the surrounding test panics. Existing `child.kill()` /
-/// `child.try_wait()` / `child.stderr.take()` etc. continue to work
-/// via DerefMut to the inner Child.
-struct ChildGuard(Option<Child>);
-impl ChildGuard {
-    fn new(c: Child) -> Self {
-        Self(Some(c))
-    }
-}
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if let Some(mut c) = self.0.take() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-    }
-}
-impl std::ops::Deref for ChildGuard {
-    type Target = Child;
-    fn deref(&self) -> &Child {
-        self.0.as_ref().expect("child taken")
-    }
-}
-impl std::ops::DerefMut for ChildGuard {
-    fn deref_mut(&mut self) -> &mut Child {
-        self.0.as_mut().expect("child taken")
-    }
-}
-
-fn wait_for_listener(port: u16, timeout: Duration) -> bool {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    false
-}
-
-fn http_get(port: u16, path: &str) -> String {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
-    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
-    let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
-    stream.write_all(req.as_bytes()).expect("write");
-    let mut resp = String::new();
-    stream.read_to_string(&mut resp).expect("read");
-    resp
-}
-
-fn extract_body(resp: &str) -> &str {
-    resp.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("")
-}
-
-fn spawn_burn_with_inline(source: &str) -> Child {
-    Command::new(BURN)
-        .env("BURN_QUIET", "1")
-        .env("BURN_SHARDS", "2")
-        // Cap shards at 2 by default — enough to exercise the multi-
-        // shard code paths (RR distribution, per-shard state isolation,
-        // shared bind) without burning N=36 wasmtime instances per
-        // subprocess. Tests that need a specific count (BURN_SHARDS=4
-        // / =1 / =0) set it via their own `.env()` which overrides
-        // this default.
+/// Spawn `burn -A -e <src>` with the standard 2-shard cap. Caller
+/// is responsible for shaping `src` so it prints the
+/// `LISTENING:<port>` marker — use `listening_marker_js(port)`
+/// inside the `.listen` callback.
+fn spawn_burn_with_inline(source: &str, port: u16) -> ChildGuard {
+    let mut cmd = Command::new(BURN);
+    cmd.env("BURN_QUIET", "1")
         .env("BURN_SHARDS", "2")
         .arg("-A")
         .arg("-e")
-        .arg(source)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn burn")
+        .arg(source);
+    let (child, _watcher) = spawn_and_wait_listening(cmd, port, READY_TIMEOUT);
+    child
 }
 
 // ---- 1. Listener binds once ---------------------------------------
@@ -136,31 +79,25 @@ fn shard_pool_listener_binds_once_no_eaddrinuse() {
     // proves the daemon doesn't crash with EADDRINUSE on multi-
     // core hosts.
     let port = pick_port();
+    let mark = listening_marker_js(port);
     let src = format!(
         r#"
         const http = require('http');
         http.createServer((_req, res) => res.end('ok')).listen({port}, () => {{
-            console.log('listening');
+            {mark}
         }});
         "#
     );
-    let mut child = ChildGuard::new(spawn_burn_with_inline(&src));
-    assert!(
-        wait_for_listener(port, Duration::from_secs(15)),
-        "listener didn't bind on :{port}"
-    );
+    let _child = spawn_burn_with_inline(&src, port);
 
     // Verify the listener serves; if multiple sockets were bound
     // (hypothetical SO_REUSEPORT regression), the GET would still
     // succeed but the test would still pass — the real signal is
-    // that init didn't crash, which is implicit in `wait_for_listener`
-    // returning true.
+    // that init didn't crash, which is implicit in spawn_and_wait_listening
+    // returning successfully.
     let resp = http_get(port, "/");
     assert!(resp.starts_with("HTTP/1.1 200"), "resp:\n{resp}");
     assert_eq!(extract_body(&resp), "ok");
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 // ---- 2. Round-robin distribution ---------------------------------
@@ -176,6 +113,7 @@ fn shard_pool_round_robin_distributes_requests() {
     // dispatch were random or sticky, we'd see counter=1 mixed with
     // counter=2,3,... within the first batch.
     let port = pick_port();
+    let mark = listening_marker_js(port);
     let src = format!(
         r#"
         const http = require('http');
@@ -183,11 +121,10 @@ fn shard_pool_round_robin_distributes_requests() {
         http.createServer((_req, res) => {{
             counter += 1;
             res.end(String(counter));
-        }}).listen({port});
+        }}).listen({port}, () => {{ {mark} }});
         "#
     );
-    let mut child = ChildGuard::new(spawn_burn_with_inline(&src));
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    let _child = spawn_burn_with_inline(&src, port);
 
     // Send N requests where N = max(shard count we expect, 4).
     // available_parallelism() is hard to predict in CI (could be
@@ -212,9 +149,6 @@ fn shard_pool_round_robin_distributes_requests() {
         sorted.len() <= 4,
         "expected RR spread (≤4 distinct values), got {sorted:?}"
     );
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 // ---- 3. Per-shard state isolation ---------------------------------
@@ -233,6 +167,7 @@ fn shard_pool_per_shard_state_isolation() {
     // the sequence we MUST see counter=1 again (proving at least
     // one shard saw a fresh counter at request boundary).
     let port = pick_port();
+    let mark = listening_marker_js(port);
     let src = format!(
         r#"
         const http = require('http');
@@ -240,11 +175,10 @@ fn shard_pool_per_shard_state_isolation() {
         http.createServer((_req, res) => {{
             counter += 1;
             res.end(String(counter));
-        }}).listen({port});
+        }}).listen({port}, () => {{ {mark} }});
         "#
     );
-    let mut child = ChildGuard::new(spawn_burn_with_inline(&src));
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    let _child = spawn_burn_with_inline(&src, port);
 
     // Send enough requests that, regardless of how many shards the host
     // auto-detects (`available_parallelism()`), at least one shard is
@@ -278,9 +212,6 @@ fn shard_pool_per_shard_state_isolation() {
         ge2 >= 1,
         "expected ≥1 shard to handle multiple requests, got 0 (ones={ones}, par={par})"
     );
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 // ---- 4. Sandbox boundary preserved per-shard ----------------------
@@ -294,30 +225,25 @@ fn shard_pool_sandbox_denies_on_every_shard() {
     // capability gates on later shards, we'd see the real env var
     // value on some requests.
     let port = pick_port();
+    let mark = listening_marker_js(port);
     let src = format!(
         r#"
         const http = require('http');
         http.createServer((_req, res) => {{
             const home = process.env.HOME;
             res.end(home === undefined ? 'denied' : ('leaked:' + home));
-        }}).listen({port});
+        }}).listen({port}, () => {{ {mark} }});
         "#
     );
-    let mut child = ChildGuard::new(
-        Command::new(BURN)
-            .env("BURN_QUIET", "1")
-            .env("BURN_SHARDS", "2")
-            .arg("--sandbox")
-            .arg("--allow-net")
-            .arg("*")
-            .arg("-e")
-            .arg(&src)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn burn"),
-    );
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    let mut cmd = Command::new(BURN);
+    cmd.env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
+        .arg("--sandbox")
+        .arg("--allow-net")
+        .arg("*")
+        .arg("-e")
+        .arg(&src);
+    let (_child, _watcher) = spawn_and_wait_listening(cmd, port, READY_TIMEOUT);
 
     // Hit every shard (32 requests across N shards).
     for _ in 0..32 {
@@ -328,9 +254,6 @@ fn shard_pool_sandbox_denies_on_every_shard() {
             "shard leaked env (capability gate bypassed): {body}"
         );
     }
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 // ---- 5. Capability-allowed env propagates to every shard ----------
@@ -339,32 +262,27 @@ fn shard_pool_sandbox_denies_on_every_shard() {
 #[serial]
 fn shard_pool_allow_env_visible_on_every_shard() {
     let port = pick_port();
+    let mark = listening_marker_js(port);
     let src = format!(
         r#"
         const http = require('http');
         http.createServer((_req, res) => {{
             res.end(process.env.SHARD_TEST_VAR ?? 'missing');
-        }}).listen({port});
+        }}).listen({port}, () => {{ {mark} }});
         "#
     );
-    let mut child = ChildGuard::new(
-        Command::new(BURN)
-            .env("BURN_QUIET", "1")
-            .env("BURN_SHARDS", "2")
-            .env("SHARD_TEST_VAR", "shared-secret")
-            .arg("--sandbox")
-            .arg("--allow-net")
-            .arg("*")
-            .arg("--allow-env")
-            .arg("SHARD_TEST_VAR")
-            .arg("-e")
-            .arg(&src)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn burn"),
-    );
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    let mut cmd = Command::new(BURN);
+    cmd.env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
+        .env("SHARD_TEST_VAR", "shared-secret")
+        .arg("--sandbox")
+        .arg("--allow-net")
+        .arg("*")
+        .arg("--allow-env")
+        .arg("SHARD_TEST_VAR")
+        .arg("-e")
+        .arg(&src);
+    let (_child, _watcher) = spawn_and_wait_listening(cmd, port, READY_TIMEOUT);
 
     // Check enough requests that we land on every shard.
     for _ in 0..32 {
@@ -375,9 +293,6 @@ fn shard_pool_allow_env_visible_on_every_shard() {
             "shard didn't see allow-listed env var: {body}"
         );
     }
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 // ---- 6. Init failure surfaces non-zero exit -----------------------
@@ -460,17 +375,17 @@ fn shard_pool_async_handler_returns_correct_body() {
     // independently; if there's any cross-shard pollution in the
     // async machinery, multiple requests would interleave wrong.
     let port = pick_port();
+    let mark = listening_marker_js(port);
     let src = format!(
         r#"
         const http = require('http');
         http.createServer(async (req, res) => {{
             await Promise.resolve();
             res.end('async-' + (req.url || '/'));
-        }}).listen({port});
+        }}).listen({port}, () => {{ {mark} }});
         "#
     );
-    let mut child = ChildGuard::new(spawn_burn_with_inline(&src));
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    let _child = spawn_burn_with_inline(&src, port);
 
     for path in &["/foo", "/bar", "/baz"] {
         let resp = http_get(port, path);
@@ -478,9 +393,6 @@ fn shard_pool_async_handler_returns_correct_body() {
         let expected = format!("async-{path}");
         assert_eq!(body, expected, "wrong body for {path}: got {body}");
     }
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 // ---- 9. Concurrent requests don't deadlock or smuggle -------------
@@ -495,17 +407,17 @@ fn shard_pool_concurrent_requests_complete() {
     // don't smuggle bodies across requests (each request gets
     // its OWN expected response).
     let port = pick_port();
+    let mark = listening_marker_js(port);
     let src = format!(
         r#"
         const http = require('http');
         http.createServer((req, res) => {{
             res.setHeader('content-type', 'text/plain');
             res.end('echo:' + req.url);
-        }}).listen({port});
+        }}).listen({port}, () => {{ {mark} }});
         "#
     );
-    let mut child = ChildGuard::new(spawn_burn_with_inline(&src));
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    let _child = spawn_burn_with_inline(&src, port);
 
     let mut handles = Vec::new();
     for i in 0..16 {
@@ -526,9 +438,6 @@ fn shard_pool_concurrent_requests_complete() {
         let expected = format!("echo:{path}");
         assert_eq!(body, &expected, "smuggled body: req={path}, got {body}");
     }
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 // ---- 10. BURN_SHARDS=1 forces single-shard semantics --------------
@@ -540,6 +449,7 @@ fn shard_pool_burn_shards_one_forces_single_shard() {
     // the per-shard counter IS the global counter, so we get
     // monotonic 1, 2, 3, ... — the pre-B1 single-Store contract.
     let port = pick_port();
+    let mark = listening_marker_js(port);
     let src = format!(
         r#"
         const http = require('http');
@@ -547,23 +457,16 @@ fn shard_pool_burn_shards_one_forces_single_shard() {
         http.createServer((_req, res) => {{
             counter += 1;
             res.end(String(counter));
-        }}).listen({port});
+        }}).listen({port}, () => {{ {mark} }});
         "#
     );
-    let mut child = ChildGuard::new(
-        Command::new(BURN)
-            .env("BURN_QUIET", "1")
-            .env("BURN_SHARDS", "2")
-            .env("BURN_SHARDS", "1")
-            .arg("-A")
-            .arg("-e")
-            .arg(&src)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn burn"),
-    );
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    let mut cmd = Command::new(BURN);
+    cmd.env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "1")
+        .arg("-A")
+        .arg("-e")
+        .arg(&src);
+    let (_child, _watcher) = spawn_and_wait_listening(cmd, port, READY_TIMEOUT);
 
     // 5 sequential requests must produce 1, 2, 3, 4, 5 — strict
     // monotonic. If multi-shard accidentally took effect we'd see
@@ -577,9 +480,6 @@ fn shard_pool_burn_shards_one_forces_single_shard() {
             "single-shard counter must be monotonic; iter {expected} got {body}"
         );
     }
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 // ---- 11. BURN_SHARDS=4 spawns exactly 4 shards --------------------
@@ -596,6 +496,7 @@ fn shard_pool_burn_shards_four_spawns_four() {
     // (only 4 shards used) — but only 4 distinct shards are
     // actually present so subsequent requests show 2,3,4,...
     let port = pick_port();
+    let mark = listening_marker_js(port);
     let src = format!(
         r#"
         const http = require('http');
@@ -603,23 +504,16 @@ fn shard_pool_burn_shards_four_spawns_four() {
         http.createServer((_req, res) => {{
             counter += 1;
             res.end(String(counter));
-        }}).listen({port});
+        }}).listen({port}, () => {{ {mark} }});
         "#
     );
-    let mut child = ChildGuard::new(
-        Command::new(BURN)
-            .env("BURN_QUIET", "1")
-            .env("BURN_SHARDS", "2")
-            .env("BURN_SHARDS", "4")
-            .arg("-A")
-            .arg("-e")
-            .arg(&src)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn burn"),
-    );
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    let mut cmd = Command::new(BURN);
+    cmd.env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "4")
+        .arg("-A")
+        .arg("-e")
+        .arg(&src);
+    let (_child, _watcher) = spawn_and_wait_listening(cmd, port, READY_TIMEOUT);
 
     // First 4 sequential requests RR across 4 shards → all "1".
     let mut first_round = Vec::new();
@@ -644,9 +538,6 @@ fn shard_pool_burn_shards_four_spawns_four() {
         vec!["2", "2", "2", "2"],
         "next 4 requests should hit each shard's now-incremented counter"
     );
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 // ---- 12. BURN_SHARDS=0 falls back to auto-detect ------------------
@@ -658,34 +549,28 @@ fn shard_pool_burn_shards_zero_falls_back() {
     // warning and falls back to auto-detect. The script still
     // runs successfully — degraded gracefully, not a hard fail.
     let port = pick_port();
+    let mark = listening_marker_js(port);
     let src = format!(
         r#"
         const http = require('http');
-        http.createServer((_req, res) => res.end('ok')).listen({port});
+        http.createServer((_req, res) => res.end('ok')).listen({port}, () => {{
+            {mark}
+        }});
         "#
     );
-    let mut child = ChildGuard::new(
-        Command::new(BURN)
-            // Don't set BURN_QUIET — we want to capture the warning.
-            .env("BURN_SHARDS", "0")
-            .arg("-A")
-            .arg("-e")
-            .arg(&src)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn burn"),
-    );
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    let mut cmd = Command::new(BURN);
+    // Don't set BURN_QUIET — we want to capture the warning.
+    cmd.env("BURN_SHARDS", "0").arg("-A").arg("-e").arg(&src);
+    let (mut child, _watcher) = spawn_and_wait_listening(cmd, port, READY_TIMEOUT);
 
     // The daemon serves normally despite the bad env var.
     let resp = http_get(port, "/");
     assert!(resp.starts_with("HTTP/1.1 200"));
     assert_eq!(extract_body(&resp), "ok");
 
+    // Stderr should mention the fallback. Drain it now.
     let _ = child.kill();
     let _ = child.wait();
-    // Stderr should mention the fallback. Drain it now.
     let mut err_buf = String::new();
     if let Some(mut s) = child.stderr.take() {
         let _ = s.read_to_string(&mut err_buf);
@@ -709,32 +594,25 @@ fn shard_pool_burn_shards_garbage_falls_back() {
     // Non-numeric BURN_SHARDS is invalid; same fallback path as
     // BURN_SHARDS=0.
     let port = pick_port();
+    let mark = listening_marker_js(port);
     let src = format!(
         r#"
         const http = require('http');
-        http.createServer((_req, res) => res.end('ok')).listen({port});
+        http.createServer((_req, res) => res.end('ok')).listen({port}, () => {{
+            {mark}
+        }});
         "#
     );
-    let mut child = ChildGuard::new(
-        Command::new(BURN)
-            .env("BURN_QUIET", "1")
-            .env("BURN_SHARDS", "2")
-            .env("BURN_SHARDS", "not-a-number")
-            .arg("-A")
-            .arg("-e")
-            .arg(&src)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn burn"),
-    );
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    let mut cmd = Command::new(BURN);
+    cmd.env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "not-a-number")
+        .arg("-A")
+        .arg("-e")
+        .arg(&src);
+    let (_child, _watcher) = spawn_and_wait_listening(cmd, port, READY_TIMEOUT);
 
     let resp = http_get(port, "/");
     assert!(resp.starts_with("HTTP/1.1 200"));
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 // ---- 14. BURN_SHARDS over-cap clamps to MAX_SHARDS ----------------
@@ -749,36 +627,28 @@ fn shard_pool_burn_shards_overlimit_clamped() {
     // the test just verifies the daemon starts + serves rather
     // than panicking on too-many-threads or pool exhaustion.
     let port = pick_port();
+    let mark = listening_marker_js(port);
     let src = format!(
         r#"
         const http = require('http');
-        http.createServer((_req, res) => res.end('ok')).listen({port});
+        http.createServer((_req, res) => res.end('ok')).listen({port}, () => {{
+            {mark}
+        }});
         "#
     );
-    let mut child = ChildGuard::new(
-        Command::new(BURN)
-            .env("BURN_QUIET", "1")
-            .env("BURN_SHARDS", "2")
-            .env("BURN_SHARDS", "999")
-            .arg("-A")
-            .arg("-e")
-            .arg(&src)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn burn"),
-    );
-    assert!(
-        wait_for_listener(port, Duration::from_secs(30)),
-        "daemon must start even at clamped-max shard count"
-    );
+    let mut cmd = Command::new(BURN);
+    cmd.env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "999")
+        .arg("-A")
+        .arg("-e")
+        .arg(&src);
+    // 128 shards instantiated serially can take longer than the
+    // 60s default — bump to 120s for this test specifically.
+    let (_child, _watcher) = spawn_and_wait_listening(cmd, port, Duration::from_secs(120));
 
     let resp = http_get(port, "/");
     assert!(resp.starts_with("HTTP/1.1 200"), "got: {resp}");
     assert_eq!(extract_body(&resp), "ok");
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 // ---- 15. Raw TCP server multi-shard compatibility -----------------
@@ -792,6 +662,7 @@ fn shard_pool_net_listener_does_not_eaddrinuse() {
     // followers register a local server_id without binding.
     // Result: the daemon starts cleanly and the listener serves.
     let port = pick_port();
+    let mark = listening_marker_js(port);
     let src = format!(
         r#"
         const net = require('net');
@@ -799,19 +670,10 @@ fn shard_pool_net_listener_does_not_eaddrinuse() {
             socket.write('hello-tcp\n');
             socket.end();
         }});
-        server.listen({port}, '127.0.0.1');
+        server.listen({port}, '127.0.0.1', () => {{ {mark} }});
         "#
     );
-    let mut child = ChildGuard::new(spawn_burn_with_inline(&src));
-
-    // Wait for the kernel listener to be reachable (the owner shard
-    // bound it). A pre-fix run would have hit EADDRINUSE on
-    // shards 1..N-1 and either crashed the process or surfaced an
-    // init error.
-    assert!(
-        wait_for_listener(port, Duration::from_secs(15)),
-        "raw TCP listener should bind under multi-shard"
-    );
+    let _child = spawn_burn_with_inline(&src, port);
 
     // Connect via raw TCP and read the echo.
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("tcp connect");
@@ -822,9 +684,6 @@ fn shard_pool_net_listener_does_not_eaddrinuse() {
         buf.contains("hello-tcp"),
         "TCP server didn't respond: got {buf:?}"
     );
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 // ---- 16. UDP socket multi-shard compatibility ---------------------
@@ -835,35 +694,38 @@ fn shard_pool_dgram_socket_does_not_eaddrinuse() {
     // Same contract as TCP: every shard's `dgram.createSocket()
     // .bind(port)` would have collided pre-fix. Post-fix, only the
     // owner shard binds the UDP socket; followers register stubs.
+    //
+    // UDP doesn't have a TCP-style listener-accept probe, so we
+    // rely on the LISTENING marker (printed from the `listening`
+    // event handler) for readiness. The wait_for_listening TCP
+    // fallback can't help here — there's no TCP socket.
     let port = pick_port();
+    let mark = listening_marker_js(port);
     let src = format!(
         r#"
         const dgram = require('dgram');
         const sock = dgram.createSocket('udp4');
-        sock.on('listening', () => {{
-            // signal readiness by listening on the inverse port
-            // for a probe (we just bind and stay alive).
-        }});
+        sock.on('listening', () => {{ {mark} }});
         sock.bind({port}, '127.0.0.1');
-        // Keep the daemon alive via the open socket.
         "#
     );
-    let mut child = ChildGuard::new(spawn_burn_with_inline(&src));
-    // Give the daemon a moment to spin up and bind. UDP doesn't
-    // have a "listener accept" probe like TCP, so we just wait
-    // briefly and verify the process is still alive (no init crash).
-    std::thread::sleep(Duration::from_millis(2000));
-    let still_alive = match child.try_wait() {
-        Ok(Some(status)) => {
-            panic!("daemon exited unexpectedly: {status:?}");
-        }
-        Ok(None) => true,
-        Err(e) => panic!("try_wait error: {e}"),
-    };
-    assert!(still_alive, "daemon should be alive after dgram bind");
+    // Reuse spawn_and_wait_listening: the TCP-connect probe will
+    // never succeed (no TCP listener), but the stdout marker WILL,
+    // so the wait returns as soon as the JS prints LISTENING.
+    let mut cmd = Command::new(BURN);
+    cmd.env("BURN_QUIET", "1")
+        .env("BURN_SHARDS", "2")
+        .arg("-A")
+        .arg("-e")
+        .arg(&src);
+    let (mut child, _watcher) = spawn_and_wait_listening(cmd, port, READY_TIMEOUT);
 
-    let _ = child.kill();
-    let _ = child.wait();
+    // Sanity: the daemon must still be running (no init crash).
+    match child.try_wait() {
+        Ok(Some(status)) => panic!("daemon exited unexpectedly: {status:?}"),
+        Ok(None) => {}
+        Err(e) => panic!("try_wait error: {e}"),
+    }
 }
 
 // ---- 17. SharedPortClaims unit-test-style — owner/follower --------
