@@ -261,7 +261,7 @@ fn h3_endpoint_completes_quic_handshake() {
     );
     let mut child = spawn_h3(&src);
     let r = rt();
-    let up = r.block_on(wait_for_h3(port, Duration::from_secs(15)));
+    let up = r.block_on(wait_for_h3(port, Duration::from_secs(60)));
     assert!(up, "h3 endpoint never came up on udp:{port}");
     let _ = child.kill();
     let _ = child.wait();
@@ -286,7 +286,7 @@ fn h3_endpoint_serves_real_request_round_trip() {
     );
     let mut child = spawn_h3(&src);
     let r = rt();
-    assert!(r.block_on(wait_for_h3(port, Duration::from_secs(15))));
+    assert!(r.block_on(wait_for_h3(port, Duration::from_secs(60))));
     let (status, body) = r.block_on(h3_request(port, "/abc")).unwrap_or_else(|e| {
         let _ = child.kill();
         let _ = child.wait();
@@ -318,7 +318,7 @@ fn h3_endpoint_status_code_round_trips() {
     );
     let mut child = spawn_h3(&src);
     let r = rt();
-    assert!(r.block_on(wait_for_h3(port, Duration::from_secs(15))));
+    assert!(r.block_on(wait_for_h3(port, Duration::from_secs(60))));
     let (status, body) = r.block_on(h3_request(port, "/")).unwrap_or_else(|e| {
         let _ = child.kill();
         let _ = child.wait();
@@ -351,7 +351,7 @@ fn h3_endpoint_body_streams_chunked_writes() {
     );
     let mut child = spawn_h3(&src);
     let r = rt();
-    assert!(r.block_on(wait_for_h3(port, Duration::from_secs(15))));
+    assert!(r.block_on(wait_for_h3(port, Duration::from_secs(60))));
     let (status, body) = r.block_on(h3_request(port, "/")).unwrap_or_else(|e| {
         let _ = child.kill();
         let _ = child.wait();
@@ -379,7 +379,7 @@ fn h3_endpoint_close_releases_udp_port() {
     );
     let mut child = spawn_h3(&src);
     let r = rt();
-    assert!(r.block_on(wait_for_h3(port, Duration::from_secs(15))));
+    assert!(r.block_on(wait_for_h3(port, Duration::from_secs(60))));
     let _ = child.kill();
     let _ = child.wait();
     std::thread::sleep(Duration::from_millis(500));

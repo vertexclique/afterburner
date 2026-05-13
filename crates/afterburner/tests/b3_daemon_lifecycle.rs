@@ -307,10 +307,10 @@ fn process_exit_from_http_handler() {
         .spawn()
         .expect("spawn burn");
 
-    // Wait for listener.
+    // Wait for listener. 60s ceiling absorbs cold GH 4-vCPU cold-spawn.
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(15) {
+    while start.elapsed() < Duration::from_secs(60) {
         if TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
             break;
         }

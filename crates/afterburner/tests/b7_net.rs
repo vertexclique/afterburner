@@ -419,7 +419,7 @@ fn server_accepts_connection_and_echoes() {
         }
     });
     let port = port_rx
-        .recv_timeout(Duration::from_secs(10))
+        .recv_timeout(Duration::from_secs(60))
         .expect("burn server announced port");
     drop(reader);
 

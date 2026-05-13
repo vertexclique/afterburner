@@ -177,7 +177,9 @@ fn receive_from_external_sender() {
     // Wait for burn to bind + write the port file.
     let port = {
         let mut got = None;
-        for _ in 0..30 {
+        // 120 × 500ms = 60s ceiling; cold GH 4-vCPU cold-spawn of
+        // burn + plugin + dgram bind can take 30-45s.
+        for _ in 0..120 {
             std::thread::sleep(Duration::from_millis(500));
             if let Ok(s) = fs::read_to_string(&port_log)
                 && let Ok(p) = s.trim().parse::<u16>()
@@ -186,7 +188,7 @@ fn receive_from_external_sender() {
                 break;
             }
         }
-        got.expect("burn published bound port within 15s")
+        got.expect("burn published bound port within 60s")
     };
 
     let sender = UdpSocket::bind("127.0.0.1:0").expect("sender bind");

@@ -309,7 +309,7 @@ fn burn_serves_tls_and_host_client_echoes() {
         }
     });
     let port = port_rx
-        .recv_timeout(Duration::from_secs(15))
+        .recv_timeout(Duration::from_secs(60))
         .expect("burn server announced port");
 
     // Build a rustls client that accepts our self-signed cert by
@@ -720,7 +720,7 @@ fn sni_routes_distinct_cert_per_servername() {
         }
     });
     let port = port_rx
-        .recv_timeout(Duration::from_secs(15))
+        .recv_timeout(Duration::from_secs(60))
         .expect("burn announced port");
 
     let presented_alpha = fetch_presented_cert(port, "alpha.local");
@@ -798,7 +798,7 @@ fn sni_add_context_works_post_construction() {
         }
     });
     let port = port_rx
-        .recv_timeout(Duration::from_secs(15))
+        .recv_timeout(Duration::from_secs(60))
         .expect("burn announced port");
 
     let _ = def_der; // silence unused; the default cert isn't asserted on here.

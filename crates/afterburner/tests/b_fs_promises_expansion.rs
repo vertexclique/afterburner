@@ -435,7 +435,7 @@ fn watch_emits_change_on_write() {
         "watcher never reported ready within 120s"
     );
     fs::write(&target, b"v2").unwrap();
-    let contents = poll_for_file(&log, Duration::from_secs(15));
+    let contents = poll_for_file(&log, Duration::from_secs(60));
     let _ = child.kill();
     let _ = child.wait();
     assert!(
@@ -472,7 +472,7 @@ fn watch_emits_rename_on_create() {
         "watcher never reported ready within 120s"
     );
     fs::write(&new_path, b"fresh").unwrap();
-    let contents = poll_for_file(&log, Duration::from_secs(15));
+    let contents = poll_for_file(&log, Duration::from_secs(60));
     let _ = child.kill();
     let _ = child.wait();
     assert!(contents.contains("CREATED"), "log: {contents:?}");
@@ -544,7 +544,7 @@ fn watch_async_iterator() {
         "watcher never reported ready within 120s"
     );
     fs::write(&target, b"v2").unwrap();
-    let contents = poll_for_file(&log, Duration::from_secs(15));
+    let contents = poll_for_file(&log, Duration::from_secs(60));
     let _ = child.kill();
     let _ = child.wait();
     assert!(

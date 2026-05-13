@@ -100,7 +100,7 @@ fn http2_server_serves_h1_request_via_request_event() {
     );
     let mut child = spawn(&src);
     assert!(
-        wait_for_listener(port, Duration::from_secs(15)),
+        wait_for_listener(port, Duration::from_secs(60)),
         "no listener on :{port}"
     );
     let r = h1_get(port, "/");
@@ -126,7 +126,7 @@ fn http2_server_serves_h1_request_via_stream_event() {
         "#
     );
     let mut child = spawn(&src);
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    assert!(wait_for_listener(port, Duration::from_secs(60)));
     let r = h1_get(port, "/foo");
     assert!(r.starts_with("HTTP/1.1 200"), "{r}");
     assert!(r.contains("stream-served:/foo"), "{r}");
@@ -163,7 +163,7 @@ fn http2_server_responds_to_h2_connection_preface() {
         "#
     );
     let mut child = spawn(&src);
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    assert!(wait_for_listener(port, Duration::from_secs(60)));
 
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
@@ -202,7 +202,7 @@ fn create_server_callback_attaches_request_handler() {
         "#
     );
     let mut child = spawn(&src);
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    assert!(wait_for_listener(port, Duration::from_secs(60)));
     let r = h1_get(port, "/");
     assert!(r.contains("cb-served"), "{r}");
     let _ = child.kill();
@@ -225,7 +225,7 @@ fn http2_server_address_returns_listening_port() {
         "#
     );
     let mut child = spawn(&src);
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    assert!(wait_for_listener(port, Duration::from_secs(60)));
     let r = h1_get(port, "/");
     let want = format!("x-port: {port}");
     assert!(r.contains(&want), "missing `{want}` in: {r}");
@@ -248,7 +248,7 @@ fn http2_server_close_releases_port() {
         "#
     );
     let mut child = spawn(&src);
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    assert!(wait_for_listener(port, Duration::from_secs(60)));
     let _ = h1_get(port, "/");
     let _ = child.kill();
     let _ = child.wait();
@@ -276,7 +276,7 @@ fn server_h2_stream_response_writes_body() {
         "#
     );
     let mut child = spawn(&src);
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    assert!(wait_for_listener(port, Duration::from_secs(60)));
     let r = h1_get(port, "/");
     assert!(r.starts_with("HTTP/1.1 201"), "{r}");
     assert!(r.contains("x-stream: yes"), "{r}");
@@ -307,7 +307,7 @@ fn server_h2_stream_pseudo_headers_translated() {
         "#
     );
     let mut child = spawn(&src);
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    assert!(wait_for_listener(port, Duration::from_secs(60)));
     let r = h1_get(port, "/abc?q=1");
     assert!(r.contains(r#""method":"GET""#), "{r}");
     assert!(r.contains(r#""path":"/abc?q=1""#), "{r}");
@@ -334,7 +334,7 @@ fn http2_server_emits_listening_event() {
         "#
     );
     let mut child = spawn(&src);
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    assert!(wait_for_listener(port, Duration::from_secs(60)));
     let r = h1_get(port, "/");
     assert!(r.contains("fired"), "{r}");
     let _ = child.kill();
