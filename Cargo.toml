@@ -99,7 +99,7 @@ anyhow = "1"
 # pulled by `afterburner-wasi/daemon` (off by default) and the `burn`
 # CLI — library consumers who don't run `http.createServer().listen()`
 # don't pay the compile-time or binary-size cost.
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "macros", "signal", "sync"] }
 hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
