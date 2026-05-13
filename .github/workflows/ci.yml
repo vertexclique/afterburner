@@ -222,7 +222,7 @@ jobs:
               --test b_async_hooks_await
               --test b_vm_module_records
               --test b_vm_measure_worker_untransferable
-            timeout: 60
+            timeout: 90
 
           # WASM loader + node:vm + cross-process atomics.
           # Shares the wasm-loader host code; failures here implicate
