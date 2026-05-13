@@ -230,7 +230,7 @@ impl DaemonInspector {
             .route("/json/list", get(json_targets))
             .route("/json/version", get(json_version))
             .route("/json/protocol", get(json_protocol))
-            .route("/devtools/page/:id", get(ws_handler))
+            .route("/devtools/page/{id}", get(ws_handler))
             .with_state(Arc::clone(&inner));
 
         let task = self.runtime.spawn(async move {
@@ -334,7 +334,7 @@ async fn handle_ws(socket: WebSocket, inner: Arc<InspectorInner>) {
     // Writer task — drains the per-session out channel into the WS.
     let writer = tokio::spawn(async move {
         while let Some(payload) = out_rx.recv().await {
-            if sink.send(Message::Text(payload)).await.is_err() {
+            if sink.send(Message::Text(payload.into())).await.is_err() {
                 break;
             }
         }
@@ -346,8 +346,11 @@ async fn handle_ws(socket: WebSocket, inner: Arc<InspectorInner>) {
     // can be cleaned up.
     while let Some(msg) = stream.next().await {
         let bytes = match msg {
-            Ok(Message::Text(t)) => t,
-            Ok(Message::Binary(b)) => match String::from_utf8(b) {
+            // axum 0.8 / tungstenite ship Text as Utf8Bytes and Binary
+            // as Bytes — convert both to owned String for downstream
+            // serde_json parsing.
+            Ok(Message::Text(t)) => t.to_string(),
+            Ok(Message::Binary(b)) => match String::from_utf8(b.to_vec()) {
                 Ok(s) => s,
                 Err(_) => continue,
             },
