@@ -61,11 +61,14 @@ jobs:
   # Workspace-wide library tests (no `bin` feature).
   # Exercises the library API surface across every crate — the path
   # downstream `cargo install afterburner` users compile against.
+  # Heavyweight: every wasmtime engine instantiation cold-starts the
+  # 8 MB plugin, and there are ~130 such tests in this pass. 60-min
+  # ceiling accommodates a cold GH 4-vCPU runner.
   # ---------------------------------------------------------------
   test-lib-workspace:
     name: test / lib-workspace
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -126,7 +129,7 @@ jobs:
 
           # Daemon lifecycle + multi-shard pool — the historically
           # flakiest tier (b_shard_pool's wait_for_listening cluster).
-          # 45-min timeout absorbs cold-start variance.
+          # 55-min timeout absorbs cold-start variance on GH 4-vCPU.
           - tier: cli-daemon-core
             features: 'bin'
             tests: >-
@@ -138,7 +141,7 @@ jobs:
               --test b_daemon_init_bytecode
               --test b4_passthrough
               --test b5_shim
-            timeout: 45
+            timeout: 55
 
           # Full network protocol stack. `http3` brings in QUIC; only
           # this tier needs it (every other tier ignores quinn/h3).
@@ -163,7 +166,7 @@ jobs:
               --test b_dns_resolveany_execfilesync
               --test b_http_header_validators
               --test b_fetch_extras
-            timeout: 35
+            timeout: 55
 
           # Node compat I/O layer: fs / streams / buffer / events / zlib.
           # Shared fs_host + stream polyfills — failures localize here.
@@ -183,7 +186,7 @@ jobs:
               --test b_zlib_streaming
               --test b_uint8array_codec
               --test b_filereader_sqlite_constants
-            timeout: 35
+            timeout: 55
 
           # Node compat runtime: globals / util / intl / iterators /
           # web globals / performance / process-level.
@@ -219,7 +222,7 @@ jobs:
               --test b_async_hooks_await
               --test b_vm_module_records
               --test b_vm_measure_worker_untransferable
-            timeout: 40
+            timeout: 60
 
           # WASM loader + node:vm + cross-process atomics.
           # Shares the wasm-loader host code; failures here implicate
