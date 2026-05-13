@@ -61,7 +61,7 @@ fn precompiled_daemon_serves_canonical_request() {
     );
     let _child = ChildGuard::new(spawn_burn(&src));
     assert!(
-        wait_for_listener(port, Duration::from_secs(15)),
+        wait_for_listener(port, Duration::from_secs(60)),
         "burn listener didn't bind on :{port}"
     );
 
@@ -98,7 +98,7 @@ fn precompiled_daemon_preserves_argv_env() {
         "#
     );
     let _child = ChildGuard::new(spawn_burn(&src));
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    assert!(wait_for_listener(port, Duration::from_secs(60)));
 
     let resp = http_get(port, "/");
     assert!(resp.starts_with("HTTP/1.1 200"), "resp:\n{resp}");
@@ -147,7 +147,7 @@ fn precompiled_daemon_async_handler_round_trips() {
         "#
     );
     let _child = ChildGuard::new(spawn_burn(&src));
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    assert!(wait_for_listener(port, Duration::from_secs(60)));
 
     for path in &["/a", "/b", "/c"] {
         let resp = http_get(port, path);

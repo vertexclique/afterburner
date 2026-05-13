@@ -115,11 +115,11 @@ fn two_listeners_on_different_ports_route_independently() {
     );
     let _child = ChildGuard::new(spawn_script(&src));
     assert!(
-        wait_for_listener(port_a, Duration::from_secs(15)),
+        wait_for_listener(port_a, Duration::from_secs(60)),
         "listener A should come up on {port_a}"
     );
     assert!(
-        wait_for_listener(port_b, Duration::from_secs(15)),
+        wait_for_listener(port_b, Duration::from_secs(60)),
         "listener B should come up on {port_b}"
     );
 

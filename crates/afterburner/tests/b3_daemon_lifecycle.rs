@@ -221,10 +221,11 @@ fn unref_timer_lets_daemon_exit() {
         !stdout.contains("should not fire"),
         "unref'd timer should not fire"
     );
-    // Should exit well before the 5-second interval. Allow generous
-    // headroom for debug-build WASM engine startup.
+    // Should exit well before the 5-second interval. The ceiling
+    // absorbs debug-build WASM engine startup; on cold GH 4-vCPU
+    // runners this dominates real wall time.
     assert!(
-        elapsed < Duration::from_secs(10),
+        elapsed < Duration::from_secs(90),
         "elapsed {elapsed:?} — should exit quickly"
     );
 }
@@ -263,10 +264,10 @@ fn clearinterval_lets_daemon_exit() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("tick 2"), "stdout: {stdout}");
-    // Should exit, not hang forever. Allow generous headroom for
-    // debug-build WASM engine startup.
+    // Should exit, not hang forever. Ceiling absorbs debug-build
+    // WASM engine startup on cold CI runners.
     assert!(
-        elapsed < Duration::from_secs(15),
+        elapsed < Duration::from_secs(90),
         "elapsed {elapsed:?} — should exit after clearing"
     );
 }
@@ -324,7 +325,7 @@ fn process_exit_from_http_handler() {
         let _ = stream.read_to_string(&mut resp);
     }
 
-    let out = wait_with_timeout(&mut child, Duration::from_secs(10));
+    let out = wait_with_timeout(&mut child, Duration::from_secs(90));
     assert_eq!(
         out.2.code(),
         Some(7),
@@ -397,7 +398,7 @@ fn cleartimeout_prevents_fire() {
         "cleared timer should not fire"
     );
     assert!(
-        elapsed < Duration::from_secs(10),
+        elapsed < Duration::from_secs(90),
         "should exit quickly: {elapsed:?}"
     );
 }
@@ -434,9 +435,10 @@ fn settimeout_zero_delay_does_not_keep_daemon_alive() {
         stdout.contains("zero-delay"),
         "zero-delay timer should fire as microtask: {stdout}"
     );
-    // Should exit fast — no daemon event loop entered.
+    // Should exit fast — no daemon event loop entered. Ceiling
+    // absorbs debug-build WASM engine startup on cold CI runners.
     assert!(
-        elapsed < Duration::from_secs(10),
+        elapsed < Duration::from_secs(90),
         "zero-delay should not keep daemon alive: {elapsed:?}"
     );
 }

@@ -69,7 +69,13 @@ fn worker_round_trip_message() {
             w.on('online', () => {{
                 w.postMessage('ping');
             }});
-            setTimeout(() => {{ process.exit(42); }}, 10000);
+            // 60s safety timer — cold CI runners (4-vCPU) need >10s
+            // to walk burn-init + plugin + worker-child cold-spawn +
+            // first message round-trip. Local boxes finish in <5s; the
+            // ceiling only matters when the round-trip is actually
+            // broken (then we still get a deterministic 42 exit and
+            // a clean test failure).
+            setTimeout(() => {{ process.exit(42); }}, 60000);
         "#,
         path = js_str(child_js.to_str().unwrap())
     );

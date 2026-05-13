@@ -59,7 +59,7 @@ fn burn_serves_hello_from_burn() {
     );
     let _child = ChildGuard::new(spawn_burn_inline(&source));
     assert!(
-        wait_for_listener(port, Duration::from_secs(15)),
+        wait_for_listener(port, Duration::from_secs(60)),
         "burn listener didn't come up on :{port}"
     );
 
@@ -84,7 +84,7 @@ fn burn_server_echoes_method_and_path() {
         "#
     );
     let _child = ChildGuard::new(spawn_burn_inline(&source));
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    assert!(wait_for_listener(port, Duration::from_secs(60)));
 
     let resp = http_get(port, "/test?q=1");
     assert!(resp.starts_with("HTTP/1.1 201"), "resp:\n{resp}");
@@ -135,7 +135,7 @@ fn incoming_message_emits_buffer_chunks() {
     );
     let _child = ChildGuard::new(spawn_burn_inline(&source));
     assert!(
-        wait_for_listener(port, Duration::from_secs(15)),
+        wait_for_listener(port, Duration::from_secs(60)),
         "listener didn't bind on :{port}"
     );
 
@@ -193,7 +193,7 @@ fn body_parser_pattern_buffer_concat_succeeds() {
         "#
     );
     let _child = ChildGuard::new(spawn_burn_inline(&source));
-    assert!(wait_for_listener(port, Duration::from_secs(15)));
+    assert!(wait_for_listener(port, Duration::from_secs(60)));
 
     let resp = http_post(port, "/", r#"{"a":1,"b":[2,3]}"#);
     assert!(resp.starts_with("HTTP/1.1 200"), "resp:\n{resp}");

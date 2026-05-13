@@ -237,7 +237,9 @@ fn cluster_two_workers_co_bind_same_port() {
                     exits++;
                     if (exits === 2) process.exit(0);
                 }});
-                setTimeout(() => process.exit(99), 15000);
+                // 60s safety — cold CI cold-spawn + 2-worker fork
+                // + dual listen can take 40s+ on a 4-vCPU GH runner.
+                setTimeout(() => process.exit(99), 60000);
             }} else {{
                 const srv = http.createServer((req, res) => res.end('hi'));
                 srv.on('error', (e) => {{
