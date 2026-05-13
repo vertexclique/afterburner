@@ -93,8 +93,10 @@ fn bind_and_address_round_trip() {
 fn send_to_external_listener() {
     // External rust UDP listener; burn binds + sends a packet to it.
     let listener = UdpSocket::bind("127.0.0.1:0").expect("bind listener");
+    // 60s recv timeout — cold GH 4-vCPU cold-spawn of burn + plugin
+    // + dgram bind + send can take 30-45s.
     listener
-        .set_read_timeout(Some(Duration::from_secs(15)))
+        .set_read_timeout(Some(Duration::from_secs(60)))
         .ok();
     let listener_port = listener.local_addr().unwrap().port();
 
