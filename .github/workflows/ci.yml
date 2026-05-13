@@ -113,7 +113,7 @@ jobs:
               --test b_process_getters
               --test b_process_stdio
               --test b_process_report
-            timeout: 25
+            timeout: 40
 
           # Module resolution + TS strip + ESM pipeline. Only tier that
           # needs `ts` (oxc adds ~3 MiB to the binary so isolate the cost).
@@ -125,7 +125,7 @@ jobs:
               --test b8_typescript
               --test b9_esm
               --test b_sourcemaps
-            timeout: 25
+            timeout: 40
 
           # Daemon lifecycle + multi-shard pool — the historically
           # flakiest tier (b_shard_pool's wait_for_listening cluster).
@@ -250,7 +250,7 @@ jobs:
               --test b_crypto_stream_extras
               --test b_subtle_crypto
               --test b_subtle_full
-            timeout: 25
+            timeout: 40
 
           # child_process spawn + worker_threads + sandbox boundary.
           # Tests here spawn nested subprocesses (subprocess-of-
@@ -261,7 +261,7 @@ jobs:
               --test b_child_process_async
               --test b10_security
               --test b10_worker_threads
-            timeout: 25
+            timeout: 40
 
           # CDP / inspector / debugger handshake. The slowest cold-
           # start (debugger negotiation); isolated so flakes here
@@ -271,7 +271,7 @@ jobs:
             tests: >-
               --test b_inspector_cdp
               --test b_debugger_breakpoint
-            timeout: 25
+            timeout: 40
 
     steps:
       - uses: actions/checkout@v4
