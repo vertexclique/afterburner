@@ -465,7 +465,10 @@ impl DaemonRuntime {
     }
 }
 
-fn map_daemon_trap(phase: &'static str, trap: anyhow::Error) -> AfterburnerError {
+// wasmtime 44 returns its own `wasmtime::Error` from store / typed-func
+// calls; it mirrors anyhow's downcast / chain API, so the body below
+// is unchanged besides the parameter type.
+fn map_daemon_trap(phase: &'static str, trap: wasmtime::Error) -> AfterburnerError {
     // WASI `proc_exit(N)` propagates as I32Exit. `__host_process_exit`
     // triggers this via the host import that returns `Err(I32Exit(n))`.
     // Surface it as `ProcessExit` so the CLI can `std::process::exit`.

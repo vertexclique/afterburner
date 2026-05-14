@@ -3693,15 +3693,17 @@ fn wrap_transpile(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError
 // ---- process.exit --------------------------------------------------
 //
 // `host_process_exit(code)` never returns — the host traps with
-// `I32Exit(code)`, which Wasmtime surfaces as an anyhow::Error that
-// `map_daemon_trap` converts to `AfterburnerError::ProcessExit(code)`.
+// `I32Exit(code)`, which Wasmtime surfaces as a `wasmtime::Error`
+// that `map_daemon_trap` converts to `AfterburnerError::ProcessExit`.
+// wasmtime 44 host fns return `wasmtime::Result` rather than
+// `anyhow::Result`; the From impl on I32Exit covers the conversion.
 
 fn wrap_process_exit(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
     linker
         .func_wrap(
             NS,
             "host_process_exit",
-            |_caller: Caller<'_, HostState>, code: i32| -> anyhow::Result<()> {
+            |_caller: Caller<'_, HostState>, code: i32| -> wasmtime::Result<()> {
                 Err(I32Exit(code).into())
             },
         )
@@ -6149,7 +6151,12 @@ fn record(caller: &mut Caller<'_, HostState>, msg: &str) {
     caller.data_mut().last_error = msg.to_string();
 }
 
-fn link_err(e: anyhow::Error) -> AfterburnerError {
+// wasmtime 44 returns its own `wasmtime::Error` from `Linker::func_wrap`
+// (a thin wrapper around anyhow's std-error machinery). Using
+// `impl Display` here keeps the helper callable from any Display-able
+// error type, so the same `.map_err(link_err)` works whether the
+// source is wasmtime::Error, anyhow::Error, or std::io::Error.
+fn link_err<E: std::fmt::Display>(e: E) -> AfterburnerError {
     AfterburnerError::Engine(format!("linker.func_wrap: {e}"))
 }
 

@@ -782,7 +782,7 @@ impl WasmLoader {
     /// inside burn can't escape burn's overall Manifold even if
     /// `preopens` lists a path).
     pub fn run_wasi(&self, module_id: ModuleId, config_json: &str) -> Result<i32> {
-        use wasmtime_wasi::preview1::WasiP1Ctx;
+        use wasmtime_wasi::p1::WasiP1Ctx;
         use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
         let module = self.modules.get(&module_id).ok_or_else(|| {
@@ -823,7 +823,7 @@ impl WasmLoader {
         let wasi: WasiP1Ctx = builder.build_p1();
         let mut store = Store::new(&self.engine, wasi);
         let mut linker = wasmtime::Linker::<WasiP1Ctx>::new(&self.engine);
-        wasmtime_wasi::preview1::add_to_linker_sync(&mut linker, |s| s)
+        wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |s| s)
             .map_err(|e| AfterburnerError::Host(format!("WASI linker: {e}")))?;
         let instance = linker
             .instantiate(&mut store, &module.module)

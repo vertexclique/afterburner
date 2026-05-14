@@ -91,8 +91,8 @@ kovan-map = "0.1"
 kovan-channel = "0.1"
 libc = "0.2"
 
-wasmtime = { version = "36", features = ["cranelift", "cache"] }
-wasmtime-wasi = "36"
+wasmtime = { version = "44", features = ["cranelift", "cache"] }
+wasmtime-wasi = "44"
 anyhow = "1"
 
 # B2 daemon-mode HTTP server plumbing. axum/tokio/hyper are only

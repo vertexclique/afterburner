@@ -9,8 +9,8 @@ use afterburner_node_compat::sign_handles::SignHandleStore;
 use std::sync::Arc;
 use std::time::Instant;
 use wasmtime::{ResourceLimiter, StoreLimits, StoreLimitsBuilder};
+use wasmtime_wasi::p1::WasiP1Ctx;
 use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
-use wasmtime_wasi::preview1::WasiP1Ctx;
 
 /// Host-managed timer entry. Lives in `HostState::timers` and is
 /// manipulated by the `__host_timer_*` imports. The CLI event loop

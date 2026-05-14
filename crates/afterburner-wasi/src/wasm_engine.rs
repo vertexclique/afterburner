@@ -40,7 +40,7 @@ use wasmtime::{
     PoolingAllocationConfig, Store, Trap,
 };
 use wasmtime_wasi::I32Exit;
-use wasmtime_wasi::preview1::add_to_linker_sync;
+use wasmtime_wasi::p1::add_to_linker_sync;
 
 /// The custom plugin binary (Wizer-preinitialized), committed to the
 /// repo and baked into the host crate at compile time.

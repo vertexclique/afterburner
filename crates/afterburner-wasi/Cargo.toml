@@ -58,7 +58,7 @@ shadow-sharp = ["afterburner-node-compat/shadow-sharp"]
 [dependencies]
 afterburner-core.workspace = true
 wasmtime.workspace = true
-wasmtime-wasi = { workspace = true, features = ["preview1"] }
+wasmtime-wasi = { workspace = true, features = ["p1"] }
 serde.workspace = true
 serde_json.workspace = true
 kovan-map.workspace = true
